@@ -66,7 +66,9 @@ vllm-forager/
 │   ├── config.py      # Tracked repos + paths + 24h collection cadence
 │   └── collector.py   # GitHub issue/PR incremental collector (M0)
 ├── scripts/
-│   └── wait-merge.sh  # Poll a PR until merged, then sync main (dev-loop primitive)
+│   ├── wait-merge.sh  # Poll a PR until merged, then sync main (dev-loop primitive)
+│   ├── collect.sh     # Run the collector + record health (cron entrypoint)
+│   └── triage.sh      # On failure: claude -p → fix PR (human-gated self-heal)
 ├── tests/             # pytest suite (offline/deterministic)
 └── data/              # Collection output (gitignored)
 ```

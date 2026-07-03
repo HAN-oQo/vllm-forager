@@ -330,6 +330,16 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_liveness.py` — a stage emits started→heartbeat→finished with monotonic timestamps; a stale
       heartbeat is classified `stalled`; an exception path records `failed` (nothing left silently "running").
 
+- [ ] **T4.6 Collector scheduler + health** — `scripts/collect.sh` runs `python -m src.collector` on a **cron**
+      schedule (ce-master); writes `data/last_run.json` (status / exit / timestamps / error tail) + `data/logs/`.
+      *(Scaffold shipped; follow-ups: real alerting (Slack/email), optional systemd timer.)*
+      Test: `tests/test_collect_health.py` — a stubbed run writes a well-formed `last_run.json` (ok + error cases).
+- [ ] **T4.7 Self-heal triage (human-gated)** — `scripts/triage.sh`: on a collector failure run `claude -p` to
+      diagnose and — only for a code bug, clean tree, no existing `triage/*` PR — fix on a branch, add a test, and
+      **open a PR** (never merges). *(Scaffold shipped; follow-ups: dedupe by error signature, record the attempt
+      in the run / `data_quality` metric.)*
+      Test: integration (needs `claude`+`gh`); the skip-guards are shell-checkable.
+
 ## M5 — Dashboard (Firestore-backed; monitoring + trends + parity)
 
 > **Expected output:** a local web dashboard reading the KB — a **live health / "what's running now" view**

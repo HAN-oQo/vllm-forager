@@ -81,3 +81,30 @@ it stops (exit 1) instead of advancing.
 - Block force-pushes.
 
 This makes the human-in-the-loop merge **structural**, not just convention.
+
+## Scheduling the collector (run-time)
+
+Run the collector on a schedule via **cron** (simple, no sudo). `scripts/collect.sh` runs it, writes health to
+`data/last_run.json`, logs to `data/logs/`, and on failure kicks off self-heal triage.
+
+```bash
+crontab -e
+# daily at 04:07 UTC (deliberately off the hour); adjust to taste
+7 4 * * *  cd ~/vllm-forager && scripts/collect.sh >> data/logs/cron.log 2>&1
+```
+
+Cadence is 24h (`config.COLLECT_INTERVAL_HOURS`); the collector only fetches items updated since the last run
+(`data/state.json`).
+
+**Health:** `data/last_run.json` holds the last run's `status`, `exit_code`, timestamps, and (on failure) an
+`error_tail`. A quick `cat data/last_run.json` — or the M5 health panel — tells you if the last run was healthy
+and recent. "Alert" today = `status:"error"` there + a non-zero exit in `data/logs/cron.log`.
+
+**Self-heal (alert + fix PR):** on failure `collect.sh` calls `scripts/triage.sh`, which — if `claude` and `gh`
+are on PATH **and the working tree is clean** — asks `claude -p` to diagnose and, **only for a code bug**, fix it
+on a `triage/*` branch, add a test, and **open a PR** (never merges; one open triage PR at a time). You review +
+merge like any PR. Network / auth / rate-limit failures change nothing — just an explanation.
+
+> Run the scheduler from a **separate clone/worktree** than an active `/dev-loop` session so triage's git
+> operations can't collide with in-progress dev work. `claude -p` needs `claude`+`gh` authenticated for the cron
+> user; otherwise triage degrades to alert-only (the scheduled run + health still work).
