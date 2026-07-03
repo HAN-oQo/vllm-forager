@@ -1,115 +1,168 @@
-# 추론 트렌드 추적 & 자율 vLLM(ROCm) 기여 에이전트 — 프로젝트 계획
+# Inference Trend Tracking & Autonomous vLLM (ROCm) Contribution Agent — Project Plan
 
-> **한 줄 목표:** 여러 추론 서빙 레포의 이슈·PR을 **지속적으로** 추적해 추론 시장의 방향성과 핵심 기술을 정리하고, **자기 예측을 채점해 추적 기준을 스스로 진화시키며**, 그 신호로 **vLLM(ROCm) 기여 후보를 발굴 → 패치 생성·테스트 → 사람 검토 후 PR**까지 잇는 **상시 가동·자기개선 에이전트**.
+> **One-line goal:** Continuously track issues and PRs across several inference-serving repos to distill the
+> direction of the inference market and its key techniques, **grade its own predictions to evolve its tracking
+> criteria**, and use those signals to run an **always-on, self-improving agent** that goes from
+> **discovering vLLM (ROCm) contribution candidates → generating and testing patches → human review → PR**.
 >
-> **프로젝트 성격:** ① 도메인 특화 에이전트 + 자체 벤치마크(추론 서빙 / 회고 채점) · ② Open-ended · 자기진화(추적 기준 진화 + 자기 예측 채점 루프).
+> **Nature of the project:** ① A domain-specialized agent with its own benchmark (inference serving /
+> retrospective grading) · ② Open-ended, self-evolving (evolving tracking criteria + a self-prediction grading
+> loop).
 >
-> **핵심 목표:** vLLM에 **실제 PR 제출**(ROCm 경로 우선). 일회성이 아니라, 에이전트가 시간이 지나며 PR 후보를 계속 발굴·개선하는 **지속 산출물**.
+> **Core objective:** Submit **actual PRs** to vLLM (ROCm path prioritized). Not a one-off — a **continuous
+> deliverable** where the agent keeps discovering and refining PR candidates over time.
 >
-> **하드웨어:** 에이전트 런타임은 CPU로 충분(GPU 불필요). GPU(**MI250 × 3, ROCm**)는 vLLM 빌드·테스트·ROCm 버그 재현·검증에만 사용.
+> **Hardware:** The agent runtime only needs a CPU (no GPU required). The GPUs (**3x MI250, ROCm**) are used only
+> for building/testing vLLM and reproducing/verifying ROCm bugs.
 
 ---
 
-## 설계 원칙
+## Design principles
 
-1. **지속 운영·자기진화가 본질.** 한 번 만들고 끝이 아니라, 스케줄로 계속 돌며 스스로 추적 기준과 판단을 개선한다. 마일스톤은 "마감"이 아니라 "순서"다.
-2. **Human-in-the-loop 필수.** 에이전트는 "제안"까지, 업스트림 PR 최종 제출은 사람이 검토 후. 자동 PR 스팸 금지(평판 리스크).
-3. **모든 주장에 근거.** 요약·랭킹 결과에 실제 이슈/PR 링크를 인용으로 첨부.
-4. **평가 가능하게.** 에이전트의 판단(트렌드 예측·기여 후보 랭킹)은 회고 벤치마크로 정량 측정하고, 그 결과로 자기 휴리스틱을 갱신한다.
-
----
-
-## 개발 환경 & AMD/ROCm 타깃 (전략적 이점)
-
-가용 하드웨어가 MI250 3대라는 건 제약이 아니라 **차별화 포인트**다:
-
-- **덜 붐비는 니치.** vLLM의 ROCm 지원은 CUDA 경로보다 성숙도가 낮아 **미해결 갭·버그가 더 많다** = 기여 기회가 더 많다.
-- **재현 가능한 실물 하드웨어.** 많은 vLLM ROCm 이슈가 "재현할 AMD 장비가 없어서" 방치된다. MI250로 **실제 재현·테스트·검증**을 할 수 있다는 것 자체가 메인테이너가 가장 원하는 조건이고, PR 신뢰도를 크게 높인다.
-
-### 레포 가중치 (ROCm 소스는 2층 구조)
-- **`vllm-project/vllm` (업스트림 본체) — 주 타깃.** `rocm`/`amd` 라벨 이슈, ROCm 전용 빌드/커널/성능 실패를 우선 추적. **PR은 결국 여기로 제출.** "AMD Development Roadmap (2026 Q2)" 이슈(#44092)와 ROCm 로드맵을 추적하면 AMD 우선순위(예: 높은 동시성에서 SGLang/ATOM 대비 decode 성능 패리티)가 드러남 = 패리티 갭 전략의 근거.
-- **`ROCm/vllm` (AMD 공식 다운스트림 포크) — 주력 보조.** 업스트림보다 앞서 ROCm 최적화가 들어가는 곳 → **"포크엔 있고 업스트림엔 없는" 기여 기회** 발굴. 다운스트림→업스트림 포팅은 전형적 좋은 PR 패턴.
-- **SGLang** — ROCm 지원 있음 → **성능 패리티 비교 기준** + 트렌드 소스.
-- **NVIDIA Dynamo** — NVIDIA 중심 → **트렌드 레이더 전용**(방향성 파악).
-- **llm-d** — 서빙 오케스트레이션 트렌드 소스.
-
-> MI250 = gfx90a(CDNA2) → 메인라인 ROCm 경로에서 지원되므로 재현·테스트 환경으로 문제없음.
-
-### 왜 여러 레포를 보는가 (vLLM PR과의 연결)
-같은 문제(paged KV cache, continuous batching, speculative decoding, disaggregated prefill/decode, quantization/kernel)를 서로 다르게 푸는 경쟁·모방 관계라, 크로스 레포 관찰은 (1) **패리티 갭 발굴**(타 레포·포크에 있는데 업스트림엔 없는 것)과 (2) **설계 맥락·용어 습득**(거절당하지 않는 PR 작성)으로 이어진다. 단, 개별 PR 착지의 1순위 소스는 vLLM 자체 이슈·테스트·`good first issue`.
-
-### 기여 스코프 원칙 (커널 저작 제외, 재현·수정 중심)
-**하지 않는 것:** 새 GPU 커널 작성(Triton/Composable Kernel/TileLang 류), 컴파일러·그래프 최적화 엔진 레벨 작업, TensorRT류 포팅(NVIDIA 전용이라 애초에 불가). 리스크·리뷰 기간이 크고 전문성 밖.
-
-**타깃으로 삼는 것 (MI250 우위를 살리되 커널 저작 불필요):** ROCm 코드 경로의 정확성 버그(재현→수정→검증), 빌드·패키징 실패, ROCm config/feature-flag 누락, dtype·모델 지원 갭, ROCm CI/테스트 커버리지, 프로파일링으로 잡는 성능 회귀(Python/설정 레벨), `ROCm/vllm` 포크 enablement의 업스트림 포팅.
-
-즉 방향은 "새 커널 작성"이 아니라 **재현 · 디버그 · enablement · 회귀 수정**.
+1. **Continuous operation and self-evolution are the essence.** Not build-once-and-done — it keeps running on a
+   schedule and keeps improving its own tracking criteria and judgment. Milestones are an *order*, not a
+   *deadline*.
+2. **Human-in-the-loop is mandatory.** The agent only goes as far as "proposing"; a human reviews before any
+   upstream PR is finally submitted. No automated PR spam (reputation risk).
+3. **Every claim is backed by evidence.** Summaries and rankings must cite links to the actual issues/PRs.
+4. **Everything is evaluable.** The agent's judgments (trend predictions, contribution-candidate rankings) are
+   quantitatively measured via a retrospective benchmark, and the results feed back into updating its own
+   heuristics.
 
 ---
 
-## 아키텍처 (한눈에)
+## Development environment & the AMD/ROCm target (strategic advantage)
+
+Having 3 MI250s as the available hardware isn't a constraint — it's a **differentiator**:
+
+- **A less crowded niche.** vLLM's ROCm support is less mature than its CUDA path, meaning there are **more
+  unresolved gaps and bugs** = more contribution opportunities.
+- **Reproducible physical hardware.** Many vLLM ROCm issues sit unaddressed simply because "there's no AMD
+  hardware to reproduce them on." Being able to actually **reproduce, test, and verify** on MI250 is exactly what
+  maintainers want most, and it substantially boosts PR credibility.
+
+### Repo weighting (the ROCm source is a two-tier structure)
+- **`vllm-project/vllm` (upstream, main repo) — primary target.** Prioritize `rocm`/`amd`-labeled issues and
+  ROCm-specific build/kernel/performance failures. **PRs are ultimately submitted here.** Tracking the "AMD
+  Development Roadmap (2026 Q2)" issue (#44092) and the broader ROCm roadmap surfaces AMD's priorities (e.g.,
+  achieving decode-performance parity with SGLang/ATOM at high concurrency) = the basis for a parity-gap
+  strategy.
+- **`ROCm/vllm` (AMD's official downstream fork) — primary secondary source.** Where ROCm optimizations often
+  land before upstream → source for finding **"exists in the fork but not upstream"** contribution opportunities.
+  Downstream-to-upstream porting is a classic, well-received PR pattern.
+- **SGLang** — has ROCm support → a **performance-parity comparison baseline** + trend source.
+- **NVIDIA Dynamo** — NVIDIA-centric → **trend radar only** (for reading overall direction).
+- **llm-d** — a trend source for serving orchestration.
+
+> MI250 = gfx90a (CDNA2) → supported on the mainline ROCm path, so it works fine as a reproduction/test
+> environment.
+
+### Why watch multiple repos (the link back to vLLM PRs)
+These projects solve the same underlying problems (paged KV cache, continuous batching, speculative decoding,
+disaggregated prefill/decode, quantization/kernels) in different, competing/imitating ways, so cross-repo
+observation feeds into (1) **discovering parity gaps** (things present in other repos/forks but missing
+upstream) and (2) **picking up design context and terminology** (writing PRs that don't get rejected). That
+said, the primary source for landing any individual PR is vLLM's own issues, tests, and `good first issue`
+labels.
+
+### Contribution scope principles (kernel authoring excluded; focus on repro & fixes)
+**Not doing:** writing new GPU kernels (Triton/Composable Kernel/TileLang-style work), compiler/graph-optimization
+engine-level work, TensorRT-style porting (NVIDIA-only, not applicable at all). These carry high risk, long
+review cycles, and are outside the intended expertise.
+
+**Targeting (leveraging the MI250 advantage without needing to author kernels):** correctness bugs in ROCm code
+paths (reproduce → fix → verify), build/packaging failures, missing ROCm config/feature flags, dtype/model
+support gaps, ROCm CI/test coverage, performance regressions caught via profiling (Python/config-level), and
+upstream-porting of `ROCm/vllm` fork enablement work.
+
+In short, the direction is not "write new kernels" but **reproduce · debug · enable · fix regressions**.
+
+---
+
+## Architecture (at a glance)
 
 ```
-[수집기] GitHub API/GraphQL → 이슈·PR·릴리스·커밋 (vllm-project/vllm, ROCm/vllm, SGLang, Dynamo, llm-d)
+[Collector] GitHub API/GraphQL → issues, PRs, releases, commits (vllm-project/vllm, ROCm/vllm, SGLang, Dynamo, llm-d)
    ↓
-[정규화 + RAG 인덱스] 텍스트/라벨/diff 임베딩 저장
+[Normalization + RAG index] Store embeddings of text/labels/diffs
    ↓
-[분류·랭킹 에이전트] taxonomy로 주제 분류 + 중요도 스코어링 (근거 링크 첨부)
+[Classification/ranking agent] Classify by taxonomy + score importance (with cited evidence links)
    ↓
-[진화 루프] 새 카테고리 제안 / 죽은 주제 폐기 + 과거 예측 회고 채점 → 휴리스틱 갱신
+[Evolution loop] Propose new categories / retire dead topics + retrospectively grade past predictions → update heuristics
    ↓
-[기여 후보 발굴] ROCm 재현 가능 이슈 / good-first / 패리티 갭 랭킹
+[Contribution-candidate discovery] Rank ROCm-reproducible issues / good-first-issues / parity gaps
    ↓
-[패치 에이전트] 브랜치 생성 → 코드 작성 → MI250에서 테스트 → 사람에게 리뷰 요청
+[Patch agent] Create branch → write code → test on MI250 → request human review
    ↓
-[출력] 주간 리포트 + PR 후보 큐 (스케줄로 상시 갱신)
+[Output] Weekly report + PR candidate queue (continuously refreshed on a schedule)
 ```
 
-**추천 스택:** Python, GitHub REST/GraphQL API, 임베딩 + 경량 벡터스토어(pgvector 또는 LanceDB), 코딩 단계는 Claude Code/Devin류 활용. 에이전트 런타임은 CPU, vLLM 테스트만 MI250.
+**Recommended stack:** Python, GitHub REST/GraphQL API, embeddings + a lightweight vector store (pgvector or
+LanceDB), Claude Code/Devin-style tools for the coding stages. Agent runtime on CPU; MI250 used only for vLLM
+testing.
 
 ---
 
-## 진행 단계 (마일스톤 — 마감이 아니라 순서)
+## Progress stages (milestones — an order, not a deadline)
 
-각 단계는 "동작하는 산출물"을 남기고 다음으로 넘어간다. 완성 후에도 에이전트는 계속 돌며 스스로 개선한다.
+Each stage leaves behind a "working deliverable" before moving to the next. Even after completion, the agent
+keeps running and keeps improving itself.
 
-**M0 — 기반: 수집 + 베이스라인 요약**
-4개 소스를 GitHub API로 수집·저장하는 스케줄러 + RAG 인덱스. 고정 taxonomy로 분류만 하는 v0 주간 요약 리포트(항목마다 PR 링크 인용). ← *현재 리포는 여기 수집기 뼈대까지 구현됨.*
+**M0 — Foundation: collection + baseline summary**
+A scheduler + RAG index that collects and stores data from the 4 sources via the GitHub API. A v0 weekly summary
+report that classifies using a fixed taxonomy only (each item cites its PR link). ← *The repo currently has the
+collector skeleton implemented up to this point.*
 
-**M1 — 자기진화 루프 (차별점)**
-taxonomy 자기진화(새 카테고리 제안 / 죽은 주제 폐기) + 자기 예측 로깅("이 PR/기법이 중요해질 것"을 타임스탬프와 함께 저장).
+**M1 — Self-evolution loop (the differentiator)**
+Taxonomy self-evolution (propose new categories / retire dead topics) + self-prediction logging (store
+predictions like "this PR/technique will become important," timestamped).
 
-**M2 — 평가 + 기여 후보 발굴**
-회고 벤치마크(과거 예측 vs 실제 결과 대조 → 정밀도/재현율 → 휴리스틱 갱신) + vLLM 기여 후보 랭킹(ROCm 재현 가능 이슈·`good first issue`·패리티 갭, 위험도순).
+**M2 — Evaluation + contribution-candidate discovery**
+A retrospective benchmark (compare past predictions vs. actual outcomes → precision/recall → update heuristics)
++ vLLM contribution-candidate ranking (ROCm-reproducible issues · `good first issue` · parity gaps, ranked by
+risk).
 
-**M3 — 첫 기여: 패치 → 사람 검토 → 실제 vLLM PR**
-낮은 위험 후보부터 패치 생성 → MI250 테스트 → 사람 리뷰 게이트 → 업스트림 PR. 목표: 실제 PR 제출(문서/타입/테스트/ROCm 소버그면 충분).
+**M3 — First contribution: patch → human review → actual vLLM PR**
+Starting from the lowest-risk candidates: generate a patch → test on MI250 → human review gate → upstream PR.
+Goal: get an actual PR submitted (docs/typing/tests/small ROCm bugs are sufficient to start).
 
-**M4 — 지속 자율 운영**
-스케줄로 상시 가동: 주간 리포트 + PR 후보 큐가 계속 갱신되고, 자기 예측 채점 결과로 스코어링이 지속 개선된다.
-
----
-
-## 사람 검토 게이트 — 구현 방식
-- **기본(권장, 추가 개발 0):** `gh` CLI + 내 fork의 draft PR + GitHub diff 뷰. 에이전트가 패치를 내 fork 브랜치에 커밋 → `gh pr create --draft` → GitHub diff 화면에서 확인 → 승인 시 업스트림 vLLM으로 승격. 보조: VS Code/Cursor diff, GitHub Desktop, 터미널은 `delta`.
-- **스트레치(여유 시):** 후보 패치를 한 곳에서 훑는 로컬 웹 검토 대시보드(위험도 배지 + diff 미리보기 + 승인/보류 버튼).
-- ⚠️ 업스트림에는 **사람 승인 후에만** 올린다.
-
----
-
-## 시작하기 (첫 스텝)
-
-1. **공개 GitHub 리포 생성.** README에 목표·아키텍처 스케치부터.
-2. **MI250에 vLLM(ROCm) 빌드 1회 성공.** 나중의 모든 "재현·검증"의 전제.
-3. **최소 수집기.** `vllm-project/vllm` + `ROCm/vllm` 이슈를 GitHub API로 당겨 로컬 저장. ← *구현됨 (`src/collector.py`)*
-4. **베이스라인 요약 1건.** 근거 링크 포함한 주간 요약을 손으로 한 번 만들어보고, 그걸 에이전트가 재현하게 한다.
-5. **스케줄러 연결.** 매일/매주 자동 실행 → "상시 가동" 시작. 이후 M1 진화 루프를 얹는다.
+**M4 — Sustained autonomous operation**
+Always-on via schedule: the weekly report and PR-candidate queue keep refreshing, and scoring keeps improving
+based on self-prediction grading results.
 
 ---
 
-## 리스크 & 대응
-- **자동 PR 스팸 우려** → 사람 검토 게이트 고정, 저위험 PR부터.
-- **ROCm 빌드/환경 함정** → 환경 검증을 M0에서 먼저 끝냄, 컨테이너로 재현성 확보.
-- **GitHub API rate limit** → 인증 토큰 + 증분 수집(캐시).
-- **범위 폭주** → 단계별 "동작하는 산출물" 고정, 커널 저작 등 고난도는 스코프 밖으로.
-- **머지 실패 가능성** → 머지 여부와 무관하게 "에이전트 + 벤치마크 + 오픈 PR + 데모"가 핵심 자산.
+## Human review gate — implementation approach
+- **Default (recommended, zero extra development):** `gh` CLI + a draft PR on my fork + the GitHub diff view.
+  The agent commits patches to a branch on my fork → `gh pr create --draft` → review via the GitHub diff screen
+  → promote to the upstream vLLM repo once approved. Supplementary tools: VS Code/Cursor diff, GitHub Desktop,
+  `delta` in the terminal.
+- **Stretch (if there's spare time):** a local web review dashboard that surfaces candidate patches in one place
+  (risk badges + diff preview + approve/hold buttons).
+- ⚠️ Nothing goes upstream **without human approval first.**
+
+---
+
+## Getting started (first steps)
+
+1. **Create a public GitHub repo.** Start the README with the goal and an architecture sketch.
+2. **Get one successful vLLM (ROCm) build on MI250.** The prerequisite for every later "reproduce and verify"
+   step.
+3. **Minimal collector.** Pull `vllm-project/vllm` + `ROCm/vllm` issues via the GitHub API into local storage.
+   ← *Implemented (`src/collector.py`)*
+4. **One baseline summary.** Hand-write a single weekly summary with cited evidence links once, then have the
+   agent learn to reproduce it.
+5. **Wire up the scheduler.** Run automatically daily/weekly → this is where "always-on" actually starts. Layer
+   the M1 evolution loop on top after that.
+
+---
+
+## Risks & mitigations
+- **Risk of automated PR spam** → fixed human review gate, start with the lowest-risk PRs.
+- **ROCm build/environment pitfalls** → finish environment validation early in M0; use containers for
+  reproducibility.
+- **GitHub API rate limits** → auth token + incremental collection (caching).
+- **Scope creep** → lock in a "working deliverable" at each stage; keep high-difficulty work like kernel
+  authoring explicitly out of scope.
+- **Possibility that a PR never merges** → regardless of merge outcome, "agent + benchmark + open PR + demo" is
+  the core asset.

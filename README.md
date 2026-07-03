@@ -1,42 +1,43 @@
 # vllm-forager
 
-> autonomous vLLM/ROCm contributor — 기여 포인트를 끊임없이 탐색(forage)해 고쳐 되돌려주길 반복한다.
+> autonomous vLLM/ROCm contributor — continuously forages for contribution opportunities, fixes them, and gives back.
 
-vLLM을 **ROCm(MI250) 위에서 지속적으로 발전시키는 자율 기여 에이전트**.
-추론 서빙 생태계(vLLM · SGLang · NVIDIA Dynamo · llm-d)의 이슈·PR을 **지속적으로** 추적해
-추론 시장의 방향성과 핵심 기술을 정리하고, **자기 예측을 채점해 추적 기준을 스스로 진화시키며**,
-그 신호로 **vLLM(ROCm) 기여 후보를 발굴 → 패치 생성·테스트 → 사람 검토 후 PR**까지 잇는
-상시 가동·자기개선 에이전트.
+An **autonomous agent that continuously advances vLLM on ROCm (MI250)**.
+It continuously tracks issues and PRs across the inference-serving ecosystem (vLLM · SGLang · NVIDIA Dynamo · llm-d)
+to map out the direction of the inference market and its key techniques, **grades its own predictions to evolve its
+tracking criteria**, and uses those signals to run an always-on, self-improving loop that goes from
+**discovering vLLM (ROCm) contribution candidates → generating and testing patches → human review → PR**.
 
-> 상태: **M0 (bootstrapping)** — 수집기 뼈대 단계.
+> Status: **M0 (bootstrapping)** — collector skeleton stage.
 
-## 왜 ROCm
+## Why ROCm
 
-가용 하드웨어가 MI250 × 3 (AMD Instinct, ROCm). vLLM의 ROCm 경로는 CUDA보다 성숙도가 낮아
-미해결 갭·버그가 더 많고, 재현할 AMD 장비가 없어 방치된 이슈가 많다 → **실물 하드웨어가 곧 진입장벽이자 우위**.
+Available hardware is 3x MI250 (AMD Instinct, ROCm). vLLM's ROCm path is less mature than CUDA, so it has more
+unresolved gaps and bugs, and many issues are left unaddressed because there's no AMD hardware to reproduce them on
+→ **having real hardware is both the barrier to entry and the edge.**
 
-- 에이전트 런타임: **CPU면 충분**(GPU 불필요).
-- MI250은 **vLLM 빌드·테스트·ROCm 버그 재현/검증에만** 사용.
+- Agent runtime: **CPU is enough** (no GPU needed).
+- MI250 is used **only for building/testing vLLM and reproducing/verifying ROCm bugs.**
 
-## 빠른 시작
+## Quick start
 
 ```bash
-# 1) 가상환경
+# 1) Virtual environment
 python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
 
-# 2) GitHub 토큰 설정 (rate limit 회피 + private 접근)
+# 2) Configure GitHub token (avoid rate limits + access private repos)
 cp .env.example .env
-# .env 를 열어 GITHUB_TOKEN 채우기 (repo, read 권한 PAT)
+# open .env and fill in GITHUB_TOKEN (PAT with repo, read access)
 
-# 3) 최소 수집기 1회 실행 → data/*.jsonl 생성
+# 3) Run the minimal collector once → generates data/*.jsonl
 python -m src.collector
 
-# 4) 증분 수집 (state 기준으로 updated 이후만)
+# 4) Incremental collection (only items updated since last run, based on state)
 python -m src.collector
 ```
 
-## 리포 구조
+## Repo structure
 
 ```
 vllm-forager/
@@ -44,16 +45,16 @@ vllm-forager/
 ├── requirements.txt
 ├── .env.example
 ├── docs/
-│   ├── PLAN.md        # 프로젝트 계획 (마일스톤 M0~M4)
-│   └── CONTEXT.md     # 설계 결정 로그 — 작업 재개용 컨텍스트
+│   ├── PLAN.md        # Project plan (milestones M0-M4)
+│   └── CONTEXT.md     # Design decision log — context for resuming work
 ├── src/
 │   ├── __init__.py
-│   ├── config.py      # 추적 대상 레포·경로 설정
-│   └── collector.py   # GitHub 이슈/PR 증분 수집기 (M0)
-└── data/              # 수집 결과 (gitignore)
+│   ├── config.py      # Tracked repos and path configuration
+│   └── collector.py   # GitHub issue/PR incremental collector (M0)
+└── data/              # Collection output (gitignored)
 ```
 
-## 다음 단계
+## Next steps
 
-`docs/PLAN.md`의 마일스톤 순서대로. 우선 M0 = 수집 + 베이스라인 요약.
-설계 배경과 지금까지의 의사결정은 `docs/CONTEXT.md` 참고.
+Follow the milestone order in `docs/PLAN.md`. M0 = collection + baseline summary comes first.
+See `docs/CONTEXT.md` for design background and decisions made so far.

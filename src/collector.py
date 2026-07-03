@@ -1,16 +1,16 @@
-"""M0 최소 수집기 — GitHub 이슈/PR 증분 수집.
+"""M0 minimal collector — incremental collection of GitHub issues/PRs.
 
-GitHub REST API의 `GET /repos/{owner}/{repo}/issues` 를 사용한다.
-이 엔드포인트는 이슈 + PR을 함께 반환하며(PR은 `pull_request` 키 존재),
-`since` 파라미터로 updated_at 이후만 증분 수집할 수 있다.
+Uses the GitHub REST API endpoint `GET /repos/{owner}/{repo}/issues`.
+This endpoint returns issues and PRs together (PRs have a `pull_request` key), and the
+`since` parameter allows incremental collection of items updated after a given time.
 
-- 결과는 레포별 JSONL(data/{owner}__{repo}.jsonl)에 append 대신 upsert(재작성).
-- 마지막 수집 시각은 data/state.json 에 레포별로 저장 → 다음 실행은 그 이후만.
-- GITHUB_TOKEN 있으면 rate limit 60→5000/hr.
+- Results are upserted (rewritten), not appended, into a per-repo JSONL (data/{owner}__{repo}.jsonl).
+- The last collection time is stored per repo in data/state.json → the next run only fetches items after it.
+- With GITHUB_TOKEN set, the rate limit goes from 60 to 5000/hr.
 
-사용:
-    python -m src.collector            # 전체 레포 증분 수집
-    python -m src.collector --full     # state 무시하고 INITIAL_SINCE 부터
+Usage:
+    python -m src.collector            # incremental collection for all repos
+    python -m src.collector --full     # ignore state and start from INITIAL_SINCE
 """
 from __future__ import annotations
 
@@ -26,7 +26,7 @@ import requests
 try:
     from dotenv import load_dotenv
     load_dotenv()
-except Exception:  # python-dotenv 미설치여도 동작
+except Exception:  # works even if python-dotenv isn't installed
     pass
 
 from . import config
@@ -58,7 +58,7 @@ def _save_state(state: dict) -> None:
 
 
 def _sleep_for_rate_limit(resp: requests.Response) -> bool:
-    """rate limit에 걸리면 reset까지 대기. 대기했으면 True."""
+    """Wait until reset if we hit the rate limit. Returns True if we waited."""
     if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
         reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
         wait = max(reset - int(time.time()), 0) + 1
@@ -69,7 +69,7 @@ def _sleep_for_rate_limit(resp: requests.Response) -> bool:
 
 
 def fetch_repo(slug: str, since: str) -> list[dict]:
-    """slug(owner/repo)의 이슈+PR을 since(updated) 이후로 전부 가져온다."""
+    """Fetch all issues + PRs for slug (owner/repo) updated after `since`."""
     owner, repo = slug.split("/", 1)
     url = f"{API}/repos/{owner}/{repo}/issues"
     params = {
@@ -86,7 +86,7 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
         if _sleep_for_rate_limit(resp):
             continue
         if resp.status_code == 404:
-            print(f"  !! {slug} 404 — slug 확인 필요", file=sys.stderr)
+            print(f"  !! {slug} 404 — check the slug", file=sys.stderr)
             break
         resp.raise_for_status()
         batch = resp.json()
@@ -101,7 +101,7 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
 
 
 def _normalize(it: dict, slug: str) -> dict:
-    """수집 스키마 최소 정규화. 나중 RAG/분류에서 확장."""
+    """Minimal normalization of the collection schema. Extended later in RAG/classification."""
     return {
         "repo": slug,
         "number": it.get("number"),
@@ -117,7 +117,7 @@ def _normalize(it: dict, slug: str) -> dict:
 
 
 def _merge_jsonl(path, records: list[dict]) -> int:
-    """number 기준 upsert 후 재작성. 반환: 총 레코드 수."""
+    """Upsert by `number` then rewrite. Returns the total record count."""
     existing: dict[int, dict] = {}
     if path.exists():
         for line in path.read_text().splitlines():
@@ -133,7 +133,7 @@ def _merge_jsonl(path, records: list[dict]) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--full", action="store_true", help="state 무시하고 INITIAL_SINCE부터")
+    ap.add_argument("--full", action="store_true", help="ignore state and start from INITIAL_SINCE")
     args = ap.parse_args()
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -141,7 +141,7 @@ def main() -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if not os.getenv("GITHUB_TOKEN"):
-        print("경고: GITHUB_TOKEN 없음 — rate limit 60/hr. .env 설정 권장.", file=sys.stderr)
+        print("warning: no GITHUB_TOKEN — rate limit 60/hr. Setting up .env is recommended.", file=sys.stderr)
 
     for repo in config.REPOS:
         slug = repo["slug"]
@@ -151,7 +151,7 @@ def main() -> None:
         out_path = config.DATA_DIR / (slug.replace("/", "__") + ".jsonl")
         total = _merge_jsonl(out_path, records)
         state[slug] = now
-        print(f"  +{len(records)} updated · 총 {total}건 → {out_path.name}")
+        print(f"  +{len(records)} updated · {total} total → {out_path.name}")
 
     _save_state(state)
     print("done.")

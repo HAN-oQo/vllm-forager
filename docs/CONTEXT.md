@@ -1,58 +1,67 @@
-# CONTEXT — 설계 결정 로그 (작업 재개용)
+# CONTEXT — Design Decision Log (for resuming work)
 
-이 문서는 프로젝트 착수 전 브레인스토밍에서 확정한 결정들을 정리한 것이다.
-CPU 노드에서 작업을 이어가거나, AI 어시스턴트에게 컨텍스트를 넘길 때 이 파일을 먼저 읽으면 된다.
+This document summarizes the decisions finalized during pre-project brainstorming.
+Read this file first when resuming work on a CPU node, or when handing context to an AI assistant.
 
-## 프로젝트 한 줄 요약
-추론 서빙 레포들의 이슈·PR을 상시 추적 → 트렌드 정리 + 자기 예측 채점으로 추적 기준을 진화 →
-그 신호로 vLLM(ROCm) 기여 후보 발굴 → 패치 생성/테스트 → **사람 검토 후 실제 PR**까지 잇는 자기개선 에이전트.
+## One-line project summary
+Continuously track issues/PRs across inference-serving repos → distill trends + evolve tracking criteria by
+grading its own predictions → use those signals to discover vLLM (ROCm) contribution candidates → generate/test
+patches → a self-improving agent that goes all the way to **an actual PR after human review**.
 
-## 확정된 핵심 결정
+## Confirmed core decisions
 
-1. **타깃 플랫폼 = AMD/ROCm (CUDA 아님).**
-   이유: 가용 하드웨어가 MI250 × 3. ROCm 경로는 CUDA보다 미성숙 → 기여 기회 많고 경쟁 적음.
-   재현 장비가 있다는 것 자체가 방치된 ROCm 이슈에 대한 우위.
+1. **Target platform = AMD/ROCm (not CUDA).**
+   Reason: available hardware is 3x MI250. The ROCm path is less mature than CUDA → more contribution
+   opportunities and less competition. Having reproduction hardware is itself an edge on neglected ROCm issues.
 
-2. **하드웨어 역할 분리.**
-   - 에이전트 런타임(수집·RAG·분류·진화·패치생성 코드) = **CPU 노드로 개발 시작**.
-   - MI250 = vLLM 빌드 검증(초반 1회) + 패치 테스트/버그 재현(M3) 때만 사용.
+2. **Hardware role separation.**
+   - Agent runtime (collection · RAG · classification · evolution · patch-generation code) = **start development
+     on a CPU node.**
+   - MI250 is used only for validating the vLLM build (once, early on) + patch testing/bug reproduction (M3).
 
-3. **추적 대상 레포 (가중치 있음).**
-   - `vllm-project/vllm` — 주 타깃, PR 제출처. ROCm/AMD 라벨 우선. 로드맵 이슈 #44092 추적.
-   - `ROCm/vllm` — AMD 공식 다운스트림 포크. 업스트림 포팅 기회 발굴.
-   - `sgl-project/sglang` — 성능 패리티 비교 + 트렌드.
-   - `ai-dynamo/dynamo` (NVIDIA Dynamo) — 트렌드 레이더 전용.
-   - `llm-d/llm-d` — 서빙 오케스트레이션 트렌드.
-   > 정확한 레포 slug는 `src/config.py`에서 확인·조정할 것.
+3. **Tracked repos (weighted).**
+   - `vllm-project/vllm` — primary target, where PRs get submitted. Prioritize ROCm/AMD-labeled issues. Track
+     the roadmap issue #44092.
+   - `ROCm/vllm` — AMD's official downstream fork. Source for upstream-porting opportunities.
+   - `sgl-project/sglang` — performance-parity comparison + trend source.
+   - `ai-dynamo/dynamo` (NVIDIA Dynamo) — trend radar only.
+   - `llm-d/llm-d` — serving-orchestration trend source.
+   > Check/adjust exact repo slugs in `src/config.py`.
 
-4. **기여 스코프 — 커널 저작 제외.**
-   하지 않음: 새 GPU 커널(Triton/CK/TileLang), 컴파일러/그래프 최적화, TensorRT 포팅(NVIDIA 전용, 불가).
-   함: 재현·디버그·enablement·회귀 수정 — 정확성 버그, 빌드/패키징, config·feature-flag 갭,
-   dtype·모델 지원, ROCm CI/테스트, Python/설정 레벨 성능 회귀, 포크→업스트림 포팅.
+4. **Contribution scope — kernel authoring excluded.**
+   Won't do: new GPU kernels (Triton/CK/TileLang), compiler/graph-optimization work, TensorRT porting
+   (NVIDIA-only, not applicable).
+   Will do: reproduction · debugging · enablement · regression fixes — correctness bugs, build/packaging,
+   config/feature-flag gaps, dtype/model support, ROCm CI/tests, Python/config-level performance regressions,
+   fork-to-upstream porting.
 
-5. **사람 검토 게이트.**
-   기본은 `gh` CLI + 내 fork의 draft PR + GitHub diff 뷰(추가 개발 0). 승인 후에만 업스트림 PR.
-   커스텀 검토 대시보드는 스트레치(핵심 루프 자리 잡은 뒤).
+5. **Human review gate.**
+   Default: `gh` CLI + a draft PR on my fork + the GitHub diff view (zero extra development). Only opens an
+   upstream PR after approval. A custom review dashboard is a stretch goal (once the core loop is established).
 
-6. **자기진화 = 이 프로젝트의 차별점.**
-   - taxonomy 자기진화: PR 흐름 보고 새 카테고리 제안 / 죽은 주제 폐기.
-   - 자기 예측 채점: "이게 중요해질 것" 예측을 저장 → 나중 실제 결과와 대조 → 스코어링 갱신.
+6. **Self-evolution = this project's differentiator.**
+   - Taxonomy self-evolution: propose new categories / retire dead topics based on observed PR activity.
+   - Self-prediction grading: log predictions like "this will become important" → compare against actual
+     outcomes later → update scoring.
 
-7. **의도적으로 뺀 것.**
-   - MCP/A2A 컴포넌트: 억지로 넣지 않음(핵심 흐리지 않기 위해). 여유 시 자체 MCP 서버 1개만 가볍게.
-   - "4주 마감" 프레임: 상시 가동·자기진화 컨셉과 안 맞아 마일스톤(M0~M4, 순서) 방식으로.
+7. **Deliberately left out.**
+   - MCP/A2A components: not forced in (to avoid diluting the core loop). Maybe one lightweight custom MCP
+     server if there's spare time.
+   - "4-week deadline" framing: doesn't fit the always-on, self-evolving concept, so milestones (M0-M4, ordered)
+     are used instead.
 
-## 진행 상태
-- **M0 (bootstrapping)** — 리포 뼈대 + 최소 GitHub 수집기(`src/collector.py`)까지 구현.
-- 다음: 수집 결과로 베이스라인 주간 요약 → M1 진화 루프.
+## Progress
+- **M0 (bootstrapping)** — repo skeleton + minimal GitHub collector (`src/collector.py`) implemented.
+- Next: baseline weekly summary from collected data → M1 evolution loop.
 
-## 열린 질문 / 다음에 결정할 것
-- 임베딩·벡터스토어 선택(pgvector vs LanceDB).
-- 요약/분류에 쓸 LLM(로컬 vs API) 및 프롬프트 구조.
-- 회고 벤치마크의 "중요해졌다" 판정 기준(머지 여부 / 릴리스 반영 / 타 레포 확산).
-- 스케줄 주기(매일 수집 / 매주 리포트).
+## Open questions / decisions for later
+- Embedding/vector store choice (pgvector vs LanceDB).
+- Which LLM to use for summarization/classification (local vs API) and the prompt structure.
+- Criteria for "became important" in the retrospective benchmark (merged / shipped in a release / adopted by
+  other repos).
+- Schedule cadence (daily collection / weekly report).
 
-## 재개 방법
-1. `docs/PLAN.md`로 전체 그림 확인, 이 파일로 결정 배경 확인.
-2. `README.md` 빠른 시작대로 수집기 1회 실행 → `data/*.jsonl` 확인.
-3. M1(진화 루프)부터 이어서 구현.
+## How to resume
+1. Check `docs/PLAN.md` for the big picture, and this file for the reasoning behind decisions.
+2. Follow the Quick Start in `README.md` to run the collector once → check `data/*.jsonl`.
+3. Continue implementation starting from M1 (evolution loop).
