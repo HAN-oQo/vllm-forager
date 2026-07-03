@@ -110,6 +110,24 @@ on failure classifies (transient → wait for next cycle; real bug → fix on a 
 session up). For a truly fresh session per cycle instead, have cron/systemd launch `claude -p "/collect-loop"`
 every N hours.
 
+### Running dev-loop and collect-loop together (no collisions)
+
+Both loops do `git checkout main && git pull` and create branches, so they **can't share one working tree**.
+Give the collector its **own clone** — simplest, since each has an independent `main`, `data/`, and branch state:
+
+```bash
+# on ce-master — a second clone just for collection
+gh repo clone HAN-oQo/vllm-forager ~/vllm-forager-collect
+cd ~/vllm-forager-collect
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt
+cp ~/vllm-forager/.env .env          # GITHUB_TOKEN
+tmux new -s collect                  # then: claude → Shift+Tab → /loop 6h /collect-loop
+```
+
+Keep `/dev-loop` in the original `~/vllm-forager` (tmux `dev`). Both push to the same origin and their branches
+never overlap (`t*` vs `triage/*`). A `git worktree` also isolates the tree, but two worktrees can't both check
+out `main` (which both loops want between cycles) — so a **separate clone is the robust choice** here.
+
 ## Scheduling the collector (run-time, simpler fallback)
 
 *(No live Claude session — cheaper and dead-simple, but self-heal is only best-effort. Prefer `/collect-loop`
