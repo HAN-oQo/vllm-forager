@@ -22,11 +22,14 @@ class Store(ABC):
     """Abstract KB store: a set of items (issues/PRs) plus a small state key-value map."""
 
     @abstractmethod
-    def upsert_items(self, items: list[dict]) -> int:
+    def upsert_items(self, items: list[dict]) -> dict[str, int]:
         """Insert-or-update `items`, matched on their (repo, number).
 
         Items may span multiple repos; the backend routes each to the right place.
-        Returns the number of items upserted (i.e. ``len(items)``).
+        Returns ``{repo: total_item_count}`` for **each repo touched** — the post-upsert
+        total for that repo, so a caller (e.g. the collector's progress log) never needs a
+        second full read to report it. Repos with no items in the batch are absent from the
+        map; an empty `items` returns ``{}``.
         """
 
     @abstractmethod

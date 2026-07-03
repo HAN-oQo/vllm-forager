@@ -192,10 +192,11 @@ def main() -> None:
         except Exception as exc:  # isolate: one repo's failure must not abort the rest
             print(f"  !! {slug} failed: {exc} — skipping (cursor preserved)", file=sys.stderr)
             continue
-        store.upsert_items(records)
-        total = len(store.query(repo=slug))
+        totals = store.upsert_items(records)  # {repo: post-upsert total} — no re-read needed
         store.set_state(slug, now)  # persist progress per repo so a later failure can't lose it
-        print(f"  +{len(records)} updated · {total} total → {slug.replace('/', '__')}.jsonl")
+        # `slug` is absent from totals only when there were no records to write this cycle.
+        total_str = f" · {totals[slug]} total" if slug in totals else ""
+        print(f"  +{len(records)} updated{total_str} → {slug.replace('/', '__')}.jsonl")
 
     print("done.")
 

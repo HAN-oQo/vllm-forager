@@ -35,19 +35,24 @@ def _item(repo: str, number: int, **overrides) -> dict:
 
 def test_upsert_and_get_item(tmp_path):
     store = JsonlStore(tmp_path)
-    assert store.upsert_items([_item("o/r", 1), _item("o/r", 2)]) == 2
+    # upsert_items returns {repo: post-upsert total}
+    assert store.upsert_items([_item("o/r", 1), _item("o/r", 2)]) == {"o/r": 2}
     assert store.get_item("o/r", 1)["title"] == "t1"
     assert store.get_item("o/r", 99) is None  # absent → None
 
-    # upsert is keyed on (repo, number): re-upserting #1 overwrites, doesn't duplicate.
-    store.upsert_items([_item("o/r", 1, title="updated")])
+    # upsert is keyed on (repo, number): re-upserting #1 overwrites, doesn't duplicate,
+    # so the returned total stays 2 (not 3).
+    assert store.upsert_items([_item("o/r", 1, title="updated")]) == {"o/r": 2}
     assert store.get_item("o/r", 1)["title"] == "updated"
     assert len(store.query(repo="o/r")) == 2
+
+    assert store.upsert_items([]) == {}  # empty batch → empty map, no files touched
 
 
 def test_upsert_routes_items_by_repo(tmp_path):
     store = JsonlStore(tmp_path)
-    store.upsert_items([_item("o/a", 1), _item("o/b", 1)])
+    # per-repo totals come back keyed by repo
+    assert store.upsert_items([_item("o/a", 1), _item("o/b", 1)]) == {"o/a": 1, "o/b": 1}
     # one JSONL file per repo; the "/" becomes "__"
     assert (tmp_path / "o__a.jsonl").exists()
     assert (tmp_path / "o__b.jsonl").exists()
@@ -96,6 +101,22 @@ def test_query_ordered_by_updated_at(tmp_path):
 def test_query_empty_dir(tmp_path):
     # querying before anything is written must not raise (glob over an empty/absent dir)
     assert JsonlStore(tmp_path / "nope").query() == []
+
+
+def test_read_tolerates_corrupt_and_numberless_lines(tmp_path):
+    # A damaged file (a truncated line + a valid-JSON line missing `number`) must not abort
+    # the read: the bad lines are skipped and the good record survives / self-heals.
+    store = JsonlStore(tmp_path)
+    path = tmp_path / "o__r.jsonl"
+    path.write_text(
+        '{"repo": "o/r", "number": 1, "updated_at": "2025-01-01T00:00:00Z"}\n'
+        '{"repo": "o/r", "titl\n'  # truncated → JSONDecodeError, skipped
+        '{"repo": "o/r", "noNumber": true}\n'  # valid JSON but no number, skipped
+    )
+    assert [i["number"] for i in store.query(repo="o/r")] == [1]
+    # a later upsert rewrites the file cleanly with only the salvageable records
+    assert store.upsert_items([_item("o/r", 2)]) == {"o/r": 2}
+    assert {i["number"] for i in store.query(repo="o/r")} == {1, 2}
 
 
 # --------------------------------------------------------------------- state cursor

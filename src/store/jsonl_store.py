@@ -44,6 +44,11 @@ def _read_items(path: Path) -> dict[int, dict]:
             except json.JSONDecodeError as exc:
                 print(f"  !! {path.name}:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
                 continue
+            # A syntactically-valid line without `number` can't be keyed — skip it too,
+            # rather than let one bad record KeyError-abort the whole read.
+            if "number" not in rec:
+                print(f"  !! {path.name}:{lineno} skipping line with no 'number'", file=sys.stderr)
+                continue
             items[rec["number"]] = rec
     return items
 
@@ -77,9 +82,15 @@ def load_state(state_path: Path) -> dict:
 
 
 def save_state(state_path: Path, state: dict) -> None:
-    """Persist the whole state map to `state_path` (creating the parent dir if needed)."""
+    """Persist the whole state map to `state_path` (creating the parent dir if needed).
+
+    Written atomically (temp file + rename), like the item files, so an interrupted write
+    can't leave a truncated ``state.json`` that would crash the next run's ``load_state``.
+    """
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    state_path.write_text(json.dumps(state, indent=2))
+    tmp = state_path.with_suffix(state_path.suffix + ".tmp")
+    tmp.write_text(json.dumps(state, indent=2))
+    tmp.replace(state_path)
 
 
 # ----------------------------------------------------------------------------- the store
@@ -97,15 +108,17 @@ class JsonlStore(Store):
         return self.data_dir / (repo.replace("/", "__") + ".jsonl")
 
     # -- items ------------------------------------------------------------------
-    def upsert_items(self, items: list[dict]) -> int:
-        """Group `items` by repo and upsert each group into its JSONL file."""
+    def upsert_items(self, items: list[dict]) -> dict[str, int]:
+        """Group `items` by repo and upsert each group into its JSONL file.
+
+        Returns ``{repo: post_upsert_total}`` from each ``merge_jsonl`` call, so the caller
+        gets the per-repo totals without re-reading the (potentially large) files.
+        """
         self.data_dir.mkdir(parents=True, exist_ok=True)
         by_repo: dict[str, list[dict]] = defaultdict(list)
         for it in items:
             by_repo[it["repo"]].append(it)
-        for repo, recs in by_repo.items():
-            merge_jsonl(self._path_for(repo), recs)
-        return len(items)
+        return {repo: merge_jsonl(self._path_for(repo), recs) for repo, recs in by_repo.items()}
 
     def get_item(self, repo: str, number: int) -> dict | None:
         return _read_items(self._path_for(repo)).get(number)
