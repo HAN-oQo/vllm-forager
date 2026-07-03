@@ -51,15 +51,17 @@ vllm-forager/
 ├── .env.example
 ├── .claude/
 │   └── settings.json  # Shared permissions allowlist (applies to every session)
-├── .github/workflows/
-│   └── ci.yml         # CI merge gate: pre-commit + pytest
+├── .github/
+│   ├── workflows/ci.yml          # CI merge gate: pre-commit + pytest
+│   └── PULL_REQUEST_TEMPLATE.md  # PR checklist (test green · pre-commit · /code-review)
 ├── docs/
 │   ├── PLAN.md        # Project plan + architecture (milestones M0-M5)
 │   ├── DEVPLAN.md     # Resumable Milestone → to-do checklist (each todo has a test)
 │   ├── CONTEXT.md     # Design decision log
 │   ├── SURVEY_RSI.md  # Prior-art survey: recursive self-improvement / self-evolving agents
 │   ├── IDEAS.md       # Idea backlog → next-version roadmap
-│   └── RUNBOOK.md     # How to operate the dev loop (tmux; PR → human merge → poll)
+│   ├── RUNBOOK.md     # How to operate the dev loop (tmux; PR → human merge → poll)
+│   └── CONTRIBUTING.md # Git & code-review rules (PR=one todo; /code-review --comment; human merge)
 ├── src/
 │   ├── config.py      # Tracked repos + paths + 24h collection cadence
 │   └── collector.py   # GitHub issue/PR incremental collector (M0)
