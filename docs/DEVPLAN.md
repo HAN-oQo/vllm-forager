@@ -10,18 +10,23 @@
 1. Read `docs/CONTEXT.md` (why) and `docs/PLAN.md` (architecture), then this file (what next).
 2. Set up env once:
    ```bash
-   python -m venv .venv && source .venv/bin/activate
-   pip install -r requirements-dev.txt        # runtime + test deps
+   python -m venv .venv && source .venv/bin/activate   # activate! the tools/hooks live in here
+   pip install -r requirements-dev.txt                 # runtime + test + lint/format/type deps
+   pre-commit install                                  # install the git commit hook
    ```
-3. Run the suite — **everything already checked below must stay green**:
+3. Run the suite + checks — **everything already checked below must stay green**:
    ```bash
-   .venv/bin/python -m pytest
+   pytest                       # full offline suite
+   pytest -m m0                 # just one milestone's tests (markers: m0, m0_6, m1 … m5)
+   pre-commit run --all-files   # black + ruff + mypy + hygiene (venv must be activated)
    ```
-4. Find the **first unchecked `[ ]`** top-to-bottom. That is the next task.
-5. Work one task: **write code → write/adjust its named test → `pytest` green → check the box → commit.**
-6. **HARD RULE: never check a box unless its named test passes.** Partial work stays `[ ]` with a `> note:`.
-   Integration tasks that can't be unit-tested (real PR, hardware) say so and are checked only when the
-   named evidence (a PR URL, a captured log) is pasted under the task.
+4. Find the **first unchecked `[ ]`** top-to-bottom — that's the next task. Read its milestone's
+   **Expected output / Demo / Acceptance** block so you know what "done" looks like.
+5. Work one task: **write code (with docstrings/comments) → write/adjust its named test → run its Demo command
+   to watch it actually work → `pytest` + `pre-commit` green → check the box → commit.**
+6. **HARD RULE: never check a box unless its named test passes** and `pre-commit` is clean. Partial work stays
+   `[ ]` with a `> note:`. Integration tasks that can't be unit-tested (real PR, hardware) are checked only when
+   the named evidence (a PR URL, a captured log) is pasted under the task.
 
 ## Conventions
 
@@ -29,7 +34,53 @@
   Anything hitting real GitHub / Firestore emulator / MI250 / a live LLM is marked `@pytest.mark.integration`
   and skipped in the default run (`pytest -m integration` to run explicitly).
 - **Evidence principle:** every KB record and every report claim carries source issue/PR links. Tests assert this.
-- **One test file per module:** `src/foo.py` → `tests/test_foo.py`.
+- **One test file per module:** `src/foo.py` → `tests/test_foo.py`; tag it with its milestone marker
+  (`pytestmark = pytest.mark.m1`).
+- **Runnable verification, not just unit tests.** Every milestone has a **Demo** command you can actually run to
+  see the behavior, plus an **Acceptance** check (`pytest -m <milestone>`). Prefer driving the real thing over
+  trusting green unit tests alone.
+- **Readable code:** module + public-function **docstrings** (what/why), inline comments on non-obvious logic,
+  and **type hints** on public functions. Match the comment density of the existing `src/collector.py`.
+
+## Python conventions & tooling
+
+- **Format:** `black` (line length 100). **Lint + import-sort:** `ruff` (`E,W,F,I,UP,B,C4,SIM`). **Types:**
+  `mypy` (lenient for now: `ignore_missing_imports`, annotations encouraged not forced). Config in `pyproject.toml`.
+- **pre-commit** (`.pre-commit-config.yaml`) runs all of the above on commit. `pre-commit install` once, then
+  `pre-commit run --all-files` to check everything. **Activate the venv first** — the hooks call the venv's tools.
+- **Layout:** code in `src/` (one module per responsibility), agents in `src/agents/`, tests in `tests/`
+  (`test_<module>.py`), the web UI in `dashboard/`.
+- **Commit green:** `pytest` + `pre-commit` must pass before you check a box or commit.
+
+## Guardrails (trust the numbers)
+
+Two guardrails make the pipeline's outputs trustworthy. Treat them as first-class acceptance — their thresholds
+gate merges, and their scores are written to the KB and shown on the dashboard (T5.7):
+
+1. **Collection data-quality** (T0.10–T0.11): collect *without silent loss* — robust fetch (per-repo isolation,
+   incremental state, retry/backoff, secondary-rate-limit) **plus reconciliation** against GitHub's own totals and
+   an issue-number gap scan, surfaced as a `data_quality` metric.
+2. **RAG trust score** (T1.8): a hand-labeled golden set + **retrieval** metrics (Recall@k / MRR / nDCG) and
+   **groundedness** metrics (faithfulness / hallucination-rate), thresholded and tracked for drift — so a report's
+   citations are numbers you can trust, not hope.
+
+## Developing with Claude agents
+
+Default to a **single main session** working `DEVPLAN.md` top-to-bottom — the checklist + `pytest`/`pre-commit`
+are the "team" (manager = the plan, QA = the gates, developer = the session). This work is mostly sequential and
+shares one context — the wrong shape for a standing multi-agent team (3–4× tokens + coordination overhead, and
+against the project's sample-efficiency ethos).
+
+Use **ephemeral subagents** (not teams) for the "fetch me a result" pattern that keeps the main context clean:
+research fan-out (e.g. the RSI survey), a **reviewer pass** on the diff after each todo (`/code-review`), and
+running tests / triaging failures (return only the summary).
+
+**Graduate to an agent team only at M3/M5**, when work splits into cleanly separable directories (`dashboard/` vs
+`src/agents/engineer.py` vs `src/store/`): git worktrees for isolation, 3–5 agents max, tight per-agent scope, a
+validation step before merge. Keep the human review gate for anything upstream.
+
+> Rationale + sources: Anthropic *When to use multi-agent systems* and *How we built our multi-agent research
+> system*; Cognition *Don't Build Multi-Agents* (context engineering); Claude Code *agent-teams* docs.
 
 ## Infrastructure (fixed)
 
@@ -56,13 +107,24 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 
 ## Status
 
-- **M0 data plane:** collector implemented + test-backed (T0.1–T0.5 ✅). Next: **T0.6** (pluggable store).
+- **Tooling (T0.0 ✅):** black + ruff + mypy + pre-commit wired; `pytest` green (9 tests, marker `m0`).
+- **M0 data plane:** collector implemented + test-backed (T0.1–T0.5 ✅). Collection cadence = **24h / daily**
+  (`config.COLLECT_INTERVAL_HOURS`). Next: **T0.6** (pluggable store).
 - Everything below M0.6 is designed but unbuilt.
 
 ---
 
 ## M0 — Foundation & data plane
 
+> **Expected output:** `data/<owner>__<repo>.jsonl` for all 5 repos + `data/state.json`; a v0 weekly Markdown
+> report with cited links; pluggable store + LLM wrapper; full lint/format/type tooling.
+> **Demo:** `python -m src.collector` → JSONL in `data/`; `python -m src.report` → `data/reports/YYYY-Www.md`.
+> **Acceptance:** `pytest -m m0` green · `pre-commit run --all-files` clean · a collector run produces non-empty
+> JSONL and a report whose lines carry issue/PR URLs.
+
+- [x] **T0.0 Dev tooling** — black + ruff + mypy + pre-commit + pytest configured (`pyproject.toml`,
+      `.pre-commit-config.yaml`, `pytest.ini`, `requirements-dev.txt`).
+      Test: `pre-commit run --all-files` clean · `pytest` green.
 - [x] **T0.1 Collector: incremental GitHub issue/PR fetch** — `src/collector.py::fetch_repo`.
       Test: `tests/test_collector.py::test_fetch_repo_pagination`, `::test_fetch_repo_404` (mocks `requests`,
       asserts paging stops at `< PER_PAGE` and 404 → `[]`).
@@ -91,8 +153,25 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
 - [ ] **T0.9 Report CLI** — `python -m src.report` writes `data/reports/YYYY-Www.md`.
       Test: `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
+- [ ] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` so one repo's
+      failure doesn't abort the run; **save state incrementally after each repo**; retry with backoff on 5xx /
+      timeouts; honor secondary rate limits (`Retry-After`); validate each record has required fields
+      (`number,url,updated_at,type`) and log+skip malformed; make the `body` cap configurable (raise for RAG).
+      Test: `tests/test_collector_robust.py` — repo #2 raises ⇒ repo #1 cursor persisted; `5xx,5xx,200` ⇒ succeeds;
+      `403 + Retry-After` waits then continues; malformed record skipped+logged; state cursor is monotonic.
+- [ ] **T0.11 Collection data-quality guardrail (guardrail 1b: reconciliation)** — `src/audit.py`: compare local
+      counts vs GitHub **GraphQL** `issues.totalCount + pullRequests.totalCount` over the collected window; scan
+      collected `number`s for gaps (alert on gap *ratio* — deleted/transferred are allowed); write a `data_quality`
+      record (count delta, gap ratio, error count) to the KB each run.
+      Test: `tests/test_audit.py` — offline: synthetic local vs remote → delta computed, gap-ratio flagged over
+      threshold; live GraphQL compare on a small repo = `@pytest.mark.integration`.
 
 ## M0.6 — Storage: Firestore KB backend
+
+> **Expected output:** the same collected data readable/writable via Firestore; `STORE=firestore` works; a
+> jsonl→firestore migration script.
+> **Demo:** `STORE=firestore python -m src.collector` (against the Firestore emulator) · `python -m src.store.migrate`.
+> **Acceptance:** `pytest -m m0_6` green — the store contract test passes for **both** jsonl and firestore backends.
 
 - [ ] **T0.6.1 Firestore store** — `src/store/firestore_store.py` implementing `store/base.py` (collection
       `items` keyed `repo#number`; collection `state`).
@@ -104,6 +183,12 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_store_migrate.py` (`integration`) — sample jsonl → docs present in emulator.
 
 ## M1 — Intelligence plane (inner loop)
+
+> **Expected output:** LLM-classified items (taxonomy + evidence) in the KB; versioned `taxonomy@v` + `policy@v`;
+> timestamped calibrated forecasts; per-category trend series; an LLM-written **cited** weekly report.
+> **Demo:** `python -m src.analyze` (classify new items) · `python -m src.report` (cited report) ·
+> `python -m src.forecast` (log predictions).
+> **Acceptance:** `pytest -m m1` green · the report's every claim line carries ≥1 evidence URL.
 
 - [ ] **T1.1 Embeddings + vector index** — `src/embed.py` (embed text/labels; NN search; backend TBD).
       Test: `tests/test_embed.py` — with a deterministic fixture/mock model, NN of a query returns the
@@ -120,8 +205,22 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_reporter_v1.py` — mock llm → **every claim line has ≥1 evidence URL** (evidence principle).
 - [ ] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
       Test: `tests/test_trends.py` — synthetic items across weeks → correct bucketed counts per category.
+- [ ] **T1.8 RAG evaluation guardrail (guardrail 2: a trustworthy score)** — `src/rag_eval.py` +
+      `tests/rag_eval/golden.jsonl` (hand-labeled query → relevant issue/PR ids). Compute **retrieval** metrics
+      (Recall@k, MRR, nDCG@k) and **generation** metrics (faithfulness / groundedness via LLM-as-judge,
+      citation-accuracy, hallucination-rate on absent-topic queries). Enforce thresholds (e.g. Recall@10 ≥ 0.8,
+      hallucination_rate = 0) and write scores to the KB each run for drift tracking.
+      Test: `tests/test_rag_eval.py` — offline: metric math on a fixed ranked list (known Recall@k/MRR/nDCG),
+      every claim carries a citation, an absent-topic query ⇒ "no evidence"; live retrieval + LLM-judge =
+      `@pytest.mark.integration`.
 
 ## M2 — Outer loop: grading + candidate discovery
+
+> **Expected output:** grading metrics (precision/recall/Brier) on matured forecasts → `policy@v+1`; taxonomy
+> evolution; an engine×capability parity matrix; a **risk-ranked candidate queue**; cost-aware provider bandit;
+> novelty filter.
+> **Demo:** `python -m src.grade` (score past predictions) · `python -m src.candidates` (ranked queue with risk).
+> **Acceptance:** `pytest -m m2` green · candidates come out ranked with risk tiers + evidence links.
 
 - [ ] **T2.1 Grader** — `src/agents/grader.py`: resolve matured predictions vs reality (merged / in release /
       adopted); compute precision/recall + Brier.
@@ -151,6 +250,13 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 
 ## M3 — Contribution plane (MI250 verification oracle) — human-gated
 
+> **Expected output:** a reproduced bug signal on MI250; a **verified** patch (signal flips) on a fork branch;
+> ensemble self-review votes; a human-gate artifact; a **draft PR** (only after approval).
+> **Demo:** `python -m src.engineer --candidate <id>` (repro→patch→verify on mi250-05x) prints verified=true/false;
+> the human gate opens a draft PR only with `--approve`.
+> **Acceptance:** `pytest -m m3` green · (integration) a real MI250 run yields a verified patch · **T3.6 = a real
+> draft PR URL pasted in the checklist.**
+
 - [ ] **T3.1 Remote runner** — `src/runner.py`: run a command on `mi250-05x` over ssh, stream logs, capture
       exit code + artifacts.
       Test: `tests/test_runner.py` — mock subprocess/ssh → correct command composed + result parsed. Real ssh =
@@ -176,8 +282,14 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
+> **Expected output:** an always-on loop on `ce-master` under tmux; per-stage run events **+ live
+> heartbeats/intermediate output** in the KB; run-locking.
+> **Demo:** `python -m src.orchestrator --once` (one dry-run tick) · tmux runbook in `docs/`.
+> **Acceptance:** `pytest -m m4` green · a dry-run tick completes and writes a run event **+ a heartbeat**.
+
 - [ ] **T4.1 Orchestrator** — `src/orchestrator.py`: pin active `policy@v`, route deltas → agents, enforce
-      cadences (data plane hourly / intel daily+weekly / contribution triggered).
+      cadences (data plane **daily**, `config.COLLECT_INTERVAL_HOURS=24` / intel daily+weekly / contribution
+      triggered).
       Test: `tests/test_orchestrator.py` — fake clock + fake agents → correct routing per cadence; gate respected.
 - [ ] **T4.2 Scheduler + tmux runbook** — launch on `ce-master` under tmux (cron/systemd); runbook in `docs/`.
       Test: `tests/test_schedule_dryrun.py` — a dry-run tick runs end-to-end without error (agents stubbed).
@@ -185,8 +297,22 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_locking.py` — second concurrent run backs off; no duplicate KB writes.
 - [ ] **T4.4 Run events** — per-stage run records (stage, status, counts, duration) to KB for the dashboard.
       Test: `tests/test_events.py` — a pipeline tick writes a run event with the expected fields.
+- [ ] **T4.5 Liveness: heartbeat + intermediate output (know what's running)** — every stage/agent writes its
+      lifecycle to KB `runs`: `started` → periodic `heartbeat` (current step + a rolling tail of intermediate
+      output) → `finished` / `failed`, each timestamped with the active `policy@v`. A run is **stalled** if its
+      last heartbeat is older than `N × expected_interval`; a crash must leave a `failed`/`stalled` record (never
+      silent). Powers the T5.8 health panel.
+      Test: `tests/test_liveness.py` — a stage emits started→heartbeat→finished with monotonic timestamps; a stale
+      heartbeat is classified `stalled`; an exception path records `failed` (nothing left silently "running").
 
 ## M5 — Dashboard (Firestore-backed; monitoring + trends + parity)
+
+> **Expected output:** a local web dashboard reading the KB — a **live health / "what's running now" view**
+> (which stage is active, alive/stalled, current step, intermediate output), monitoring panels, trend charts,
+> engine×capability parity heatmap, pipeline data-flow diagram, guardrail panels, and the patch review pane.
+> **Demo:** `python -m dashboard` (or `streamlit run dashboard/app.py`) → open the printed localhost URL.
+> **Acceptance:** `pytest -m m5` green · panels/charts render from a seeded KB · the health view shows a running
+> stage as active and a stale one as `stalled`.
 
 - [ ] **T5.1 Read layer** — `dashboard/api.py`: read-only access the UI consumes (items/trends/predictions/
       candidates/parity/runs).
@@ -201,6 +327,14 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_dashboard_diagram.py` — diagram data builds from live stage metadata (smoke).
 - [ ] **T5.6 Review pane (folds in M3 gate)** — diff + risk + approve/hold in the same UI.
       Test: `tests/test_dashboard_review.py` — approve action flips candidate status (gate mocked).
+- [ ] **T5.7 Guardrail panels** — data-quality (reconciliation delta, gap ratio, collector error-rate over time)
+      and RAG-eval scores (Recall@k, faithfulness, hallucination-rate) with drift lines + threshold markers.
+      Test: `tests/test_dashboard_guardrails.py` — seeded metrics → panels return series + threshold flags.
+- [ ] **T5.8 Live health / "what's running now" panel** — reads T4.5 events: per stage/agent show
+      **running / idle / stalled / failed** (from heartbeat age), the current step, elapsed time, and a live tail
+      of intermediate output; auto-refresh; a top-level green/red health badge.
+      Test: `tests/test_dashboard_health.py` — seeded run events → a running stage renders active with its step +
+      output tail; a stale heartbeat renders `stalled`; a `failed` event renders red.
 
 ---
 

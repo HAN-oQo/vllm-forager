@@ -70,7 +70,8 @@ patches → a self-improving agent that goes all the way to **an actual PR after
   local vLLM; see decision 7).
 - Criteria for "became important" in the retrospective benchmark (merged / shipped in a release / adopted by
   other repos).
-- Schedule cadence (daily collection / weekly report).
+- Collection cadence is set to **24h / daily** for now (`config.COLLECT_INTERVAL_HOURS`); report cadence
+  (weekly?) still open.
 - Dashboard (M5) stack: how to serve the observability UI (e.g., Streamlit/FastAPI+static, or a small React app)
   and how it reads stage output (directly from `data/*.jsonl` + state, or via a small API layer). Chart/diagram
   library for the trend + engine parity visualizations.
