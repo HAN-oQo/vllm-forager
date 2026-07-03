@@ -12,7 +12,7 @@ This endpoint returns issues and PRs together (PRs have a `pull_request` key), a
 
 Usage:
     python -m src.collector            # incremental collection for all repos
-    python -m src.collector --full     # ignore state and start from INITIAL_SINCE
+    python -m src.collector --full     # ignore state; re-fetch the lookback window
 """
 
 from __future__ import annotations
@@ -22,7 +22,7 @@ import json
 import os
 import sys
 import time
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import requests
@@ -164,12 +164,19 @@ def _merge_jsonl(path, records: list[dict]) -> int:
 
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--full", action="store_true", help="ignore state and start from INITIAL_SINCE")
+    ap.add_argument(
+        "--full", action="store_true", help="ignore state; re-fetch the lookback window"
+    )
     args = ap.parse_args()
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     state = {} if args.full else _load_state()
-    now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    now_dt = datetime.now(timezone.utc)
+    now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+    # First run / --full: start from a rolling lookback window, not the beginning of time.
+    default_since = (now_dt - timedelta(days=config.INITIAL_LOOKBACK_DAYS)).strftime(
+        "%Y-%m-%dT%H:%M:%SZ"
+    )
 
     if not os.getenv("GITHUB_TOKEN"):
         print(
@@ -179,7 +186,7 @@ def main() -> None:
 
     for repo in config.REPOS:
         slug = repo["slug"]
-        since = state.get(slug, config.INITIAL_SINCE)
+        since = state.get(slug, default_since)
         print(f"[{slug}] since {since} …")
         try:
             records = fetch_repo(slug, since)
