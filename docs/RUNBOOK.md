@@ -105,9 +105,12 @@ crontab -e
 Cadence is 24h (`config.COLLECT_INTERVAL_HOURS`); the collector only fetches items updated since the last run
 (`data/state.json`).
 
-**Health:** `data/last_run.json` holds the last run's `status`, `exit_code`, timestamps, and (on failure) an
-`error_tail`. A quick `cat data/last_run.json` — or the M5 health panel — tells you if the last run was healthy
-and recent. "Alert" today = `status:"error"` there + a non-zero exit in `data/logs/cron.log`.
+**Progress & health:** running `./scripts/collect.sh` **streams progress live** to the terminal (via `tee`; the
+collector prints `… <repo>: +N (M so far)` per page) while also writing `data/logs/`. `data/last_run.json` holds
+the last run's `status`, `exit_code`, timestamps, **record counts** (per repo + `total_records`), and (on failure)
+an `error_tail` — so `cat data/last_run.json` tells you if the last run was healthy, recent, and how much data you
+have. `python -m src.stats` prints a per-repo issue/PR (+ ROCm-tagged) breakdown any time. "Alert" today =
+`status:"error"` + a non-zero exit in `data/logs/cron.log`.
 
 **Self-heal (alert + fix PR):** on failure `collect.sh` calls `scripts/triage.sh`, which — if `claude` and `gh`
 are on PATH **and the working tree is clean** — asks `claude -p` to diagnose and, **only for a code bug**, fix it

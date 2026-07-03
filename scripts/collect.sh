@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 #
-# collect.sh — run the collector once, record health, and on failure kick off self-heal
-# triage. Designed for cron on ce-master (see docs/RUNBOOK.md). Never uses `set -e` so a
-# collector failure is still recorded before we exit.
+# collect.sh — run the collector once, STREAM progress to the terminal AND a log, record
+# health (status + record counts) to data/last_run.json, and on failure kick off self-heal
+# triage. Works under cron, and `./scripts/collect.sh` also shows live progress. Never uses
+# `set -e` so a failure is still recorded before we exit.
 #
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
@@ -14,10 +15,26 @@ log="data/logs/collect-$ts.log"
 [ -f .venv/bin/activate ] && source .venv/bin/activate
 
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-python -m src.collector >"$log" 2>&1
-code=$?
+# -u = unbuffered so progress streams live; tee shows it on the terminal AND writes the log.
+python -u -m src.collector 2>&1 | tee "$log"
+code=${PIPESTATUS[0]}
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 status=$([ "$code" -eq 0 ] && echo ok || echo error)
+
+# Count records currently on disk (per file + total) for the health record.
+counts=$(python - <<'PY'
+import glob, json, os
+out = {}
+tot = 0
+for f in sorted(glob.glob("data/*.jsonl")):
+    n = sum(1 for line in open(f) if line.strip())
+    out[os.path.basename(f)] = n
+    tot += n
+out["_total"] = tot
+print(json.dumps(out))
+PY
+)
+total=$(printf '%s' "$counts" | python -c 'import json,sys; print(json.load(sys.stdin)["_total"])')
 
 # JSON-encode the last lines of the log when we failed, else an empty string.
 if [ "$code" -ne 0 ]; then
@@ -33,11 +50,13 @@ cat > data/last_run.json <<JSON
   "exit_code": $code,
   "status": "$status",
   "log": "$log",
+  "total_records": $total,
+  "counts": $counts,
   "error_tail": $err
 }
 JSON
 
-echo "[collect] status=$status exit=$code log=$log"
+echo "[collect] status=$status exit=$code total_records=$total log=$log"
 if [ "$code" -ne 0 ]; then
   echo "[collect] failure recorded; attempting self-heal triage" >&2
   bash scripts/triage.sh "$log" || echo "[collect] triage unavailable/skipped" >&2
