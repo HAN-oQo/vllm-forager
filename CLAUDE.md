@@ -17,6 +17,7 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
 5. `docs/IDEAS.md` — idea backlog → next-version roadmap (future, not-yet-committed work; keep it separate from
    the DEVPLAN, which is committed test-backed work).
 6. `docs/RUNBOOK.md` — how to operate the dev loop (tmux on ce-master; todo → PR → your merge → poll-continue).
+7. `docs/CONTRIBUTING.md` — git & code-review rules (PR = one todo; `/code-review --comment`; human merge).
 
 ## Golden workflow (non-negotiable)
 - Work `DEVPLAN.md` top-to-bottom; do the **first unchecked `[ ]`**. Read its milestone's Expected output / Demo /
@@ -82,6 +83,7 @@ build / bug reproduction / patch verification + optional local LLM, over ssh. Co
 ## Developing with Claude agents
 Default to a **single main session** working `DEVPLAN.md`; the checklist + `pytest`/`pre-commit` are the "team"
 (manager = the plan, QA = the gates, developer = the session). Use **ephemeral subagents** (not a standing team)
-for research fan-out, a reviewer pass on the diff (`/code-review`), and test-failure triage. Reserve full **agent
+for research fan-out, a reviewer pass that posts findings on the PR (`/code-review --comment`), and test-failure
+triage. Reserve full **agent
 teams** for M3/M5 when work splits into separate directories — with git worktrees, 3–5 agents, a validation step.
 Full rationale + sources: the "Developing with Claude agents" section in `docs/DEVPLAN.md`.

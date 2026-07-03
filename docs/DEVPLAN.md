@@ -87,7 +87,8 @@ validation step before merge. Keep the human review gate for anything upstream.
 - **Unit of PR = one todo** (or a small cluster of tightly-related tiny todos). A milestone is an *epic*
   (a GitHub Milestone / tracking issue), never a single PR.
 - **Code-todo flow:** branch `t<id>-slug` → implement + its named test → open PR → **CI green**
-  (`pytest` + `pre-commit`) + a `/code-review` pass on the diff → **a human merges** → check the box.
+  (`pytest` + `pre-commit`) + **`/code-review --comment`** (Claude posts its review as inline PR comments) →
+  **a human merges** → check the box. Full rules: `docs/CONTRIBUTING.md`.
 - **Direct to `main`:** pure docs / tooling / typo edits only.
 - **Human-in-the-loop merge (required):** CI and `/code-review` are *gates, not approvers*. **Every merge to
   `main` is performed by a human.** Agents (subagents/teams) may open PRs and push to branches but **never
@@ -175,12 +176,20 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       (`number,url,updated_at,type`) and log+skip malformed; make the `body` cap configurable (raise for RAG).
       Test: `tests/test_collector_robust.py` — repo #2 raises ⇒ repo #1 cursor persisted; `5xx,5xx,200` ⇒ succeeds;
       `403 + Retry-After` waits then continues; malformed record skipped+logged; state cursor is monotonic.
+      > **Partly shipped in #3:** cursor-windowing past the ~1000-item pagination cap + per-repo isolation +
+      > incremental state save (with tests). Remaining: retry/backoff, secondary-rate-limit, schema validation,
+      > configurable `body` cap.
 - [ ] **T0.11 Collection data-quality guardrail (guardrail 1b: reconciliation)** — `src/audit.py`: compare local
       counts vs GitHub **GraphQL** `issues.totalCount + pullRequests.totalCount` over the collected window; scan
       collected `number`s for gaps (alert on gap *ratio* — deleted/transferred are allowed); write a `data_quality`
       record (count delta, gap ratio, error count) to the KB each run.
       Test: `tests/test_audit.py` — offline: synthetic local vs remote → delta computed, gap-ratio flagged over
       threshold; live GraphQL compare on a small repo = `@pytest.mark.integration`.
+- [ ] **T0.12 Collector review follow-ups** (from the #3 review): log the cursor-stall case to the `data_quality`
+      metric (not just stderr) + fall back to GraphQL for single-timestamp clusters >1000; make non-network
+      failures in `main` loud (narrow the `except`, log the traceback) instead of looking like a transient skip;
+      add `pytest-timeout` so the stall-guard test fails fast rather than hanging the suite.
+      Test: `tests/test_audit.py::test_stall_recorded`; `tests/test_collector_robust.py` (timeout marker).
 
 ## M0.6 — Storage: Firestore KB backend
 
