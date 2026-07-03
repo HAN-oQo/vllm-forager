@@ -5,10 +5,20 @@ Repo slugs use the actual GitHub paths. Verify any uncertain ones on GitHub and 
 repos equally).
 """
 
+import os
 from pathlib import Path
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # works even if python-dotenv isn't installed
+    pass
+
 ROOT = Path(__file__).resolve().parent.parent
-DATA_DIR = ROOT / "data"
+# Data lives here. Set FORAGER_DATA_DIR to point every clone/process at ONE shared
+# directory, so a separately-cloned collector and the dev checkout share the dataset.
+DATA_DIR = Path(os.getenv("FORAGER_DATA_DIR") or (ROOT / "data"))
 STATE_PATH = DATA_DIR / "state.json"
 
 # role: primary = main target / where PRs are submitted; fork = downstream fork;

@@ -110,6 +110,29 @@ on failure classifies (transient → wait for next cycle; real bug → fix on a 
 session up). For a truly fresh session per cycle instead, have cron/systemd launch `claude -p "/collect-loop"`
 every N hours.
 
+### Running dev-loop and collect-loop together (no collisions + shared data)
+
+Both loops do `git checkout main && git pull` and create branches, so they **can't share one working tree** —
+give the collector its **own clone**. But `data/` is **gitignored**, so a separate clone wouldn't see the data;
+point every clone at **one shared data dir** with `FORAGER_DATA_DIR`:
+
+```bash
+# on ce-master
+mkdir -p ~/forager-data                                     # the single shared data dir
+gh repo clone HAN-oQo/vllm-forager ~/vllm-forager-collect   # collector's own clone
+cd ~/vllm-forager-collect
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt
+cp ~/vllm-forager/.env .env
+echo "FORAGER_DATA_DIR=$HOME/forager-data" >> .env          # <-- share data
+tmux new -s collect                                         # → claude → /loop 6h /collect-loop
+```
+
+Set the same `FORAGER_DATA_DIR=$HOME/forager-data` in the dev clone's `.env` too, so both read/write the one
+dataset. Branches never overlap (`t*` vs `triage/*`); both push to the same origin.
+
+> Directory-sharing is the stop-gap while data is JSONL. **M0.6 replaces it properly**: once the KB is Firestore,
+> the collector writes to a shared store and every clone/process/node reads from it — no shared directory needed.
+
 ## Scheduling the collector (run-time, simpler fallback)
 
 *(No live Claude session — cheaper and dead-simple, but self-heal is only best-effort. Prefer `/collect-loop`

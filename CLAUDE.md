@@ -28,6 +28,11 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
 - **Evidence principle:** every KB record and every report claim carries a source issue/PR link.
 - **Human-in-the-loop merges:** CI + `/code-review` are gates, not approvers — **a human performs every merge to
   `main`**; agents open PRs but never self-merge. See "Git & PR workflow" in `docs/DEVPLAN.md`.
+- **NEVER edit on top of a merged or already-opened PR — branch from fresh `main` every time.** Create each branch
+  with `git checkout main && git pull`, and **do NOT push follow-up commits to a branch whose PR you've already
+  opened** — the human may merge it at any moment, stranding the commit off `main` (this has happened repeatedly).
+  Need to add or fix something? Open a **new** branch off `main`. Before any push to a PR branch, confirm it is
+  still open with `gh pr view <n> --json state`.
 - **Human review gate is mandatory:** nothing goes upstream to vLLM without explicit human approval.
 
 ## Commands
