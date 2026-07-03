@@ -73,36 +73,61 @@ def _sleep_for_rate_limit(resp: requests.Response) -> bool:
     return False
 
 
+# GitHub's list endpoints refuse deep pagination past ~1000 items (page * per_page),
+# returning HTTP 422. To collect more, we walk the `updated_at` cursor: page within a
+# window until it fills PAGE_CAP pages, then restart from the last item's updated_at.
+PAGE_CAP = 10
+
+
 def fetch_repo(slug: str, since: str) -> list[dict]:
-    """Fetch all issues + PRs for slug (owner/repo) updated after `since`."""
+    """Fetch all issues + PRs for `slug` updated at/after `since`.
+
+    Works around GitHub's ~1000-item deep-pagination limit by advancing the `since`
+    cursor (sort=updated, asc) whenever a window fills PAGE_CAP pages. Records are keyed
+    by issue number, so the inclusive-boundary re-fetch between windows is deduped.
+    """
     owner, repo = slug.split("/", 1)
     url = f"{API}/repos/{owner}/{repo}/issues"
-    params: dict[str, Any] = {
-        "since": since,
-        "state": "all",
-        "per_page": config.PER_PAGE,
-        "sort": "updated",
-        "direction": "asc",
-        "page": 1,
-    }
-    out: list[dict] = []
+    collected: dict[int, dict] = {}
+    window_since = since
+
     while True:
-        resp = requests.get(url, headers=_headers(), params=params, timeout=30)
-        if _sleep_for_rate_limit(resp):
-            continue
-        if resp.status_code == 404:
-            print(f"  !! {slug} 404 — check the slug", file=sys.stderr)
-            break
-        resp.raise_for_status()
-        batch = resp.json()
-        if not batch:
-            break
-        for it in batch:
-            out.append(_normalize(it, slug))
-        if len(batch) < config.PER_PAGE:
-            break
-        params["page"] += 1
-    return out
+        last_updated = None
+        page = 1
+        while page <= PAGE_CAP:
+            params: dict[str, Any] = {
+                "since": window_since,
+                "state": "all",
+                "per_page": config.PER_PAGE,
+                "sort": "updated",
+                "direction": "asc",
+                "page": page,
+            }
+            resp = requests.get(url, headers=_headers(), params=params, timeout=30)
+            if _sleep_for_rate_limit(resp):
+                continue
+            if resp.status_code == 404:
+                print(f"  !! {slug} 404 — check the slug", file=sys.stderr)
+                return list(collected.values())
+            resp.raise_for_status()
+            batch = resp.json()
+            if not batch:
+                return list(collected.values())
+            for it in batch:
+                rec = _normalize(it, slug)
+                collected[rec["number"]] = rec
+                last_updated = it.get("updated_at") or last_updated
+            if len(batch) < config.PER_PAGE:
+                return list(collected.values())
+            page += 1
+
+        # Window filled PAGE_CAP pages — advance the cursor to continue past the cap.
+        if not last_updated or last_updated == window_since:
+            # No forward progress (e.g. >1000 items share one timestamp); stop rather
+            # than spin forever.
+            print(f"  !! {slug} cursor stalled at {window_since} — stopping early", file=sys.stderr)
+            return list(collected.values())
+        window_since = last_updated
 
 
 def _normalize(it: dict, slug: str) -> dict:
@@ -155,10 +180,15 @@ def main() -> None:
         slug = repo["slug"]
         since = state.get(slug, config.INITIAL_SINCE)
         print(f"[{slug}] since {since} …")
-        records = fetch_repo(slug, since)
+        try:
+            records = fetch_repo(slug, since)
+        except Exception as exc:  # isolate: one repo's failure must not abort the rest
+            print(f"  !! {slug} failed: {exc} — skipping (cursor preserved)", file=sys.stderr)
+            continue
         out_path = config.DATA_DIR / (slug.replace("/", "__") + ".jsonl")
         total = _merge_jsonl(out_path, records)
         state[slug] = now
+        _save_state(state)  # persist progress per repo so a later failure can't lose it
         print(f"  +{len(records)} updated · {total} total → {out_path.name}")
 
     _save_state(state)
