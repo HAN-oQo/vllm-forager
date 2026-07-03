@@ -82,6 +82,22 @@ validation step before merge. Keep the human review gate for anything upstream.
 > Rationale + sources: Anthropic *When to use multi-agent systems* and *How we built our multi-agent research
 > system*; Cognition *Don't Build Multi-Agents* (context engineering); Claude Code *agent-teams* docs.
 
+## Git & PR workflow
+
+- **Unit of PR = one todo** (or a small cluster of tightly-related tiny todos). A milestone is an *epic*
+  (a GitHub Milestone / tracking issue), never a single PR.
+- **Code-todo flow:** branch `t<id>-slug` → implement + its named test → open PR → **CI green**
+  (`pytest` + `pre-commit`) + a `/code-review` pass on the diff → **a human merges** → check the box.
+- **Direct to `main`:** pure docs / tooling / typo edits only.
+- **Human-in-the-loop merge (required):** CI and `/code-review` are *gates, not approvers*. **Every merge to
+  `main` is performed by a human.** Agents (subagents/teams) may open PRs and push to branches but **never
+  self-merge**, and auto-merge stays off. This mirrors the upstream contribution rule inward.
+- **Upstream vLLM PRs** (the product's output, T3.x) are a separate flow: fork → draft PR → **human gate** →
+  upstream — never conflated with internal dev PRs.
+- **Recommended branch protection on `main`:** require the CI status check to pass, require a PR (no direct agent
+  pushes), block force-push. (Set once in GitHub → Settings → Branches.)
+- CI = `.github/workflows/ci.yml`; a box is checked only when CI is green **and** a human has merged.
+
 ## Infrastructure (fixed)
 
 - **`ce-master`** — CPU node. The agent runs here, long-running under **tmux**. Collection · KB · intelligence
