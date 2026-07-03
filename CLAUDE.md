@@ -16,6 +16,7 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
 4. `docs/SURVEY_RSI.md` — prior art (recursive self-improvement / self-evolving agents).
 5. `docs/IDEAS.md` — idea backlog → next-version roadmap (future, not-yet-committed work; keep it separate from
    the DEVPLAN, which is committed test-backed work).
+6. `docs/RUNBOOK.md` — how to operate the dev loop (tmux on ce-master; todo → PR → your merge → poll-continue).
 
 ## Golden workflow (non-negotiable)
 - Work `DEVPLAN.md` top-to-bottom; do the **first unchecked `[ ]`**. Read its milestone's Expected output / Demo /
@@ -38,6 +39,14 @@ pytest -m m0                              # one milestone (markers: m0, m0_6, m1
 pre-commit run --all-files                # black + ruff + mypy + hygiene (venv must be active)
 python -m src.collector                   # run the collector once → data/*.jsonl
 ```
+
+## What a fresh session inherits
+- **Auto-applied:** this file (rules + workflow + pointers) loads automatically; `.claude/settings.json` grants
+  the safe-command allowlist and **denies `gh pr merge`** (agents never self-merge); `pyproject.toml` /
+  `pytest.ini` / `.pre-commit-config.yaml` configure the tools.
+- **Run once per clone:** `source .venv/bin/activate && pip install -r requirements-dev.txt && pre-commit install`.
+- **Opt-in per session:** Accept-Edits autonomy for the unattended dev loop (Shift+Tab cycles permission modes); a
+  non-default `LLM_PROVIDER` (`claude_api` / `local`) if you don't want `claude_cli`.
 
 ## Architecture (one paragraph)
 Three planes over one knowledge base (Firestore, planned): **data plane** (collect→normalize→embed, no LLM),
