@@ -4,14 +4,17 @@ Uses the GitHub REST API endpoint `GET /repos/{owner}/{repo}/issues`.
 This endpoint returns issues and PRs together (PRs have a `pull_request` key), and the
 `since` parameter allows incremental collection of items updated after a given time.
 
-- Results are upserted (rewritten), not appended, into a per-repo JSONL (data/{owner}__{repo}.jsonl).
-- The last collection time is stored per repo in data/state.json → the next run only fetches items after it.
+- Results are upserted (rewritten), not appended, into a per-repo JSONL
+  (data/{owner}__{repo}.jsonl).
+- The last collection time is stored per repo in data/state.json → the next run only
+  fetches items after it.
 - With GITHUB_TOKEN set, the rate limit goes from 60 to 5000/hr.
 
 Usage:
     python -m src.collector            # incremental collection for all repos
     python -m src.collector --full     # ignore state and start from INITIAL_SINCE
 """
+
 from __future__ import annotations
 
 import argparse
@@ -20,11 +23,13 @@ import os
 import sys
 import time
 from datetime import datetime, timezone
+from typing import Any
 
 import requests
 
 try:
     from dotenv import load_dotenv
+
     load_dotenv()
 except Exception:  # works even if python-dotenv isn't installed
     pass
@@ -72,7 +77,7 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
     """Fetch all issues + PRs for slug (owner/repo) updated after `since`."""
     owner, repo = slug.split("/", 1)
     url = f"{API}/repos/{owner}/{repo}/issues"
-    params = {
+    params: dict[str, Any] = {
         "since": since,
         "state": "all",
         "per_page": config.PER_PAGE,
@@ -108,7 +113,7 @@ def _normalize(it: dict, slug: str) -> dict:
         "type": "pr" if "pull_request" in it else "issue",
         "title": it.get("title"),
         "state": it.get("state"),
-        "labels": [l.get("name") for l in it.get("labels", [])],
+        "labels": [lbl.get("name") for lbl in it.get("labels", [])],
         "created_at": it.get("created_at"),
         "updated_at": it.get("updated_at"),
         "url": it.get("html_url"),
@@ -141,7 +146,10 @@ def main() -> None:
     now = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
     if not os.getenv("GITHUB_TOKEN"):
-        print("warning: no GITHUB_TOKEN — rate limit 60/hr. Setting up .env is recommended.", file=sys.stderr)
+        print(
+            "warning: no GITHUB_TOKEN — rate limit 60/hr. Setting up .env is recommended.",
+            file=sys.stderr,
+        )
 
     for repo in config.REPOS:
         slug = repo["slug"]

@@ -2,9 +2,14 @@
 
 Covers checklist items T0.1–T0.5 in docs/DEVPLAN.md.
 """
+
 import json
 
+import pytest
+
 from src import collector, config
+
+pytestmark = pytest.mark.m0
 
 
 class FakeResp:
@@ -25,11 +30,17 @@ class FakeResp:
 
 # ---------------------------------------------------------------- _normalize
 
+
 def test_normalize_issue_vs_pr():
     issue = {
-        "number": 1, "title": "t", "state": "open", "labels": [{"name": "bug"}],
-        "created_at": "2025-01-01T00:00:00Z", "updated_at": "2025-01-02T00:00:00Z",
-        "html_url": "http://x/1", "body": "hello",
+        "number": 1,
+        "title": "t",
+        "state": "open",
+        "labels": [{"name": "bug"}],
+        "created_at": "2025-01-01T00:00:00Z",
+        "updated_at": "2025-01-02T00:00:00Z",
+        "html_url": "http://x/1",
+        "body": "hello",
     }
     n = collector._normalize(issue, "o/r")
     assert n["type"] == "issue"
@@ -50,35 +61,50 @@ def test_normalize_body_truncated_and_defaults():
 
 # -------------------------------------------------------------- _merge_jsonl
 
+
 def test_merge_jsonl_upsert_and_order(tmp_path):
     p = tmp_path / "x.jsonl"
-    assert collector._merge_jsonl(p, [
-        {"number": 1, "updated_at": "2025-01-02T00:00:00Z", "title": "a"},
-        {"number": 2, "updated_at": "2025-01-01T00:00:00Z", "title": "b"},
-    ]) == 2
+    assert (
+        collector._merge_jsonl(
+            p,
+            [
+                {"number": 1, "updated_at": "2025-01-02T00:00:00Z", "title": "a"},
+                {"number": 2, "updated_at": "2025-01-01T00:00:00Z", "title": "b"},
+            ],
+        )
+        == 2
+    )
 
     # re-merge: number 1 is overwritten, number 3 is added
-    assert collector._merge_jsonl(p, [
-        {"number": 1, "updated_at": "2025-01-05T00:00:00Z", "title": "a2"},
-        {"number": 3, "updated_at": "2025-01-03T00:00:00Z", "title": "c"},
-    ]) == 3
+    assert (
+        collector._merge_jsonl(
+            p,
+            [
+                {"number": 1, "updated_at": "2025-01-05T00:00:00Z", "title": "a2"},
+                {"number": 3, "updated_at": "2025-01-03T00:00:00Z", "title": "c"},
+            ],
+        )
+        == 3
+    )
 
     rows = [json.loads(line) for line in p.read_text().splitlines() if line.strip()]
-    assert {r["number"]: r["title"] for r in rows}[1] == "a2"      # upserted
-    assert [r["number"] for r in rows] == [2, 3, 1]                # sorted asc by updated_at
+    assert {r["number"]: r["title"] for r in rows}[1] == "a2"  # upserted
+    assert [r["number"] for r in rows] == [2, 3, 1]  # sorted asc by updated_at
 
 
 # ------------------------------------------------------------- state cursor
 
+
 def test_state_roundtrip(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
-    assert collector._load_state() == {}                          # missing file -> {}
+    assert collector._load_state() == {}  # missing file -> {}
     collector._save_state({"o/r": "2025-01-01T00:00:00Z"})
     assert collector._load_state() == {"o/r": "2025-01-01T00:00:00Z"}
 
 
 # ----------------------------------------------------------------- _headers
+
 
 def test_headers_token(monkeypatch):
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
@@ -91,6 +117,7 @@ def test_headers_token(monkeypatch):
 
 
 # ------------------------------------------------------ _sleep_for_rate_limit
+
 
 def test_rate_limit_no_wait_on_ok(monkeypatch):
     slept = []
@@ -105,16 +132,19 @@ def test_rate_limit_waits_on_403(monkeypatch):
     monkeypatch.setattr(collector.time, "time", lambda: 1000)
     resp = FakeResp(403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1005"})
     assert collector._sleep_for_rate_limit(resp) is True
-    assert slept == [6]                                           # (1005 - 1000) + 1
+    assert slept == [6]  # (1005 - 1000) + 1
 
 
 # --------------------------------------------------------------- fetch_repo
 
+
 def test_fetch_repo_pagination(monkeypatch):
     monkeypatch.setattr(config, "PER_PAGE", 2)
     pages = {
-        1: [{"number": 1, "title": "a", "updated_at": "2025-01-01T00:00:00Z"},
-            {"number": 2, "title": "b", "pull_request": {}, "updated_at": "2025-01-02T00:00:00Z"}],
+        1: [
+            {"number": 1, "title": "a", "updated_at": "2025-01-01T00:00:00Z"},
+            {"number": 2, "title": "b", "pull_request": {}, "updated_at": "2025-01-02T00:00:00Z"},
+        ],
         2: [{"number": 3, "title": "c", "updated_at": "2025-01-03T00:00:00Z"}],
     }
 
@@ -128,6 +158,9 @@ def test_fetch_repo_pagination(monkeypatch):
 
 
 def test_fetch_repo_404(monkeypatch):
-    monkeypatch.setattr(collector.requests, "get",
-                        lambda url, headers=None, params=None, timeout=None: FakeResp(404))
+    monkeypatch.setattr(
+        collector.requests,
+        "get",
+        lambda url, headers=None, params=None, timeout=None: FakeResp(404),
+    )
     assert collector.fetch_repo("o/missing", "2025-01-01T00:00:00Z") == []

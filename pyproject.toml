@@ -1,0 +1,30 @@
+# Tooling config for vllm-forager (Python).
+# Formatting = black, lint + import-sorting = ruff, static types = mypy.
+# Test config lives in pytest.ini.
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# E/W pycodestyle, F pyflakes, I isort, UP pyupgrade, B bugbear, C4 comprehensions, SIM simplify.
+select = ["E", "W", "F", "I", "UP", "B", "C4", "SIM"]
+ignore = []
+
+[tool.ruff.lint.per-file-ignores]
+# Tests may use asserts, fixtures, and slightly looser style.
+"tests/*" = ["B011"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true   # third-party libs without stubs (dotenv, google.cloud, ...)
+warn_unused_ignores = true
+warn_redundant_casts = true
+# Pragmatic for a young codebase: don't force annotations everywhere yet.
+disallow_untyped_defs = false
+check_untyped_defs = true
+exclude = ["tests/"]
