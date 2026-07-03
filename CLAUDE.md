@@ -24,6 +24,8 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
   command to watch it actually work → `pytest` + `pre-commit` green → check the box → commit.
 - **A box is checked ONLY when its named test passes and `pre-commit` is clean.** Partial work stays `[ ]`.
 - **Evidence principle:** every KB record and every report claim carries a source issue/PR link.
+- **Human-in-the-loop merges:** CI + `/code-review` are gates, not approvers — **a human performs every merge to
+  `main`**; agents open PRs but never self-merge. See "Git & PR workflow" in `docs/DEVPLAN.md`.
 - **Human review gate is mandatory:** nothing goes upstream to vLLM without explicit human approval.
 
 ## Commands
