@@ -65,6 +65,15 @@ milestone** (CLAUDE.md re-boots full context) to avoid long-session drift/cost.
 allowed (`pytest`, `git`, `gh`, `ruff`, `black`, `python -m …`); destructive/outward actions still prompt; and it
 **never self-merges**.
 
+## Autonomous mode (`/dev-loop`)
+
+To have the Developer Claude work the checklist hands-off: in the tmux `dev` session, switch to **Accept-Edits**
+(Shift+Tab) and run **`/dev-loop`**. Each iteration it: picks the first unchecked todo → branch → implement +
+test → `pytest`/`pre-commit` green → `gh pr create` → **`/code-review --comment`** (review posted on the PR) →
+`scripts/wait-merge.sh` (polls until **you** merge) → next todo. It **pauses at the milestone boundary** for your
+go, **STOPs and asks** on anything ambiguous, and **never self-merges** (`gh pr merge` is denied). Stop it anytime
+with Esc; start a fresh session per milestone to keep context clean.
+
 ## Your side (Mac)
 - Review the PR + CI (green) → optional `/code-review` on the diff → **merge**. That merge is what releases the
   poll and lets the loop advance.
