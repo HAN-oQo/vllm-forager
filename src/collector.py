@@ -152,17 +152,28 @@ def _normalize(it: dict, slug: str) -> dict:
 
 
 def _merge_jsonl(path, records: list[dict]) -> int:
-    """Upsert by `number` then rewrite. Returns the total record count."""
+    """Upsert by `number`, then rewrite atomically. Returns the total record count.
+
+    Tolerates a corrupt/partial line in an existing file (e.g. from an interrupted write):
+    such lines are skipped with a warning instead of aborting the whole run.
+    """
     existing: dict[int, dict] = {}
     if path.exists():
-        for line in path.read_text().splitlines():
-            if line.strip():
+        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+            if not line.strip():
+                continue
+            try:
                 r = json.loads(line)
-                existing[r["number"]] = r
+            except json.JSONDecodeError as exc:
+                print(f"  !! {path.name}:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
+                continue
+            existing[r["number"]] = r
     for r in records:
         existing[r["number"]] = r
     ordered = sorted(existing.values(), key=lambda r: r.get("updated_at") or "")
-    path.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in ordered) + "\n")
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in ordered) + "\n")
+    tmp.replace(path)  # atomic rename — an interrupted write can't corrupt the file
     return len(ordered)
 
 

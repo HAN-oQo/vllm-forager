@@ -92,6 +92,18 @@ def test_merge_jsonl_upsert_and_order(tmp_path):
     assert [r["number"] for r in rows] == [2, 3, 1]  # sorted asc by updated_at
 
 
+def test_merge_jsonl_skips_corrupt_line(tmp_path):
+    # a valid record + a truncated/corrupt line (as an interrupted write would leave)
+    p = tmp_path / "x.jsonl"
+    p.write_text(
+        json.dumps({"number": 1, "updated_at": "2025-01-01T00:00:00Z"}) + '\n{"number": 2, "titl\n'
+    )
+    total = collector._merge_jsonl(p, [{"number": 3, "updated_at": "2025-01-02T00:00:00Z"}])
+    assert total == 2  # corrupt #2 skipped; #1 kept, #3 added
+    nums = sorted(json.loads(x)["number"] for x in p.read_text().splitlines() if x.strip())
+    assert nums == [1, 3]
+
+
 # ------------------------------------------------------------- state cursor
 
 
