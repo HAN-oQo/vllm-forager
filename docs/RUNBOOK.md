@@ -91,7 +91,29 @@ it stops (exit 1) instead of advancing.
 
 This makes the human-in-the-loop merge **structural**, not just convention.
 
-## Scheduling the collector (run-time)
+## Collect loop (agentic — `/collect-loop`)
+
+The **smarter** way to run collection: a Claude session runs one cycle and, on failure, diagnoses in-context and
+opens a fix PR — better self-heal than the cron+shell fallback below. Schedule it with the `/loop` skill (no
+crontab):
+
+```bash
+# on ce-master
+tmux new -s collect
+cd vllm-forager && source .venv/bin/activate
+claude            # then: Shift+Tab (Accept-Edits) → /loop 6h /collect-loop
+```
+
+Each cycle `/collect-loop`: pulls main → runs `python -m src.collector` (streamed) → on success reports counts;
+on failure classifies (transient → wait for next cycle; real bug → fix on a `triage/*` branch + test + **PR** +
+`/code-review`, never merges). You merge; the next cycle picks it up. It runs as a **live session** (keep the tmux
+session up). For a truly fresh session per cycle instead, have cron/systemd launch `claude -p "/collect-loop"`
+every N hours.
+
+## Scheduling the collector (run-time, simpler fallback)
+
+*(No live Claude session — cheaper and dead-simple, but self-heal is only best-effort. Prefer `/collect-loop`
+above when you want smart recovery.)*
 
 Run the collector on a schedule via **cron** (simple, no sudo). `scripts/collect.sh` runs it, writes health to
 `data/last_run.json`, logs to `data/logs/`, and on failure kicks off self-heal triage.
