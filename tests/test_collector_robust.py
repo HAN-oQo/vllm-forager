@@ -3,6 +3,7 @@ per-repo failure isolation. Offline & deterministic (no network)."""
 
 import json
 import sys
+from datetime import datetime, timezone
 
 import pytest
 
@@ -82,3 +83,25 @@ def test_main_isolates_repo_failure_and_saves_state(tmp_path, monkeypatch):
     assert (tmp_path / "o__good.jsonl").exists()
     state = json.loads((tmp_path / "state.json").read_text())
     assert "o/good" in state and "o/bad" not in state  # failed repo's cursor NOT advanced
+
+
+def test_main_uses_lookback_window(tmp_path, monkeypatch):
+    """With no state, main() defaults to a rolling INITIAL_LOOKBACK_DAYS window."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(config, "REPOS", [{"slug": "o/r", "role": "x"}])
+    monkeypatch.setattr(config, "INITIAL_LOOKBACK_DAYS", 180)
+    monkeypatch.setattr(sys, "argv", ["collector"])
+
+    seen = {}
+
+    def fake_fetch(slug, since):
+        seen["since"] = since
+        return []
+
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    collector.main()
+
+    since = datetime.strptime(seen["since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
+    age_days = (datetime.now(timezone.utc) - since).days
+    assert 179 <= age_days <= 181

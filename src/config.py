@@ -26,9 +26,9 @@ ROCM_HINTS = ["rocm", "amd", "hip", "mi250", "mi300", "gfx", "hipblas", "instinc
 
 # Collection parameters
 PER_PAGE = 100
-# On the first run, only collect items updated after this date (avoid pulling very old
-# issues). ISO8601.
-INITIAL_SINCE = "2025-01-01T00:00:00Z"
+# First-run / --full window: only collect items updated in the last N days (rolling, so it
+# stays recent without editing a date). ~6 months keeps the initial backfill sane.
+INITIAL_LOOKBACK_DAYS = 180
 # Scheduler cadence: how often the data-plane collection runs, in hours.
 # 24h (daily) for now; the M4 orchestrator reads this to decide when to re-collect.
 COLLECT_INTERVAL_HOURS = 24
