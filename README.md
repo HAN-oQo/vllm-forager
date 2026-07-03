@@ -85,18 +85,33 @@ python -m pytest        # offline suite — keep it green
 
 See `docs/PLAN.md` for the architecture and `docs/CONTEXT.md` for the reasoning behind decisions.
 
-## Running the dev loop (where do sessions live?)
+## Running the agents (how to start the workflow)
 
-You run **one** Developer Claude session, on **ce-master** — *not* on your Mac:
+The agents run on **ce-master** and are **human-gated** — they open PRs; **you merge**. Your **Mac runs no
+agent**; it's the control plane (review + merge PRs on GitHub).
+
+**Autonomous developer** — builds the DEVPLAN, one todo per PR:
 
 ```bash
 ssh ce-master
 tmux new -s dev                          # persistent; survives disconnects
 cd vllm-forager && source .venv/bin/activate
-claude                                    # builds DEVPLAN todos → PRs (never merges)
+claude                                    # then: Shift+Tab (Accept-Edits) → /dev-loop
 ```
 
-Your **Mac runs no Claude dev session** — it's the control plane: review + **merge** PRs on GitHub, and
-optionally `ssh ce-master && tmux attach -t dev` to watch or steer. So it's **one** session to manage, not two.
-The product's own agent runtime is a *separate* ce-master session that comes online later (M4). Full operator
-guide: **`docs/RUNBOOK.md`**.
+`/dev-loop` loops: first unchecked DEVPLAN todo → branch → implement + test → `pytest`/`pre-commit` green → open
+PR → `/code-review --comment` → poll until **you** merge → next todo, pausing at each milestone boundary. It never
+self-merges. (Omit `/dev-loop` to drive a manual, step-by-step session.)
+
+**Scheduled collector** — runs the product on a 24h cron, with health + self-heal:
+
+```bash
+# on ce-master (set GITHUB_TOKEN in .env first)
+crontab -e
+7 4 * * *  cd ~/vllm-forager && scripts/collect.sh >> data/logs/cron.log 2>&1
+```
+
+`scripts/collect.sh` records health to `data/last_run.json`; on failure `scripts/triage.sh` opens a **fix PR**
+(never merges). Run it from a separate clone than an active `/dev-loop` session.
+
+Watch or steer either: `ssh ce-master && tmux attach -t dev`. Full operator guide: **`docs/RUNBOOK.md`**.
