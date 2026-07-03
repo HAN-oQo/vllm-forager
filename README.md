@@ -45,16 +45,27 @@ vllm-forager/
 ├── requirements.txt
 ├── .env.example
 ├── docs/
-│   ├── PLAN.md        # Project plan (milestones M0-M4)
+│   ├── PLAN.md        # Project plan + architecture (milestones M0-M5)
+│   ├── DEVPLAN.md     # Resumable Milestone → to-do checklist (each todo has a test)
 │   └── CONTEXT.md     # Design decision log — context for resuming work
 ├── src/
 │   ├── __init__.py
 │   ├── config.py      # Tracked repos and path configuration
 │   └── collector.py   # GitHub issue/PR incremental collector (M0)
+├── tests/             # pytest suite (offline/deterministic) — run: python -m pytest
+├── requirements-dev.txt
+├── pytest.ini
 └── data/              # Collection output (gitignored)
 ```
 
 ## Next steps
 
-Follow the milestone order in `docs/PLAN.md`. M0 = collection + baseline summary comes first.
-See `docs/CONTEXT.md` for design background and decisions made so far.
+Work the checklist in **`docs/DEVPLAN.md`** — it's the resumable Milestone → to-do list, and every todo names a
+test. Find the first unchecked box and continue; a box is checked only when its test passes.
+
+```bash
+pip install -r requirements-dev.txt
+python -m pytest        # offline suite — keep it green
+```
+
+See `docs/PLAN.md` for the architecture and `docs/CONTEXT.md` for the reasoning behind decisions.

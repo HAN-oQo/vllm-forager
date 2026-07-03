@@ -84,7 +84,7 @@ In short, the direction is not "write new kernels" but **reproduce · debug · e
 ```
 [Collector] GitHub API/GraphQL → issues, PRs, releases, commits (vllm-project/vllm, ROCm/vllm, SGLang, Dynamo, llm-d)
    ↓
-[Normalization + RAG index] Store embeddings of text/labels/diffs
+[Normalization + RAG index] Store normalized items in a DB (Firebase/Firestore) + embeddings of text/labels/diffs
    ↓
 [Classification/ranking agent] Classify by taxonomy + score importance (with cited evidence links)
    ↓
@@ -95,11 +95,19 @@ In short, the direction is not "write new kernels" but **reproduce · debug · e
 [Patch agent] Create branch → write code → test on MI250 → request human review
    ↓
 [Output] Weekly report + PR candidate queue (continuously refreshed on a schedule)
+
+[Dashboard] Web UI observing EVERY stage's output (collection stats · taxonomy timeline ·
+            prediction scoreboard · candidate queue) — cross-cuts the whole pipeline, evolution loop first
 ```
 
-**Recommended stack:** Python, GitHub REST/GraphQL API, embeddings + a lightweight vector store (pgvector or
-LanceDB), Claude Code/Devin-style tools for the coding stages. Agent runtime on CPU; MI250 used only for vLLM
-testing.
+**Recommended stack:** Python, GitHub REST/GraphQL API, a document DB (Firebase/Firestore) for the knowledge
+base, embeddings + a lightweight vector store (pgvector or LanceDB). LLM backend is **pluggable** (`LLM_PROVIDER`
+= `claude_cli` via `claude -p` (default) · `claude_api` · `local` = OpenAI-compatible **vLLM** server); the
+Engineer's coding stage uses Claude Code.
+
+**Infrastructure:** the agent runs on **`ce-master`** (CPU) under tmux; **`mi250-051/052/053`** (MI250, gfx90a)
+are used only for vLLM build / bug reproduction / patch verification (the M3 oracle) and optionally hosting the
+local LLM. See `docs/DEVPLAN.md` for the resumable, test-backed build checklist.
 
 ---
 
@@ -112,6 +120,16 @@ keeps running and keeps improving itself.
 A scheduler + RAG index that collects and stores data from the 4 sources via the GitHub API. A v0 weekly summary
 report that classifies using a fixed taxonomy only (each item cites its PR link). ← *The repo currently has the
 collector skeleton implemented up to this point.*
+
+**Storage evolution (M0 follow-on): collected data → a database (Firebase/Firestore)**
+The M0 collector writes per-repo JSONL and rewrites the whole file every run (`_merge_jsonl`). Migrate to a
+document database — Firestore is a natural fit (one document per item, keyed by `repo#number`, upsert on write):
+- Concurrent-safe reads/writes (the scheduler writes while the dashboard reads), no whole-file rewrites.
+- Queryable by repo / label / state / updated_at / taxonomy instead of scanning files.
+- Real-time reads + hosting the **M5 dashboard** can consume directly.
+- Keep the same normalized schema (`_normalize`); move `state.json` (per-repo last-run cursor) into a `state`
+  collection. Keep a JSONL export as an optional portable dump.
+Do this before M5 (the dashboard benefits most); JSONL is fine through M1 if simpler.
 
 **M1 — Self-evolution loop (the differentiator)**
 Taxonomy self-evolution (propose new categories / retire dead topics) + self-prediction logging (store
@@ -130,6 +148,37 @@ Goal: get an actual PR submitted (docs/typing/tests/small ROCm bugs are sufficie
 Always-on via schedule: the weekly report and PR-candidate queue keep refreshing, and scoring keeps improving
 based on self-prediction grading results.
 
+**M5 — Observability dashboard: monitor the pipeline, evolution loop, and inference-engine trends**
+A local web dashboard that surfaces the output of *every* stage in one place, so the loop is inspectable while it
+runs (what it decided, and why). Two halves:
+
+*(a) Per-stage monitoring panels — watch the pipeline run:*
+- **Collection:** per-repo item counts, last-run time (from `data/state.json`), new vs. updated deltas.
+- **Index:** embedding/coverage stats.
+- **Classify & rank:** taxonomy distribution + top-ranked items, each with its cited evidence link.
+- **Evolution loop (primary focus):** taxonomy *timeline* (categories proposed / retired, with dates and the
+  triggering activity) + the self-prediction log (each timestamped "this will matter" call).
+- **Grading:** prediction scoreboard — precision/recall over time — plus heuristic version history (what changed,
+  when, why).
+- **Candidates:** ranked PR-candidate queue with risk badges.
+- **Reports:** archive of past weekly summaries.
+
+*(b) Trend & parity visualizations — read the market, with diagrams:*
+- **Trend charts:** technique/topic momentum over time per taxonomy category (e.g., activity in spec decoding,
+  disaggregated prefill/decode, quantization), sourced from classified issue/PR volume across the 5 repos.
+- **Parity analysis of LLM inference engines:** a feature/capability **comparison matrix** across
+  vllm-project/vllm · ROCm/vllm · SGLang · Dynamo · llm-d (paged KV cache, continuous batching, spec decoding,
+  disaggregated P/D, quantization/kernels, ROCm support …), highlighting **gaps present elsewhere but missing
+  upstream** — the visual counterpart to M2's parity-gap discovery.
+- **Diagrams:** a rendered architecture/data-flow view of the pipeline itself, and parity/gap diagrams (e.g.,
+  heatmap or matrix, engine × capability) that make "who has what, who lags" legible at a glance. Every cell/point
+  links back to the source issues/PRs (evidence principle).
+
+Build incrementally — start minimal right after M1 (evolution-loop panels: taxonomy timeline + prediction log),
+then add each stage's panel and each visualization as the underlying stage lands. Can later absorb the M3
+review-gate dashboard (approve/hold on patches) so monitoring and review share one UI. *(Order note: M5 is
+cross-cutting, not strictly last — a thin version should exist as soon as there's an evolution loop to watch.)*
+
 ---
 
 ## Human review gate — implementation approach
@@ -138,7 +187,8 @@ based on self-prediction grading results.
   → promote to the upstream vLLM repo once approved. Supplementary tools: VS Code/Cursor diff, GitHub Desktop,
   `delta` in the terminal.
 - **Stretch (if there's spare time):** a local web review dashboard that surfaces candidate patches in one place
-  (risk badges + diff preview + approve/hold buttons).
+  (risk badges + diff preview + approve/hold buttons). → Fold this into the **M5 observability dashboard** so
+  monitoring and patch review live in one UI.
 - ⚠️ Nothing goes upstream **without human approval first.**
 
 ---
