@@ -154,7 +154,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 - [x] **T0.5 Rate-limit handling + auth headers** — `src/collector.py::_headers/_sleep_for_rate_limit`.
       Test: `tests/test_collector.py::test_headers_token`, `::test_rate_limit_no_wait_on_ok`,
       `::test_rate_limit_waits_on_403`.
-- [ ] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`,
+- [x] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`,
       `get_state`, `set_state`); move JSONL logic into `src/store/jsonl_store.py`; collector writes via the
       interface.
       Test: `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.
