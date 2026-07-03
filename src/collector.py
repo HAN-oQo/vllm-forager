@@ -117,6 +117,7 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
                 rec = _normalize(it, slug)
                 collected[rec["number"]] = rec
                 last_updated = it.get("updated_at") or last_updated
+            print(f"    … {slug}: +{len(batch)} ({len(collected)} so far)", file=sys.stderr)
             if len(batch) < config.PER_PAGE:
                 return list(collected.values())
             page += 1
