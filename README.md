@@ -47,7 +47,8 @@ vllm-forager/
 ├── docs/
 │   ├── PLAN.md        # Project plan + architecture (milestones M0-M5)
 │   ├── DEVPLAN.md     # Resumable Milestone → to-do checklist (each todo has a test)
-│   └── CONTEXT.md     # Design decision log — context for resuming work
+│   ├── CONTEXT.md     # Design decision log — context for resuming work
+│   └── SURVEY_RSI.md  # Prior-art survey: recursive self-improvement / self-evolving agents
 ├── src/
 │   ├── __init__.py
 │   ├── config.py      # Tracked repos and path configuration

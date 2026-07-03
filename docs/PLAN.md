@@ -17,6 +17,10 @@
 
 ---
 
+> **Prior art:** see `docs/SURVEY_RSI.md` for a survey of recursive-self-improvement / self-evolving agent work
+> (Sakana AI's RSI Lab: DiscoPOP, Darwin Gödel Machine, ShinkaEvolve, ALE-Agent, Digital Red Queen, The AI
+> Scientist) and how their mechanisms map onto this project's loop.
+
 ## Design principles
 
 1. **Continuous operation and self-evolution are the essence.** Not build-once-and-done — it keeps running on a

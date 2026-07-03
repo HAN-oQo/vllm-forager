@@ -81,10 +81,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.
 - [ ] **T0.7 LLM wrapper (pluggable)** — `src/llm.py::complete` dispatching on `LLM_PROVIDER`
       (`claude_cli` shells out to `claude -p`; `claude_api`; `local`/vLLM OpenAI-compatible). JSON-mode parsing,
-      timeout, non-zero-exit / HTTP-error handling.
+      timeout, non-zero-exit / HTTP-error handling. **Return call metadata** (tokens / latency / est. cost)
+      alongside the result so the cost-aware bandit (T2.6) can route on reward-per-cost.
       Test: `tests/test_llm.py` — each provider path with subprocess/HTTP **mocked**: asserts prompt passed,
-      stdout/response parsed, `json_schema` returns dict, error path raises cleanly. Live per-provider smoke =
-      `@pytest.mark.integration`.
+      stdout/response parsed, `json_schema` returns dict, metadata populated, error path raises cleanly. Live
+      per-provider smoke = `@pytest.mark.integration`.
 - [ ] **T0.8 Baseline weekly report v0 (fixed taxonomy, no LLM)** — `src/agents/reporter.py`: read items from
       store, bucket by fixed-taxonomy keyword match, emit Markdown with cited links.
       Test: `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
@@ -136,6 +137,17 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 - [ ] **T2.5 Candidate discovery + risk ranking** — `src/agents/scout.py`: candidates (ROCm-reproducible /
       good-first-issue / parity gap), risk-tiered.
       Test: `tests/test_scout.py` — fixture items → ranked candidates with risk tier + evidence present.
+- [ ] **T2.6 Cost-aware LLM provider selection (bandit)** — `src/llm_bandit.py`: a UCB-style bandit over the
+      `LLM_PROVIDER` options (claude_cli / claude_api / local-vLLM) using per-call reward (task success) vs
+      cost/latency from T0.7's metadata; agents ask the policy which provider to use. *(Borrowed from ShinkaEvolve.)*
+      Test: `tests/test_llm_bandit.py` — synthetic reward/cost history → bandit prefers the best reward-per-cost
+      provider; an unseen provider still gets explored.
+- [ ] **T2.7 Novelty / dedup filter before expensive evaluation** — `src/novelty.py`: reject a candidate *before*
+      a costly MI250 build if it is a near-duplicate of a prior attempt (embedding similarity ≥ threshold) or an
+      LLM-as-novelty-judge rules it redundant. Gates T3.2/T3.3. *(Borrowed from ShinkaEvolve — the biggest
+      sample-efficiency lever.)*
+      Test: `tests/test_novelty.py` — near-duplicate candidate rejected; a genuinely new one passes (embedding +
+      judge mocked).
 
 ## M3 — Contribution plane (MI250 verification oracle) — human-gated
 
@@ -149,11 +161,16 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       → confirm signal flips.
       Test: `tests/test_engineer.py` — mock llm+runner: fail→patch→pass ⇒ `verified=True`; fail→patch→fail ⇒
       `verified=False` and **no PR**.
-- [ ] **T3.4 Human gate** — assemble `{diff, risk badge, repro evidence, MI250 logs}`; `gh pr create --draft`
-      **only** after an explicit approve flag.
+- [ ] **T3.4 Ensemble self-review gate** — before the human gate, run N independent adversarial self-critiques of
+      the verified patch (multi-sample vote) via `llm.complete`; require a majority "looks correct" **in addition
+      to** the MI250 pass. Only patches passing **both** the hardware verify (T3.3) and self-review advance.
+      *(Borrowed from The AI Scientist's ensemble reviewer — beat single-reviewer reliability.)*
+      Test: `tests/test_self_review.py` — mock llm votes: majority-approve ⇒ advance; split/reject ⇒ hold (no gate).
+- [ ] **T3.5 Human gate** — assemble `{diff, risk badge, repro evidence, MI250 logs, self-review votes}`;
+      `gh pr create --draft` **only** after an explicit approve flag.
       Test: `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked).
       **HARD: nothing reaches upstream without approval.**
-- [ ] **T3.5 First real PR** (lowest risk: docs/typing/test-only) through the gate.
+- [ ] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
       Test: manual/`integration` — **draft PR URL pasted here**; checked only then.
       > note: PR URL = …
 
