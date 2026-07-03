@@ -14,6 +14,8 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
 2. `docs/CONTEXT.md` — decisions and the reasoning behind them.
 3. `docs/PLAN.md` — architecture + roadmap.
 4. `docs/SURVEY_RSI.md` — prior art (recursive self-improvement / self-evolving agents).
+5. `docs/IDEAS.md` — idea backlog → next-version roadmap (future, not-yet-committed work; keep it separate from
+   the DEVPLAN, which is committed test-backed work).
 
 ## Golden workflow (non-negotiable)
 - Work `DEVPLAN.md` top-to-bottom; do the **first unchecked `[ ]`**. Read its milestone's Expected output / Demo /
