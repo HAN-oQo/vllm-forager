@@ -14,8 +14,8 @@ def test_data_dir_env_override(monkeypatch, tmp_path):
     monkeypatch.setenv("FORAGER_DATA_DIR", str(tmp_path))
     try:
         importlib.reload(cfg)
-        assert cfg.DATA_DIR == tmp_path
-        assert cfg.STATE_PATH == tmp_path / "state.json"
+        assert tmp_path == cfg.DATA_DIR
+        assert tmp_path / "state.json" == cfg.STATE_PATH
     finally:
         monkeypatch.delenv("FORAGER_DATA_DIR", raising=False)
         importlib.reload(cfg)  # restore default so other tests are unaffected
