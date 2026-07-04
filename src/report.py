@@ -11,13 +11,16 @@ rendering itself lives in the reporter module so it stays pure and testable.
 builds on its citation helpers and its own tests still pin its standalone behavior — but this
 CLI's default output is v1's.)
 
-``--tree`` (T1.5.4, opt-in — the default output is unchanged, so existing consumers like
-T1.9's dashboard never see a surprise format change) renders the taxonomy-tree digest instead
+``--tree`` (T1.5.4, opt-in — the default output is unchanged, so existing consumers never see
+a surprise format change) renders the taxonomy-tree digest instead
 (:func:`~src.agents.reporter_v1.build_tree`/``render_tree_markdown``, nested by classified
 ``path`` with T1.5.3's node summaries) via :func:`generate_tree`, writing ``<week>.tree.md``
 (not the plain ``<week>.md`` — the two report styles must never collide on one filename) and
-``<week>.tree.json`` — the nested ``{name, summary, count, gaps, children, prs}`` structure
-T1.5.5's dashboard will read directly, rather than re-deriving the tree from raw items itself.
+``<week>.tree.json`` — the nested ``{name, summary, count, gaps, children, prs}`` structure as
+a standalone on-disk artifact. T1.5.5's dashboard does **not** read this file: it computes the
+same tree live via :func:`~src.agents.reporter_v1.tree_from_store`, straight from the `Store`
+(matching how Trends/the forecast log already worked), so it's never stale relative to
+whichever host last ran this CLI.
 
 Design:
 - :func:`generate` is the injectable core (store + output dir + clock in, path out) so tests
@@ -87,8 +90,9 @@ def generate_tree(
     Writes ``reports_dir/<week_stamp>.tree.md`` (indented 大→소(summary)→소소→PRs Markdown,
     :func:`~src.agents.reporter_v1.render_tree_markdown`) and
     ``reports_dir/<week_stamp>.tree.json`` (the same tree as a list of
-    :meth:`~src.agents.reporter_v1.TreeNode.to_dict`) — T1.5.5's dashboard reads the JSON
-    directly rather than re-deriving the tree from raw items. Returns ``(md_path, json_path)``.
+    :meth:`~src.agents.reporter_v1.TreeNode.to_dict`) as a standalone on-disk artifact — the
+    dashboard (T1.5.5) computes its own tree live from the `Store` instead of reading this
+    file. Returns ``(md_path, json_path)``.
 
     ``.tree.md``, not the plain ``.md`` :func:`generate` uses for the flat report — the two
     report styles must never collide on one filename (running the default report and

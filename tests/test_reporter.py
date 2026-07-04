@@ -83,6 +83,17 @@ def test_cite_collapses_title_and_synthesizes_missing_url():
     assert "\n" not in bullet
 
 
+def test_repo_number_label_present_values():
+    assert reporter.repo_number_label({"repo": "o/r", "number": 5}) == "o/r#5"
+
+
+def test_repo_number_label_treats_none_same_as_missing():
+    # a caller-built dict (e.g. reporter_v1's `_pr_entry`) may set these to None rather than
+    # omitting them — both must render the same "?" placeholder.
+    assert reporter.repo_number_label({"repo": None, "number": None}) == "?#?"
+    assert reporter.repo_number_label({}) == "?#?"
+
+
 def test_build_report_orders_newest_first_then_repo_number_ascending():
     md = reporter.build_report(
         [

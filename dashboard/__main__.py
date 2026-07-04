@@ -1,10 +1,11 @@
 """``python -m dashboard`` — serve the thin read-only M1 dashboard.
 
-Store/reports-dir selection uses :func:`src.store.resolve_store` (T1.11), the same shared
-contract as :mod:`src.report`/:mod:`src.analyze`/:mod:`src.forecast`: with ``--data-dir``,
-always reads a :class:`~src.store.jsonl_store.JsonlStore` at that path; without it, uses
+Store selection uses :func:`src.store.resolve_store` (T1.11), the same shared contract as
+:mod:`src.report`/:mod:`src.analyze`/:mod:`src.forecast`: with ``--data-dir``, always reads a
+:class:`~src.store.jsonl_store.JsonlStore` at that path; without it, uses
 :func:`src.store.get_store` (``STORE=jsonl|firestore``) so ``STORE=firestore`` serves from
-Firestore just like the collector/reporter do.
+Firestore just like the collector/reporter do. Since T1.5.5, the dashboard reads everything
+(the report tree included) through the `Store` — no local ``reports_dir`` dependency remains.
 """
 
 from __future__ import annotations
@@ -38,8 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765).")
     args = ap.parse_args(argv)
 
-    store, data_dir = resolve_store(args.data_dir)
-    return serve(store, data_dir / "reports", host=args.host, port=args.port)
+    store, _data_dir = resolve_store(args.data_dir)
+    return serve(store, host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

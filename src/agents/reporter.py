@@ -145,6 +145,20 @@ def evidence_url(item: dict) -> str:
     return url
 
 
+def repo_number_label(item: dict) -> str:
+    """``repo#number`` for `item`, ``?`` for a missing or present-but-``None`` field.
+
+    Shared by :func:`_cite` here and by ``dashboard.render``'s PR/issue rows, since a
+    caller-built dict (e.g. reporter_v1's ``_pr_entry``) may set ``repo``/``number`` to `None`
+    rather than omitting them — ``.get(key, "?")`` alone wouldn't catch that, so both
+    "missing" and "present but None" must be checked explicitly here, once, for every caller.
+    """
+    repo = item.get("repo") or "?"
+    number = item.get("number")
+    number = number if number is not None else "?"
+    return f"{repo}#{number}"
+
+
 def _cite(item: dict, *, text: str | None = None) -> str:
     """One Markdown bullet for an item, always carrying its source link.
 
@@ -160,15 +174,9 @@ def _cite(item: dict, *, text: str | None = None) -> str:
     If the item has no ``url``, synthesize the canonical GitHub link (GitHub redirects
     ``/issues/N`` ↔ ``/pull/N``) so every bullet still cites a source (evidence principle).
     """
-    # `or "?"`/`is not None else "?"`, not `.get(key, "?")` — a caller-built dict (e.g.
-    # reporter_v1's `_pr_entry`) may set these keys to `None` rather than omitting them; both
-    # "missing" and "present but None" must render the same "?" placeholder.
-    repo = item.get("repo") or "?"
-    number = item.get("number")
-    number = number if number is not None else "?"
     raw_text = text if text is not None else (item.get("title") or "")
     rendered = " ".join(raw_text.split()) or "(no title)"
-    return f"- [{repo}#{number}] {rendered} — {evidence_url(item)}"
+    return f"- [{repo_number_label(item)}] {rendered} — {evidence_url(item)}"
 
 
 def build_report(items: list[dict], *, title: str = "vLLM (ROCm) weekly digest") -> str:

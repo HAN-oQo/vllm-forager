@@ -1,7 +1,13 @@
-"""Tests for the thin read-only dashboard (T1.9) — offline & deterministic.
+"""Tests for the thin read-only dashboard (T1.9, tree UI since T1.5.5) — offline & deterministic.
 
-Per the DEVPLAN todo: seed a store fixture on tmp_path, assert the render functions return
-the report body + correct trend series. A live server smoke is ``@pytest.mark.integration``.
+Per T1.5.5's DEVPLAN todo: a seeded tree → render produces nested nodes + summaries + evidence
+links; filtering to a term keeps only matching leaves. The filter itself is client-side
+JavaScript (no headless-browser tool is available in this environment to execute it), so
+"filtering keeps only matching leaves" is tested here as: the filter script is embedded and
+targets the right elements, and every rendered PR row carries the text (id + title) the filter
+matches substrings against — see ``test_tree_filter_script_and_matchable_text_are_present``.
+
+A live server smoke is ``@pytest.mark.integration``.
 """
 
 from __future__ import annotations
@@ -11,14 +17,10 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.render import (
-    latest_report_path,
-    render_forecasts,
-    render_page,
-    render_report,
-    render_trends,
-)
+from dashboard.render import _safe_href, _state_chip, render_forecasts, render_page, render_trends
 from dashboard.server import _make_handler, serve
+from src import llm
+from src.agents import summarizer
 from src.agents.forecaster import Prediction, record_prediction
 from src.store.jsonl_store import JsonlStore
 
@@ -28,26 +30,35 @@ _ITEMS = [
     {
         "repo": "ROCm/vllm",
         "number": 1,
+        "type": "issue",
         "title": "hipBLAS build fails",
+        "state": "open",
         "url": "https://github.com/ROCm/vllm/issues/1",
         "created_at": "2026-01-05T00:00:00Z",
         "category": "build",
+        "path": ["build"],
     },
     {
         "repo": "ROCm/vllm",
         "number": 2,
+        "type": "pr",
         "title": "another build issue",
-        "url": "https://github.com/ROCm/vllm/issues/2",
+        "state": "closed",
+        "url": "https://github.com/ROCm/vllm/pull/2",
         "created_at": "2026-01-06T00:00:00Z",
         "category": "build",
+        "path": ["build"],
     },
     {
         "repo": "vllm-project/vllm",
         "number": 3,
+        "type": "pr",
         "title": "FP8 quantization",
-        "url": "https://github.com/vllm-project/vllm/issues/3",
+        "state": "open",
+        "url": "https://github.com/vllm-project/vllm/pull/3",
         "created_at": "2026-01-12T00:00:00Z",
-        "category": "quantization",
+        "category": "quantization > FP8",
+        "path": ["quantization", "FP8"],
     },
 ]
 
@@ -68,23 +79,6 @@ def _seeded_store(tmp_path: Path) -> JsonlStore:
     return store
 
 
-# --------------------------------------------------------------------- render_report
-
-
-def test_render_report_reads_latest_report_file(tmp_path: Path) -> None:
-    reports_dir = tmp_path / "reports"
-    reports_dir.mkdir()
-    (reports_dir / "2026-W01.md").write_text("# stale report", encoding="utf-8")
-    (reports_dir / "2026-W02.md").write_text("# fresh report", encoding="utf-8")
-
-    assert latest_report_path(reports_dir) == reports_dir / "2026-W02.md"
-    assert render_report(reports_dir) == "# fresh report"
-
-
-def test_render_report_no_reports_yet_is_a_placeholder(tmp_path: Path) -> None:
-    assert "No report has been generated yet" in render_report(tmp_path / "reports")
-
-
 # --------------------------------------------------------------------- render_trends/forecasts
 
 
@@ -95,7 +89,7 @@ def test_render_trends_matches_seeded_categories(tmp_path: Path) -> None:
 
     assert series == {
         "build": {"2026-W02": 2},
-        "quantization": {"2026-W03": 1},
+        "quantization > FP8": {"2026-W03": 1},
     }
 
 
@@ -107,35 +101,182 @@ def test_render_forecasts_returns_recorded_predictions(tmp_path: Path) -> None:
     assert predictions == [_PREDICTION]
 
 
-# --------------------------------------------------------------------- render_page
+# --------------------------------------------------------------------- _state_chip
 
 
-def test_render_page_includes_report_trends_and_forecasts(tmp_path: Path) -> None:
+def test_state_chip_issue() -> None:
+    assert _state_chip({"type": "issue", "state": "open"}) == ("issue", "issue")
+
+
+def test_state_chip_open_pr() -> None:
+    assert _state_chip({"type": "pr", "state": "open"}) == ("open", "open pr")
+
+
+def test_state_chip_closed_pr_is_merged() -> None:
+    assert _state_chip({"type": "pr", "state": "closed"}) == ("merged", "merged")
+
+
+def test_state_chip_missing_state_defaults_to_open() -> None:
+    """A malformed/legacy record with no `state` at all renders as "open pr", not "merged" —
+    claiming an unknown state is open is the less misleading of the two guesses."""
+    assert _state_chip({"type": "pr"}) == ("open", "open pr")
+
+
+# --------------------------------------------------------------------- _safe_href
+
+
+def test_safe_href_allows_http_and_https() -> None:
+    assert _safe_href("http://x/1") == "http://x/1"
+    assert _safe_href("https://x/1") == "https://x/1"
+
+
+def test_safe_href_rejects_javascript_scheme() -> None:
+    assert _safe_href("javascript:alert(1)") == ""
+
+
+def test_render_page_never_links_a_javascript_url(tmp_path: Path) -> None:
+    """A malformed/non-GitHub item `url` must never become a clickable href — this dashboard
+    has no auth and renders whatever the KB contains."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items(
+        [
+            {
+                "repo": "o/r",
+                "number": 1,
+                "type": "pr",
+                "title": "x",
+                "state": "open",
+                "url": "javascript:alert(document.cookie)",
+                "created_at": "2026-01-01T00:00:00Z",
+                "path": ["build"],
+            }
+        ]
+    )
+
+    page = render_page(store)
+
+    assert "javascript:" not in page
+
+
+# --------------------------------------------------------------------- report tree section
+
+
+def test_tree_section_renders_nested_nodes_with_summary_and_evidence_links(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T1.5.5's named scenario: a seeded tree → render produces nested nodes + summaries +
+    evidence links."""
     store = _seeded_store(tmp_path)
-    reports_dir = tmp_path / "reports"
-    reports_dir.mkdir()
-    (reports_dir / "2026-W02.md").write_text("# weekly digest body", encoding="utf-8")
+    monkeypatch.setattr(
+        llm, "complete", lambda *a, **k: {"summary": "FP8 quantization work is landing."}
+    )
+    summarizer.summarize_store(store)
 
-    page = render_page(store, reports_dir)
+    page = render_page(store)
 
-    assert "weekly digest body" in page
-    assert "build" in page
-    assert "quantization" in page
-    assert "PR #3 will merge by end of Q1" in page
+    # nested nodes: both root categories, and the "FP8" child under "quantization"
+    assert '<span class="name">build</span>' in page
+    assert '<span class="name">quantization</span>' in page
+    assert '<span class="name">FP8</span>' in page
+    # rolled-up counts
+    assert '<span class="count">2</span>' in page  # "build" has 2 items
+    # the node summary (T1.5.3)
+    assert "FP8 quantization work is landing." in page
+    # evidence links: every leaf PR/issue cites its own URL
+    assert "https://github.com/ROCm/vllm/issues/1" in page
+    assert "https://github.com/vllm-project/vllm/pull/3" in page
+    # state chips
+    assert '<span class="chip issue">issue</span>' in page
+    assert '<span class="chip merged">merged</span>' in page  # ROCm/vllm#2, closed
+    assert '<span class="chip open">open pr</span>' in page  # vllm#3, open
+
+
+def test_tree_section_empty_store_shows_placeholder(tmp_path: Path) -> None:
+    """`tree_from_store` returns `[]` only for a literally empty store — see
+    `_tree_section_html`'s own docstring for why unclassified-but-present items don't hit
+    this (they render under `Other` instead; see the test below)."""
+    store = JsonlStore(tmp_path)
+
+    page = render_page(store)
+
+    assert "No classified items yet" in page
+    assert "<details" not in page
+
+
+def test_tree_section_unclassified_items_render_under_other(tmp_path: Path) -> None:
+    """An item with no `path` yet renders under a real `Other` node, not the placeholder —
+    `build_tree` (T1.5.4) folds path-less items there rather than treating them as empty."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items(
+        [
+            {
+                "repo": "o/r",
+                "number": 1,
+                "type": "issue",
+                "title": "x",
+                "state": "open",
+                "url": "http://x/1",
+                "created_at": "2026-01-01T00:00:00Z",
+            }
+        ]
+    )
+
+    page = render_page(store)
+
+    assert '<span class="name">Other</span>' in page
+    assert "run <code>python -m src.analyze</code>" not in page
+
+
+def test_tree_filter_script_and_matchable_text_are_present(tmp_path: Path) -> None:
+    """The filter itself is client-side JS this test suite can't execute — this instead
+    verifies (1) the filter script targets #tree/.pr/#q as the render functions produce them,
+    and (2) every PR row's rendered text contains its id+title, which is exactly what a
+    substring filter needs to match against."""
+    store = _seeded_store(tmp_path)
+
+    page = render_page(store)
+
+    assert '<input id="q"' in page
+    assert "getElementById('q')" in page
+    assert "querySelectorAll('#tree .pr')" in page
+    assert "classList.toggle('hidden'" in page
+    assert "ROCm/vllm#1" in page and "hipBLAS build fails" in page  # matchable id + title
 
 
 def test_render_page_escapes_untrusted_content(tmp_path: Path) -> None:
-    """Item/report/prediction text originates from GitHub — must be HTML-escaped, not
-    injected raw, since the dashboard has no auth and renders whatever the KB contains."""
+    """Item text originates from GitHub — must be HTML-escaped, not injected raw, since the
+    dashboard has no auth and renders whatever the KB contains."""
     store = JsonlStore(tmp_path)
-    reports_dir = tmp_path / "reports"
-    reports_dir.mkdir()
-    (reports_dir / "2026-W01.md").write_text("<script>alert(1)</script>", encoding="utf-8")
+    store.upsert_items(
+        [
+            {
+                "repo": "o/r",
+                "number": 1,
+                "type": "issue",
+                "title": "<script>alert(1)</script>",
+                "state": "open",
+                "url": "http://x/1",
+                "created_at": "2026-01-01T00:00:00Z",
+                "path": ["<script>alert(2)</script>"],
+            }
+        ]
+    )
 
-    page = render_page(store, reports_dir)
+    page = render_page(store)
 
     assert "<script>alert(1)</script>" not in page
+    assert "<script>alert(2)</script>" not in page
     assert "&lt;script&gt;" in page
+
+
+def test_render_page_includes_trends_and_forecasts(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+
+    page = render_page(store)
+
+    assert "build" in page
+    assert "quantization" in page
+    assert "PR #3 will merge by end of Q1" in page
 
 
 # --------------------------------------------------------------------- server error handling
@@ -179,7 +320,7 @@ def test_do_get_returns_500_on_render_failure(tmp_path: Path) -> None:
     """A corrupt store record must yield a real HTTP 500, not a silently dropped connection."""
     store = JsonlStore(tmp_path)
     store.set_state("prediction_count", "not-a-number")  # forecaster._parse_count raises
-    handler_cls = _make_handler(store, tmp_path / "reports")
+    handler_cls = _make_handler(store)
     fake = _FakeResponse()
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -197,7 +338,7 @@ def test_serve_returns_1_on_port_already_in_use(tmp_path: Path) -> None:
     blocker.listen(1)
     port = blocker.getsockname()[1]
     try:
-        exit_code = serve(store, tmp_path / "reports", host="127.0.0.1", port=port)
+        exit_code = serve(store, host="127.0.0.1", port=port)
         assert exit_code == 1
     finally:
         blocker.close()
@@ -213,11 +354,8 @@ def test_dashboard_live_smoke(tmp_path: Path) -> None:
     from http.server import HTTPServer
 
     store = _seeded_store(tmp_path)
-    reports_dir = tmp_path / "reports"
-    reports_dir.mkdir()
-    (reports_dir / "2026-W02.md").write_text("# weekly digest body", encoding="utf-8")
 
-    handler = _make_handler(store, reports_dir)
+    handler = _make_handler(store)
     httpd = HTTPServer(("127.0.0.1", 0), handler)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
@@ -227,7 +365,7 @@ def test_dashboard_live_smoke(tmp_path: Path) -> None:
         with urllib.request.urlopen(f"http://127.0.0.1:{port}/") as resp:
             body = resp.read().decode("utf-8")
         assert resp.status == 200
-        assert "weekly digest body" in body
+        assert "hipBLAS build fails" in body
     finally:
         httpd.shutdown()
         thread.join()

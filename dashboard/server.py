@@ -13,9 +13,10 @@ resource leak over a multi-hour ``serve_forever()`` run.
 
 Known limitations of this thin M1 slice (not fixed here — acceptable for a single-user, local,
 read-only tool; would need addressing before any wider/production use):
-- Every request re-scans the **entire** store (`Store.query()`) and re-reads the **entire**
-  prediction log (one `get_state()` per historical prediction) — no caching, pagination, or
-  limit. Cost grows linearly with KB size and multiplies per page view.
+- Every request re-scans the **entire** store (`Store.query()`), re-reads the **entire**
+  prediction log (one `get_state()` per historical prediction), and — since T1.5.5 —
+  re-fetches a `get_state()` per taxonomy tree node for its stored summary — no caching,
+  pagination, or limit anywhere. Cost grows linearly with KB size and multiplies per page view.
 - The server is single-threaded (:class:`~http.server.HTTPServer`, not
   ``ThreadingHTTPServer``), so one slow request (a large KB, a slow Firestore round trip)
   blocks every other concurrent client until it completes.
@@ -25,18 +26,17 @@ from __future__ import annotations
 
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from pathlib import Path
 
 from src.store.base import Store
 
 from .render import render_page
 
 
-def _make_handler(store: Store, reports_dir: Path) -> type[BaseHTTPRequestHandler]:
+def _make_handler(store: Store) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler's naming convention)
             try:
-                page = render_page(store, reports_dir).encode("utf-8")
+                page = render_page(store).encode("utf-8")
             except Exception:  # noqa: BLE001 — any render/store failure must still get a response
                 traceback.print_exc()
                 body = b"500 Internal Server Error: failed to render the dashboard.\n"
@@ -58,14 +58,14 @@ def _make_handler(store: Store, reports_dir: Path) -> type[BaseHTTPRequestHandle
     return Handler
 
 
-def serve(store: Store, reports_dir: Path, *, host: str = "127.0.0.1", port: int = 8765) -> int:
+def serve(store: Store, *, host: str = "127.0.0.1", port: int = 8765) -> int:
     """Start the dashboard's HTTP server and block, serving requests until interrupted.
 
     Returns a process exit code: 0 on a normal (interrupted) shutdown, 1 if `port` couldn't be
     bound (e.g. already in use) — the caller (:mod:`dashboard.__main__`) prints nothing further
     and just propagates this as its own exit code.
     """
-    handler = _make_handler(store, reports_dir)
+    handler = _make_handler(store)
     try:
         httpd = HTTPServer((host, port), handler)
     except OSError as exc:
