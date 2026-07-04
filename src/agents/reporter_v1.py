@@ -20,15 +20,28 @@ under :data:`~src.agents.reporter.OTHER`, with no LLM call — there's nothing c
 summarize. If there ARE such items, the report says so and points at ``python -m
 src.analyze`` — silently degrading every section to plain citations with no explanation
 would be a worse failure mode than a visible note.
+
+T1.5.4 adds a second, tree-shaped report alongside the original flat-per-category one above:
+:func:`build_tree` groups items by their classified ``path`` (T1.5.2) instead of the flat
+``category``, :func:`render_tree_markdown` renders it as an indented 大 → 소(summary) → 소소 →
+PRs digest (the approved ``docs/design/report-tree-mockup.html``), and ``TreeNode.to_dict()``
+is what ``report.py --tree`` writes to ``data/reports/<week>.tree.json`` for T1.5.5's
+dashboard to consume. The two report styles are independent — building the tree never calls
+``llm.complete`` itself; the per-node prose already lives in the KB from T1.5.3's summarizer.
 """
 
 from __future__ import annotations
 
 import sys
+from collections import defaultdict
+from collections.abc import Callable
+from dataclasses import dataclass
 
 from .. import llm
 from ..store.base import Store
+from ..taxonomy import CategoryPath
 from .reporter import OTHER, _cite, _num
+from .summarizer import get_node_summary
 
 # Per item, inside a batched per-category prompt — kept short since several items share one
 # call (unlike a single-item agent's budget, e.g. the Analyst's 2000 chars).
@@ -162,3 +175,154 @@ def build_report_v1(items: list[dict], *, title: str = "vLLM (ROCm) weekly diges
 def report_from_store(store: Store, *, title: str = "vLLM (ROCm) weekly digest") -> str:
     """Read all items from `store` and render the v1 report."""
     return build_report_v1(store.query(), title=title)
+
+
+# --------------------------------------------------------------------- T1.5.4: tree report
+
+
+@dataclass(frozen=True)
+class TreeNode:
+    """One node in the taxonomy tree: `count`/`prs` cover only items classified **exactly**
+    at this node's path — a deeper item contributes to a `children` node instead, never both.
+
+    ``count`` rolls up this node's own item count plus every descendant's (so a parent always
+    shows its subtree total, per T1.5.4's own "Why"). ``gaps`` is a placeholder — T2.4's parity
+    matrix (M2, not yet built) is the only planned source of gap data; every node reports 0
+    until that lands. A node with ``count == 0`` can never be constructed by :func:`build_tree`
+    (it only ever creates a node because some item's path passes through it), so "empty
+    branches pruned" is a structural guarantee, not a separate filtering step.
+    """
+
+    name: str
+    summary: str | None
+    count: int
+    gaps: int
+    children: tuple[TreeNode, ...]
+    prs: tuple[dict, ...]
+
+    def to_dict(self) -> dict:
+        """The ``{name, summary, count, gaps, children[], prs[]}`` shape T1.5.4 specifies,
+        recursively — what gets written to ``data/reports/<week>.tree.json``."""
+        return {
+            "name": self.name,
+            "summary": self.summary,
+            "count": self.count,
+            "gaps": self.gaps,
+            "children": [child.to_dict() for child in self.children],
+            "prs": [dict(pr) for pr in self.prs],
+        }
+
+
+def _pr_entry(item: dict) -> dict:
+    """The minimal, JSON-serializable shape one leaf PR/issue carries in a tree node: enough
+    for T1.5.5's dashboard to render a cited row + a merged/open/issue state chip, without
+    bloating ``tree.json`` with every raw item field (body text, labels, etc.)."""
+    url = item.get("url") or ""
+    if not url and item.get("repo") and item.get("number") is not None:
+        url = f"https://github.com/{item['repo']}/issues/{item['number']}"
+    return {
+        "repo": item.get("repo"),
+        "number": item.get("number"),
+        "title": item.get("title") or "",
+        "url": url,
+        "state": item.get("state"),
+        "type": item.get("type"),
+    }
+
+
+def build_tree(
+    items: list[dict], summary_lookup: Callable[[CategoryPath], str | None] = lambda path: None
+) -> list[TreeNode]:
+    """Group `items` into a nested tree by their classified ``path`` (T1.5.2).
+
+    An item with no ``path`` yet, or one classified :data:`~src.agents.reporter.OTHER`, is
+    collected into one flat ``Other`` root node (no further nesting — there's nothing to nest,
+    same convention :func:`build_report_v1` already uses). `summary_lookup` supplies each
+    node's synthesis (T1.5.3's :func:`~src.agents.summarizer.get_node_summary`, injected so
+    this function stays pure/offline-testable — the default returns ``None`` everywhere, i.e.
+    "no summaries available").
+
+    Root nodes are ordered by first appearance in `items`; each node's own children are
+    ordered the same way. Deterministic given deterministic input order.
+    """
+    other_items: list[dict] = []
+    exact: dict[CategoryPath, list[dict]] = {}
+    children_of: dict[CategoryPath, list[str]] = defaultdict(list)
+    seen_children: dict[CategoryPath, set[str]] = defaultdict(set)
+
+    for item in items:
+        path = item.get("path")
+        if not isinstance(path, list) or not path or path == [OTHER]:
+            other_items.append(item)
+            continue
+        path_t = tuple(path)
+        exact.setdefault(path_t, []).append(item)
+        for depth in range(len(path_t)):
+            prefix, level = path_t[:depth], path_t[depth]
+            if level not in seen_children[prefix]:
+                seen_children[prefix].add(level)
+                children_of[prefix].append(level)
+
+    def make_node(prefix: CategoryPath) -> TreeNode:
+        children = tuple(make_node((*prefix, name)) for name in children_of.get(prefix, []))
+        own = exact.get(prefix, [])
+        return TreeNode(
+            name=prefix[-1],
+            summary=summary_lookup(prefix),
+            count=len(own) + sum(child.count for child in children),
+            gaps=0,
+            children=children,
+            prs=tuple(_pr_entry(item) for item in own),
+        )
+
+    tree = [make_node((name,)) for name in children_of.get((), [])]
+    if other_items:
+        tree.append(
+            TreeNode(
+                name=OTHER,
+                summary=None,
+                count=len(other_items),
+                gaps=0,
+                children=(),
+                prs=tuple(_pr_entry(item) for item in other_items),
+            )
+        )
+    return tree
+
+
+def render_tree_markdown(nodes: list[TreeNode], *, title: str = "vLLM (ROCm) weekly digest") -> str:
+    """Render `nodes` as indented Markdown: 대 → 소(summary) → 소소 → PRs, per the approved
+    report-tree mockup — headings nest one level per tree depth (capped at H6), each node's
+    summary (if any) as an italic line, and its own PRs as :func:`~src.agents.reporter._cite`
+    bullets before its children.
+    """
+    total = sum(node.count for node in nodes)
+    lines = [f"# {title}", "", f"{total} items.", ""]
+
+    def render(node: TreeNode, depth: int) -> None:
+        heading = "#" * min(depth + 2, 6)
+        lines.append(f"{heading} {node.name} ({node.count})")
+        if node.summary:
+            lines.append(f"_{node.summary}_")
+        lines.append("")
+        lines.extend(_cite(pr) for pr in node.prs)
+        if node.prs:
+            lines.append("")
+        for child in node.children:
+            render(child, depth + 1)
+
+    for node in nodes:
+        render(node, 0)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def tree_from_store(store: Store) -> list[TreeNode]:
+    """Read all items from `store`, build the tree, and attach each node's stored T1.5.3
+    summary (:func:`~src.agents.summarizer.get_node_summary`) — the impure entry point CLI/
+    dashboard callers use; :func:`build_tree` itself stays store-free and pure for testing."""
+
+    def lookup(path: CategoryPath) -> str | None:
+        summary = get_node_summary(store, path)
+        return summary.text if summary is not None else None
+
+    return build_tree(store.query(), summary_lookup=lookup)

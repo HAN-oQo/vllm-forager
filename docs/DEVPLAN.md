@@ -297,7 +297,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the "소분류 요약" — turns a bucket of PRs into a scannable "what's happening here"; the biggest readability lever after nesting.
   - **e.g.:** node `ROCm/AMD > DeepSeek-V4 > performance` → "MLA + MoE kernels are the frontier; the theme is closing decode-parity vs SGLang."
   - **Test:** `tests/test_summarizer.py` — mock llm → a node summary is produced and every claim cites ≥1 item URL; an empty node yields no summary (no hallucinated content).
-- [ ] **T1.5.4 Tree-structured report** — evolve `src/agents/reporter.py` (or a report builder) to emit the **nested tree** grouped by path: `{name, summary, count, gaps, children[], prs[]}` as JSON + Markdown, with counts rolling up.
+- [x] **T1.5.4 Tree-structured report** — evolve `src/agents/reporter.py` (or a report builder) to emit the **nested tree** grouped by path: `{name, summary, count, gaps, children[], prs[]}` as JSON + Markdown, with counts rolling up.
   - **Why:** both the CLI report and the dashboard must consume one tree structure; counts/gaps roll up so a parent shows its subtree totals.
   - **e.g.:** `data/reports/…tree.json` = nested nodes; the Markdown renders indented `大 → 소(summary) → 소소 → PRs`.
   - **Test:** `tests/test_reporter_v1.py` — fixtures → correct nesting + rolled-up counts; every leaf PR has an evidence URL; empty branches pruned.
