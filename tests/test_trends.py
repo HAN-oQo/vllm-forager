@@ -10,8 +10,8 @@ from datetime import datetime, timezone
 import pytest
 
 from src import trends
-from src.report import week_stamp
 from src.store.jsonl_store import JsonlStore
+from src.trends import week_stamp
 
 pytestmark = pytest.mark.m1
 
@@ -71,6 +71,25 @@ def test_category_trends_skips_missing_or_malformed_created_at() -> None:
         _item("o/r", 2, "not-a-date", category="ROCm / AMD"),
     ]
     assert trends.category_trends(items) == {}
+
+
+def test_category_trends_skips_non_string_created_at(capsys) -> None:
+    """Regression: a non-string created_at (e.g. an int) raised an uncaught TypeError."""
+    items = [_item("o/r", 1, 1735689600, category="ROCm / AMD")]  # type: ignore[arg-type]
+    assert trends.category_trends(items) == {}
+    assert "skipping o/r#1" in capsys.readouterr().err
+
+
+def test_category_trends_skips_non_string_category() -> None:
+    """Regression: a non-string truthy category (e.g. a list) crashed with unhashable type."""
+    items = [_item("o/r", 1, _WEEK1_TS, category=["ROCm / AMD"])]
+    assert trends.category_trends(items) == {}
+
+
+def test_category_trends_logs_skipped_malformed_timestamp(capsys) -> None:
+    items = [_item("o/r", 1, "not-a-date", category="ROCm / AMD")]
+    trends.category_trends(items)
+    assert "skipping o/r#1" in capsys.readouterr().err
 
 
 def test_category_trends_empty_input_returns_empty_dict() -> None:
