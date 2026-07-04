@@ -227,7 +227,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > `python -m src.forecast` (log predictions).
 > **Acceptance:** `pytest -m m1` green · the report's every claim line carries ≥1 evidence URL.
 
-- [ ] **T1.1 Embeddings + vector index** — `src/embed.py` (embed text/labels; NN search; backend TBD).
+- [x] **T1.1 Embeddings + vector index** — `src/embed.py` (embed text/labels; NN search; backend TBD).
       Test: `tests/test_embed.py` — with a deterministic fixture/mock model, NN of a query returns the
       semantically closer of two docs.
 - [ ] **T1.2 Taxonomy schema + versioning** — `src/taxonomy.py` (`taxonomy@vN` in KB, active pointer).
