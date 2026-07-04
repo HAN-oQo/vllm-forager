@@ -1,0 +1,281 @@
+<title>vllm-forager — report tree (mockup)</title>
+<style>
+  :root{
+    --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#d7dee8;
+    --ink:#182231; --ink-2:#586576; --ink-3:#8b96a6;
+    --accent:#2f6db3; --accent-soft:#e7f0fa;
+    --merged:#7a5bd0; --merged-soft:#efe9fb;
+    --open:#2e9e6b; --open-soft:#e4f4ec;
+    --issue:#c0872a; --issue-soft:#f7eddb;
+    --gap:#c74b45; --gap-soft:#f8e7e6;
+    --guide:#e2e8f1;
+    --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  }
+  @media (prefers-color-scheme:dark){
+    :root{
+      --bg:#0f141b; --surface:#151c26; --surface-2:#1b2430; --border:#2a3543;
+      --ink:#e7ecf3; --ink-2:#9dabbd; --ink-3:#6c798b;
+      --accent:#5c9cd9; --accent-soft:#17293c;
+      --merged:#a488e8; --merged-soft:#241d38;
+      --open:#4cbd8a; --open-soft:#12271d;
+      --issue:#d8a24e; --issue-soft:#2b2413;
+      --gap:#e0655e; --gap-soft:#2e1817;
+      --guide:#26313f;
+    }
+  }
+  :root[data-theme="light"]{
+    --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#d7dee8;
+    --ink:#182231; --ink-2:#586576; --ink-3:#8b96a6;
+    --accent:#2f6db3; --accent-soft:#e7f0fa;
+    --merged:#7a5bd0; --merged-soft:#efe9fb; --open:#2e9e6b; --open-soft:#e4f4ec;
+    --issue:#c0872a; --issue-soft:#f7eddb; --gap:#c74b45; --gap-soft:#f8e7e6; --guide:#e2e8f1;
+  }
+  :root[data-theme="dark"]{
+    --bg:#0f141b; --surface:#151c26; --surface-2:#1b2430; --border:#2a3543;
+    --ink:#e7ecf3; --ink-2:#9dabbd; --ink-3:#6c798b;
+    --accent:#5c9cd9; --accent-soft:#17293c;
+    --merged:#a488e8; --merged-soft:#241d38; --open:#4cbd8a; --open-soft:#12271d;
+    --issue:#d8a24e; --issue-soft:#2b2413; --gap:#e0655e; --gap-soft:#2e1817; --guide:#26313f;
+  }
+
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);font-family:var(--sans);
+    font-size:15px;line-height:1.5;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:1000px;margin:0 auto;padding:2rem 1.25rem 4rem}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+
+  /* ---- header ---- */
+  header{border-bottom:1px solid var(--border);padding-bottom:1.1rem;margin-bottom:1.25rem}
+  .eyebrow{font-size:.72rem;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);font-weight:600}
+  h1{font-size:1.6rem;margin:.35rem 0 .15rem;letter-spacing:-.01em;text-wrap:balance}
+  .meta{display:flex;flex-wrap:wrap;gap:1.1rem;color:var(--ink-2);font-size:.85rem;margin-top:.5rem}
+  .meta b{color:var(--ink);font-variant-numeric:tabular-nums}
+  .banner{margin-top:.9rem;font-size:.8rem;color:var(--ink-2);background:var(--surface-2);
+    border:1px dashed var(--border);border-radius:6px;padding:.5rem .7rem}
+
+  /* ---- controls ---- */
+  .controls{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:1rem 0 1.25rem}
+  .controls input{flex:1;min-width:200px;background:var(--surface);border:1px solid var(--border);
+    color:var(--ink);border-radius:7px;padding:.5rem .7rem;font-size:.9rem;font-family:var(--sans)}
+  .controls input:focus{outline:2px solid var(--accent);outline-offset:1px;border-color:var(--accent)}
+  .btn{background:var(--surface);border:1px solid var(--border);color:var(--ink-2);
+    border-radius:7px;padding:.5rem .75rem;font-size:.82rem;cursor:pointer;font-family:var(--sans)}
+  .btn:hover{border-color:var(--accent);color:var(--accent)}
+  .legend{display:flex;gap:.9rem;flex-wrap:wrap;font-size:.75rem;color:var(--ink-3);margin-bottom:1rem}
+  .legend span{display:inline-flex;align-items:center;gap:.35rem}
+  .dot{width:.6rem;height:.6rem;border-radius:50%}
+
+  /* ---- tree ---- */
+  details{margin:0}
+  summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:.5rem;
+    padding:.4rem .5rem;border-radius:7px;position:relative}
+  summary::-webkit-details-marker{display:none}
+  summary:hover{background:var(--surface-2)}
+  summary:focus-visible{outline:2px solid var(--accent);outline-offset:1px}
+  .chev{color:var(--ink-3);font-size:.7rem;width:.8rem;flex-shrink:0;transition:transform .15s;transform:translateY(-1px)}
+  details[open]>summary>.chev{transform:rotate(90deg) translateX(-1px)}
+
+  .name{font-weight:600}
+  .count{font-family:var(--mono);font-size:.72rem;color:var(--ink-2);background:var(--surface-2);
+    border:1px solid var(--border);border-radius:999px;padding:.05rem .45rem;font-variant-numeric:tabular-nums}
+
+  /* level styling via nesting depth */
+  .cat>summary .name{font-size:1.05rem}
+  .cat{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+    padding:.35rem;margin-bottom:.6rem}
+  .kids{padding-left:1.15rem;margin-left:.55rem;border-left:1.5px solid var(--guide)}
+  .sub>summary .name{color:var(--ink)}
+  .summary-line{color:var(--ink-2);font-size:.83rem;padding:.1rem .5rem .5rem 1.8rem;
+    max-width:66ch;line-height:1.45}
+  .leaf>summary .name{font-weight:500;font-size:.92rem}
+
+  /* PR rows */
+  .pr{display:flex;align-items:baseline;gap:.6rem;padding:.32rem .5rem .32rem 1.8rem;
+    border-radius:6px;font-size:.9rem}
+  .pr:hover{background:var(--surface-2)}
+  .pr .id{font-family:var(--mono);font-size:.78rem;color:var(--ink-3);flex-shrink:0;min-width:9.5rem;
+    font-variant-numeric:tabular-nums}
+  .pr .t{color:var(--ink);flex:1}
+  .pr .t a{color:inherit}
+  .pr .t a:hover{color:var(--accent)}
+
+  .chip{font-size:.66rem;font-weight:600;letter-spacing:.02em;text-transform:uppercase;
+    padding:.08rem .4rem;border-radius:5px;flex-shrink:0}
+  .chip.merged{color:var(--merged);background:var(--merged-soft)}
+  .chip.open{color:var(--open);background:var(--open-soft)}
+  .chip.issue{color:var(--issue);background:var(--issue-soft)}
+  .tag-gap{font-size:.66rem;font-weight:600;color:var(--gap);background:var(--gap-soft);
+    border:1px solid var(--gap);border-radius:5px;padding:.02rem .38rem;margin-left:.4rem;white-space:nowrap}
+
+  .hidden{display:none !important}
+  footer{margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border);
+    color:var(--ink-3);font-size:.78rem}
+</style>
+
+<div class="wrap">
+  <header>
+    <div class="eyebrow">vllm-forager · weekly digest</div>
+    <h1>ROCm &amp; inference-serving report — 2026-W27</h1>
+    <div class="meta">
+      <span><b>45,162</b> items</span>
+      <span><b>5</b> repos</span>
+      <span><b>6,425</b> ROCm / AMD</span>
+      <span><b>18</b> upstream gaps flagged</span>
+      <span>generated <b>2026-07-04</b></span>
+    </div>
+    <div class="banner">Design mockup · representative data. The tree is <b>大분류 → 소분류 (summary) → 소소분류 → cited PRs</b>; every leaf links to its source issue/PR.</div>
+  </header>
+
+  <div class="controls">
+    <input id="q" type="search" placeholder="Filter — e.g. attention, DeepSeek, fp8, sglang#…" aria-label="Filter report">
+    <button class="btn" data-all="1">Expand all</button>
+    <button class="btn" data-all="0">Collapse all</button>
+  </div>
+  <div class="legend">
+    <span><span class="dot" style="background:var(--merged)"></span>merged PR</span>
+    <span><span class="dot" style="background:var(--open)"></span>open PR</span>
+    <span><span class="dot" style="background:var(--issue)"></span>issue</span>
+    <span><span class="tag-gap" style="border:none;padding:.02rem .3rem">gap</span>present in fork, missing upstream</span>
+  </div>
+
+  <div id="tree">
+
+    <!-- ============ CATEGORY: ROCm / AMD ============ -->
+    <details class="cat" open>
+      <summary><span class="chev">▶</span><span class="name">ROCm / AMD</span><span class="count">6,425</span></summary>
+      <div class="kids">
+
+        <!-- sub: DeepSeek -->
+        <details class="sub" open>
+          <summary><span class="chev">▶</span><span class="name">DeepSeek V3 / V4 enablement</span><span class="count">312</span><span class="tag-gap">3 gaps</span></summary>
+          <div class="summary-line">MLA attention and the large MoE path are the active frontier on ROCm: most work is porting CUDA-only DeepSeek kernels to gfx90a/gfx942 and closing decode-throughput parity with SGLang. Attention and MoE-gate kernels dominate; a few correctness fixes for FP8 weights.</div>
+          <div class="kids">
+
+            <details class="leaf" open>
+              <summary><span class="chev">▶</span><span class="name">Performance</span><span class="count">141</span></summary>
+              <div class="kids">
+
+                <details class="leaf" open>
+                  <summary><span class="chev">▶</span><span class="name">Attention — MLA / paged-attention</span><span class="count">57</span><span class="tag-gap">upstream gap</span></summary>
+                  <div class="summary-line">Fork has a tuned MLA decode kernel for MI300; upstream vLLM still falls back to the generic path → the parity-gap PR candidate.</div>
+                  <div class="pr"><span class="id">vllm#47612</span><span class="t"><a href="#">[ROCm][Attention] Port MLA decode kernel to gfx942, ~1.8× decode tps</a></span><span class="chip open">open pr</span></div>
+                  <div class="pr"><span class="id">vllm#47318</span><span class="t"><a href="#">[ROCm] Enable paged-attention v2 for head_dim=576 (DeepSeek)</a></span><span class="chip merged">merged</span></div>
+                  <div class="pr"><span class="id">sglang#30044</span><span class="t"><a href="#">[MLA] fused RoPE + KV write for ROCm decode</a></span><span class="chip merged">merged</span></div>
+                  <div class="pr"><span class="id">ROCm/vllm#1188</span><span class="t"><a href="#">Backport MI300 MLA kernel autotune configs</a></span><span class="chip merged">merged</span></div>
+                </details>
+
+                <details class="leaf">
+                  <summary><span class="chev">▶</span><span class="name">MoE — fused gate</span><span class="count">39</span></summary>
+                  <div class="summary-line">Retiring the AOT gate kernels in favor of a runtime path; ROCm needs the HIP variant wired up.</div>
+                  <div class="pr"><span class="id">sglang#29997</span><span class="t"><a href="#">[MoE] Retire AOT moe_fused_gate / kimi_k2_moe_fused_gate kernels</a></span><span class="chip merged">merged</span></div>
+                  <div class="pr"><span class="id">vllm#47501</span><span class="t"><a href="#">[ROCm][MoE] hip build for grouped_topk fused gate</a></span><span class="chip open">open pr</span></div>
+                </details>
+
+              </div>
+            </details>
+
+            <details class="leaf">
+              <summary><span class="chev">▶</span><span class="name">Correctness</span><span class="count">44</span></summary>
+              <div class="summary-line">FP8 weight-loading and NaN-on-long-context reports specific to the ROCm path.</div>
+              <div class="pr"><span class="id">vllm#47489</span><span class="t"><a href="#">[Bugfix][ROCm] FP8 KV scale mismatch on DeepSeek-V3</a></span><span class="chip issue">issue</span></div>
+              <div class="pr"><span class="id">vllm#47455</span><span class="t"><a href="#">[ROCm] NaN logits at 32k context, gfx90a</a></span><span class="chip issue">issue</span></div>
+            </details>
+
+          </div>
+        </details>
+
+        <!-- sub: build -->
+        <details class="sub">
+          <summary><span class="chev">▶</span><span class="name">Build &amp; packaging</span><span class="count">203</span><span class="tag-gap">5 gaps</span></summary>
+          <div class="summary-line">hipBLASLt version pins and gfx90a wheel breakage are the recurring theme; several "works in ROCm/vllm fork, fails to build upstream" reports — strong low-risk PR candidates.</div>
+          <div class="kids">
+            <details class="leaf"><summary><span class="chev">▶</span><span class="name">hipBLASLt / GEMM</span><span class="count">88</span></summary>
+              <div class="pr"><span class="id">sglang#30116</span><span class="t"><a href="#">fix: Guard cuda_runtime.h includes with USE_ROCM for HIP compat</a></span><span class="chip merged">merged</span></div>
+              <div class="pr"><span class="id">vllm#47390</span><span class="t"><a href="#">[ROCm][Build] pin hipblaslt&gt;=0.10 for gfx942 wheels</a></span><span class="chip open">open pr</span></div>
+            </details>
+            <details class="leaf"><summary><span class="chev">▶</span><span class="name">CI / test coverage</span><span class="count">61</span></summary>
+              <div class="pr"><span class="id">vllm#47550</span><span class="t"><a href="#">[ROCm][CI][Bugfix] Fix flaky parallel tool-call streaming</a></span><span class="chip merged">merged</span></div>
+            </details>
+          </div>
+        </details>
+
+      </div>
+    </details>
+
+    <!-- ============ CATEGORY: Quantization ============ -->
+    <details class="cat">
+      <summary><span class="chev">▶</span><span class="name">Quantization</span><span class="count">2,914</span></summary>
+      <div class="kids">
+        <details class="sub"><summary><span class="chev">▶</span><span class="name">FP8 KV cache</span><span class="count">176</span><span class="tag-gap">upstream gap</span></summary>
+          <div class="summary-line">Per-tensor → per-head FP8 scaling is landing across engines; the ROCm path lags one release behind CUDA.</div>
+          <div class="kids">
+            <details class="leaf"><summary><span class="chev">▶</span><span class="name">Attention integration</span><span class="count">54</span></summary>
+              <div class="pr"><span class="id">vllm#47201</span><span class="t"><a href="#">[Kernel] per-head fp8 kv scales in paged-attention</a></span><span class="chip merged">merged</span></div>
+            </details>
+          </div>
+        </details>
+      </div>
+    </details>
+
+    <!-- ============ CATEGORY: Speculative decoding ============ -->
+    <details class="cat">
+      <summary><span class="chev">▶</span><span class="name">Speculative decoding</span><span class="count">1,803</span></summary>
+      <div class="kids">
+        <details class="sub"><summary><span class="chev">▶</span><span class="name">EAGLE / MTP</span><span class="count">98</span></summary>
+          <div class="summary-line">Multi-token-prediction heads for DeepSeek are the hot path; ROCm support is nascent.</div>
+          <div class="kids">
+            <details class="leaf"><summary><span class="chev">▶</span><span class="name">Draft-model perf</span><span class="count">33</span></summary>
+              <div class="pr"><span class="id">sglang#29880</span><span class="t"><a href="#">[Spec] EAGLE-3 draft cache reuse</a></span><span class="chip open">open pr</span></div>
+            </details>
+          </div>
+        </details>
+      </div>
+    </details>
+
+    <details class="cat">
+      <summary><span class="chev">▶</span><span class="name">Disaggregated prefill / decode</span><span class="count">1,247</span></summary>
+      <div class="kids"><div class="summary-line" style="padding-left:.6rem">Collapsed — expand to drill in.</div></div>
+    </details>
+
+  </div>
+
+  <footer>
+    Every node's count and summary is generated from classified, evidence-linked KB items · leaves link to the source issue/PR · <b>大 → 소(summary) → 소소 → PRs</b>.
+  </footer>
+</div>
+
+<script>
+  // Expand / collapse all
+  document.querySelectorAll('.btn[data-all]').forEach(function(b){
+    b.addEventListener('click',function(){
+      var open=b.dataset.all==='1';
+      document.querySelectorAll('#tree details').forEach(function(d){d.open=open;});
+    });
+  });
+  // Filter: show only PR rows + nodes whose text matches; auto-open ancestors.
+  var q=document.getElementById('q');
+  q.addEventListener('input',function(){
+    var term=q.value.trim().toLowerCase();
+    var details=document.querySelectorAll('#tree details');
+    if(!term){
+      document.querySelectorAll('#tree .hidden').forEach(function(e){e.classList.remove('hidden');});
+      details.forEach(function(d){d.open=(d.classList.contains('cat')||d.classList.contains('sub'));});
+      return;
+    }
+    // leaves = PR rows
+    document.querySelectorAll('#tree .pr').forEach(function(pr){
+      pr.classList.toggle('hidden', pr.textContent.toLowerCase().indexOf(term)===-1);
+    });
+    // a details is visible if its own summary matches OR it has any visible descendant
+    details.forEach(function(d){
+      var self=d.querySelector('summary').textContent.toLowerCase().indexOf(term)!==-1;
+      var hasPr=d.querySelector('.pr:not(.hidden)');
+      var vis=self||hasPr;
+      d.classList.toggle('hidden',!vis);
+      d.open=vis;
+      if(self){ d.querySelectorAll('.pr').forEach(function(pr){pr.classList.remove('hidden');}); }
+    });
+  });
+</script>

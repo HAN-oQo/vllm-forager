@@ -270,6 +270,42 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **e.g.:** a shared `resolve_store(args.data_dir) -> (store_or_factory, data_dir)` (or similar) helper in `src/store/__init__.py`, called from all 4 CLIs.
   - **Test:** existing CLI tests (`test_analyze.py`/`test_forecast.py`/`test_report.py`/`test_dashboard.py`) continue to pass unchanged against the shared helper — a refactor, not a behavior change.
 
+## M1.5 — Hierarchical report tree (readable 大 → 소 → 소소 → PRs)
+
+> **Why this milestone:** the current report/dashboard lists PRs flat under one big category — hard to scan.
+> This makes classification **hierarchical** and renders it as a collapsible tree with per-node summaries, e.g.
+> `ROCm/AMD → DeepSeek-V4 → performance → attention → cited PRs`.
+> **Design reference:** [`docs/design/report-tree-mockup.html`](design/report-tree-mockup.html) — open it in a
+> browser; that is the approved look (collapsible nodes · per-node summary · count + `gap` chips · PR-state chips
+> · filter · light/dark). Build the UI to match it. Extends M1; tests carry `pytest.mark.m1`.
+> **Expected output:** items classified to a **taxonomy path** (not one flat label); an LLM **summary per internal
+> node**; the report + dashboard render the tree matching the mockup.
+> **Demo:** `python -m src.report` (tree-structured) · `python -m dashboard` → collapsible tree with node
+> summaries + filter (view via the ssh tunnel, same as before).
+> **Acceptance:** `pytest -m m1` green · the dashboard shows the `AMD → DeepSeek → performance → attention → PRs`
+> tree with per-node summaries · every leaf carries an evidence URL.
+
+- [ ] **T1.5.1 Hierarchical taxonomy (path)** — evolve `src/taxonomy.py` so a category is a **path** `[level0, level1, …]` (engine/vendor → area → topic), still versioned; keep back-compat so an existing flat label reads as a depth-1 path.
+  - **Why:** a single flat label can't express `AMD → DeepSeek-V4 → performance → attention`; a path is what lets the report nest into a tree.
+  - **e.g.:** an item carries `path=["ROCm/AMD","DeepSeek-V4","performance","attention"]` instead of `category="rocm"`.
+  - **Test:** `tests/test_taxonomy.py` — a path round-trips through the store; versioning still holds; a legacy flat label still reads as a depth-1 path.
+- [ ] **T1.5.2 Analyst assigns a path** — evolve `src/agents/analyst.py` to classify each item into a taxonomy **path** via `llm.complete` (each level from a controlled per-level label set to prevent drift), writing `path` + evidence to the KB.
+  - **Why:** this is what actually fills the tree — without a per-item path every node stays a flat bucket.
+  - **e.g.:** an "MLA decode on MI300" issue → the path above + its source URL, written back onto the item.
+  - **Test:** `tests/test_analyst.py` — mock `llm.complete` → item gets a valid path (each level from the allowed set), citation preserved; an off-taxonomy answer is rejected/normalized.
+- [ ] **T1.5.3 Node summarizer** — new `src/agents/summarizer.py`: for each internal tree node, `llm.complete` writes a **1–2 line synthesis** of that node's items (cited), keyed/cached by node path.
+  - **Why:** the "소분류 요약" — turns a bucket of PRs into a scannable "what's happening here"; the biggest readability lever after nesting.
+  - **e.g.:** node `ROCm/AMD > DeepSeek-V4 > performance` → "MLA + MoE kernels are the frontier; the theme is closing decode-parity vs SGLang."
+  - **Test:** `tests/test_summarizer.py` — mock llm → a node summary is produced and every claim cites ≥1 item URL; an empty node yields no summary (no hallucinated content).
+- [ ] **T1.5.4 Tree-structured report** — evolve `src/agents/reporter.py` (or a report builder) to emit the **nested tree** grouped by path: `{name, summary, count, gaps, children[], prs[]}` as JSON + Markdown, with counts rolling up.
+  - **Why:** both the CLI report and the dashboard must consume one tree structure; counts/gaps roll up so a parent shows its subtree totals.
+  - **e.g.:** `data/reports/…tree.json` = nested nodes; the Markdown renders indented `大 → 소(summary) → 소소 → PRs`.
+  - **Test:** `tests/test_reporter_v1.py` — fixtures → correct nesting + rolled-up counts; every leaf PR has an evidence URL; empty branches pruned.
+- [ ] **T1.5.5 Dashboard tree UI (match the approved mockup)** — upgrade `dashboard/render.py` (+ `server.py`) to render the tree: **collapsible** nodes, per-node summary line, count + `gap` chips, PR-state chips (merged/open/issue), a **filter** box, light/dark — matching `docs/design/report-tree-mockup.html`.
+  - **Why:** the readability win itself; the same renderer displays the real hierarchy T1.5.1–1.5.4 produce (the mockup is the design spec, not throwaway).
+  - **e.g.:** `python -m dashboard` → the collapsible tree (like the mockup) over live KB data; the filter narrows to matches and auto-expands ancestors.
+  - **Test:** `tests/test_dashboard.py` — a seeded tree → render produces nested nodes + summaries + evidence links; filtering to a term keeps only matching leaves.
+
 ## M2 — Outer loop: grading + candidate discovery
 
 > **Expected output:** grading metrics (precision/recall/Brier) on matured forecasts → `policy@v+1`; taxonomy
