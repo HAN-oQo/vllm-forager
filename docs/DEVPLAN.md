@@ -293,7 +293,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** this is what actually fills the tree — without a per-item path every node stays a flat bucket.
   - **e.g.:** an "MLA decode on MI300" issue → the path above + its source URL, written back onto the item.
   - **Test:** `tests/test_analyst.py` — mock `llm.complete` → item gets a valid path (each level from the allowed set), citation preserved; an off-taxonomy answer is rejected/normalized.
-- [ ] **T1.5.3 Node summarizer** — new `src/agents/summarizer.py`: for each internal tree node, `llm.complete` writes a **1–2 line synthesis** of that node's items (cited), keyed/cached by node path.
+- [x] **T1.5.3 Node summarizer** — new `src/agents/summarizer.py`: for each internal tree node, `llm.complete` writes a **1–2 line synthesis** of that node's items (cited), keyed/cached by node path.
   - **Why:** the "소분류 요약" — turns a bucket of PRs into a scannable "what's happening here"; the biggest readability lever after nesting.
   - **e.g.:** node `ROCm/AMD > DeepSeek-V4 > performance` → "MLA + MoE kernels are the frontier; the theme is closing decode-parity vs SGLang."
   - **Test:** `tests/test_summarizer.py` — mock llm → a node summary is produced and every claim cites ≥1 item URL; an empty node yields no summary (no hallucinated content).
