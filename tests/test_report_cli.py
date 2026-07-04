@@ -115,12 +115,29 @@ def test_main_tree_flag_writes_markdown_and_json(tmp_path, capsys):
     assert rc == 0
     printed = capsys.readouterr().out.strip().splitlines()
     md_path, json_path = Path(printed[0]), Path(printed[1])
-    assert md_path.suffix == ".md"
-    assert json_path.name == md_path.stem + ".tree.json"
+    assert md_path.name.endswith(".tree.md")
+    assert json_path.name == md_path.name.removesuffix(".md") + ".json"
     assert "## ROCm/AMD (1)" in md_path.read_text(encoding="utf-8")
     tree = json.loads(json_path.read_text(encoding="utf-8"))
     assert tree[0]["name"] == "ROCm/AMD"
     assert tree[0]["count"] == 1
+
+
+def test_main_tree_and_default_reports_never_collide_on_filename(tmp_path, capsys):
+    """Regression: --tree's Markdown used to write to the SAME <week>.md as the default flat
+    report, silently overwriting whichever ran first."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, "hipBLAS build fails", path=["ROCm/AMD"])])
+
+    report.main(["--data-dir", str(tmp_path), "--tree"])
+    tree_printed = Path(capsys.readouterr().out.strip().splitlines()[0])
+
+    report.main(["--data-dir", str(tmp_path)])
+    flat_printed = Path(capsys.readouterr().out.strip())
+
+    assert tree_printed != flat_printed
+    assert tree_printed.exists() and flat_printed.exists()
+    assert "## ROCm/AMD (1)" in tree_printed.read_text(encoding="utf-8")  # untouched by the 2nd run
 
 
 def test_main_v0_and_tree_together_errors(tmp_path):

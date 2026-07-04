@@ -128,6 +128,23 @@ def _num(item: dict) -> int:
     return number if isinstance(number, int) else 0
 
 
+def evidence_url(item: dict) -> str:
+    """`item`'s own ``url``, or a synthesized canonical GitHub link (GitHub redirects
+    ``/issues/N`` ↔ ``/pull/N``) if it has none — so every caller gets the identical
+    URL-or-synthesized-fallback treatment from one place, rather than each reimplementing it
+    (shared by :func:`_cite` here and :func:`~src.agents.reporter_v1._pr_entry`).
+
+    Known limitation: if `item` has no ``url`` AND is also missing ``repo``/``number``, this
+    returns ``""`` — an item that arrives with none of the three has no evidence to construct
+    a link from. Every item this codebase actually produces (the collector always sets all
+    three) never hits this; it's only reachable from a malformed/hand-built record.
+    """
+    url = item.get("url") or ""
+    if not url and item.get("repo") and item.get("number") is not None:
+        url = f"https://github.com/{item['repo']}/issues/{item['number']}"
+    return url
+
+
 def _cite(item: dict, *, text: str | None = None) -> str:
     """One Markdown bullet for an item, always carrying its source link.
 
@@ -143,14 +160,15 @@ def _cite(item: dict, *, text: str | None = None) -> str:
     If the item has no ``url``, synthesize the canonical GitHub link (GitHub redirects
     ``/issues/N`` ↔ ``/pull/N``) so every bullet still cites a source (evidence principle).
     """
-    repo = item.get("repo", "?")
-    number = item.get("number", "?")
+    # `or "?"`/`is not None else "?"`, not `.get(key, "?")` — a caller-built dict (e.g.
+    # reporter_v1's `_pr_entry`) may set these keys to `None` rather than omitting them; both
+    # "missing" and "present but None" must render the same "?" placeholder.
+    repo = item.get("repo") or "?"
+    number = item.get("number")
+    number = number if number is not None else "?"
     raw_text = text if text is not None else (item.get("title") or "")
     rendered = " ".join(raw_text.split()) or "(no title)"
-    url = item.get("url") or ""
-    if not url and item.get("repo") and item.get("number") is not None:
-        url = f"https://github.com/{item['repo']}/issues/{item['number']}"
-    return f"- [{repo}#{number}] {rendered} — {url}"
+    return f"- [{repo}#{number}] {rendered} — {evidence_url(item)}"
 
 
 def build_report(items: list[dict], *, title: str = "vLLM (ROCm) weekly digest") -> str:

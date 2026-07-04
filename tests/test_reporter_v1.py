@@ -273,6 +273,18 @@ def test_build_tree_every_leaf_pr_has_an_evidence_url() -> None:
     assert tree[0].prs[0]["url"] == "https://github.com/o/r/issues/1"
 
 
+def test_render_tree_markdown_renders_placeholder_not_none_for_missing_repo_and_number() -> None:
+    """Regression: _pr_entry used to set repo/number to None (not omit them), so _cite's own
+    "?" fallback never fired — the tree report rendered the literal string "[None#None]"."""
+    item = {"title": "orphan item", "path": ["ROCm/AMD"]}
+
+    tree = reporter_v1.build_tree([item])
+    md = reporter_v1.render_tree_markdown(tree)
+
+    assert "[?#?]" in md
+    assert "None" not in md
+
+
 def test_build_tree_prunes_empty_branches_by_construction() -> None:
     """The DEVPLAN's named scenario: empty branches pruned — no node with count == 0 can ever
     be constructed, since a node only exists because some item's path passes through it."""
@@ -348,6 +360,37 @@ def test_render_tree_markdown_nests_headings_and_shows_summary() -> None:
     assert "### DeepSeek-V4 (1)" in md
     assert "_the synthesis_" in md
     assert "http://x/o/r/1" in md
+
+
+def test_render_tree_markdown_falls_back_to_bold_past_h6() -> None:
+    """Markdown doesn't render a 7th '#' as a heading at all — depth >= 5 (heading level 7+)
+    must fall back to a bold line instead of silently stopping being a heading."""
+    deep_path = ["a", "b", "c", "d", "e", "f"]  # depth 6 -> heading level 8
+    items = [_item("o/r", 1, "deep item", path=deep_path)]
+
+    tree = reporter_v1.build_tree(items)
+    md = reporter_v1.render_tree_markdown(tree)
+
+    assert "####### " not in md  # never emits a non-heading run of 7+ '#'
+    assert "**f (1)**" in md  # the deepest node falls back to bold
+    assert "###### e (1)" in md  # the level just above the cap is still a real H6 heading
+
+
+def test_tree_from_store_recovers_from_a_corrupt_stored_summary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupted node_summary@<path> record must not crash the whole tree build — only
+    that one node's summary is omitted."""
+    from src.store.jsonl_store import JsonlStore
+
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, "x", path=["ROCm/AMD"])])
+    store.set_state("node_summary@ROCm/AMD", "not valid json")
+
+    tree = reporter_v1.tree_from_store(store)
+
+    assert tree[0].name == "ROCm/AMD"
+    assert tree[0].summary is None
 
 
 def test_tree_from_store_reads_items_and_summaries(

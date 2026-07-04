@@ -14,7 +14,8 @@ CLI's default output is v1's.)
 ``--tree`` (T1.5.4, opt-in — the default output is unchanged, so existing consumers like
 T1.9's dashboard never see a surprise format change) renders the taxonomy-tree digest instead
 (:func:`~src.agents.reporter_v1.build_tree`/``render_tree_markdown``, nested by classified
-``path`` with T1.5.3's node summaries) via :func:`generate_tree`, and additionally writes
+``path`` with T1.5.3's node summaries) via :func:`generate_tree`, writing ``<week>.tree.md``
+(not the plain ``<week>.md`` — the two report styles must never collide on one filename) and
 ``<week>.tree.json`` — the nested ``{name, summary, count, gaps, children, prs}`` structure
 T1.5.5's dashboard will read directly, rather than re-deriving the tree from raw items itself.
 
@@ -83,11 +84,17 @@ def generate_tree(
 ) -> tuple[Path, Path]:
     """Render the weekly report as a taxonomy tree (T1.5.4) and write both forms.
 
-    Writes ``reports_dir/<week_stamp>.md`` (indented 大→소(summary)→소소→PRs Markdown,
+    Writes ``reports_dir/<week_stamp>.tree.md`` (indented 大→소(summary)→소소→PRs Markdown,
     :func:`~src.agents.reporter_v1.render_tree_markdown`) and
     ``reports_dir/<week_stamp>.tree.json`` (the same tree as a list of
     :meth:`~src.agents.reporter_v1.TreeNode.to_dict`) — T1.5.5's dashboard reads the JSON
     directly rather than re-deriving the tree from raw items. Returns ``(md_path, json_path)``.
+
+    ``.tree.md``, not the plain ``.md`` :func:`generate` uses for the flat report — the two
+    report styles must never collide on one filename (running the default report and
+    ``--tree`` for the same ISO week previously silently overwrote whichever ran first with a
+    differently-shaped file, with the JSON left referencing a tree no longer reflected by an
+    overwritten flat ``.md``).
     """
     stamp = week_stamp(when)
     resolved_title = title or f"vLLM (ROCm) weekly digest — {stamp}"
@@ -95,7 +102,7 @@ def generate_tree(
     md = reporter_v1.render_tree_markdown(nodes, title=resolved_title)
 
     reports_dir.mkdir(parents=True, exist_ok=True)
-    md_path = reports_dir / f"{stamp}.md"
+    md_path = reports_dir / f"{stamp}.tree.md"
     md_path.write_text(md, encoding="utf-8")
     json_path = reports_dir / f"{stamp}.tree.json"
     json_path.write_text(json.dumps([node.to_dict() for node in nodes], indent=2), encoding="utf-8")

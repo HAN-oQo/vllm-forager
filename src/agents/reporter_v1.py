@@ -39,8 +39,8 @@ from dataclasses import dataclass
 
 from .. import llm
 from ..store.base import Store
-from ..taxonomy import CategoryPath
-from .reporter import OTHER, _cite, _num
+from ..taxonomy import LEVEL_SEPARATOR, CategoryPath
+from .reporter import OTHER, _cite, _num, evidence_url
 from .summarizer import get_node_summary
 
 # Per item, inside a batched per-category prompt — kept short since several items share one
@@ -216,15 +216,20 @@ class TreeNode:
 def _pr_entry(item: dict) -> dict:
     """The minimal, JSON-serializable shape one leaf PR/issue carries in a tree node: enough
     for T1.5.5's dashboard to render a cited row + a merged/open/issue state chip, without
-    bloating ``tree.json`` with every raw item field (body text, labels, etc.)."""
-    url = item.get("url") or ""
-    if not url and item.get("repo") and item.get("number") is not None:
-        url = f"https://github.com/{item['repo']}/issues/{item['number']}"
+    bloating ``tree.json`` with every raw item field (body text, labels, etc.).
+
+    ``url`` uses :func:`~src.agents.reporter.evidence_url` — the same URL-or-synthesized
+    logic :func:`~src.agents.reporter._cite` uses — so a citation looks identical whether it
+    came from the flat report or this one. ``repo``/``number`` are `None` when `item` lacks
+    them (not omitted) — :func:`~src.agents.reporter._cite`, called on this dict by
+    :func:`render_tree_markdown`, treats a `None` value the same as a missing key (renders
+    ``?``), so this never surfaces a Python-literal ``None`` in report text.
+    """
     return {
         "repo": item.get("repo"),
         "number": item.get("number"),
         "title": item.get("title") or "",
-        "url": url,
+        "url": evidence_url(item),
         "state": item.get("state"),
         "type": item.get("type"),
     }
@@ -244,11 +249,19 @@ def build_tree(
 
     Root nodes are ordered by first appearance in `items`; each node's own children are
     ordered the same way. Deterministic given deterministic input order.
+
+    This does its own "walk every prefix of every classified path" pass, independent of
+    :func:`~src.agents.summarizer._nodes_from_items`'s own (similar-looking) walk — not
+    shared, since the two need different aggregations: summarizer wants the cumulative union
+    of items under a prefix (to feed an LLM synthesis), this wants exact-match-per-node plus
+    structural child discovery (to roll up `count`). A shared low-level primitive is feasible
+    but is a real refactor, deferred to avoid risking T1.5.3's already-shipped behavior here.
     """
     other_items: list[dict] = []
     exact: dict[CategoryPath, list[dict]] = {}
-    children_of: dict[CategoryPath, list[str]] = defaultdict(list)
-    seen_children: dict[CategoryPath, set[str]] = defaultdict(set)
+    # dict-as-ordered-set (mirrors Taxonomy.children()'s own `seen: dict[str, str]` pattern) —
+    # one structure for both "what are prefix's children" and "in what order", not two.
+    children_of: dict[CategoryPath, dict[str, None]] = defaultdict(dict)
 
     for item in items:
         path = item.get("path")
@@ -259,12 +272,10 @@ def build_tree(
         exact.setdefault(path_t, []).append(item)
         for depth in range(len(path_t)):
             prefix, level = path_t[:depth], path_t[depth]
-            if level not in seen_children[prefix]:
-                seen_children[prefix].add(level)
-                children_of[prefix].append(level)
+            children_of[prefix].setdefault(level, None)
 
     def make_node(prefix: CategoryPath) -> TreeNode:
-        children = tuple(make_node((*prefix, name)) for name in children_of.get(prefix, []))
+        children = tuple(make_node((*prefix, name)) for name in children_of.get(prefix, {}))
         own = exact.get(prefix, [])
         return TreeNode(
             name=prefix[-1],
@@ -275,7 +286,7 @@ def build_tree(
             prs=tuple(_pr_entry(item) for item in own),
         )
 
-    tree = [make_node((name,)) for name in children_of.get((), [])]
+    tree = [make_node((name,)) for name in children_of.get((), {})]
     if other_items:
         tree.append(
             TreeNode(
@@ -290,18 +301,28 @@ def build_tree(
     return tree
 
 
+def _node_heading(name: str, count: int, depth: int) -> str:
+    """A Markdown heading for `depth` (0 = top level), or a bold line past H6 — Markdown
+    doesn't render a 7th ``#`` as a heading at all, so piling on more would silently stop
+    working instead of merely looking the same as H6 (which distinct depths >= 4 already do).
+    """
+    level = depth + 2
+    if level <= 6:
+        return f"{'#' * level} {name} ({count})"
+    return f"**{name} ({count})**"
+
+
 def render_tree_markdown(nodes: list[TreeNode], *, title: str = "vLLM (ROCm) weekly digest") -> str:
     """Render `nodes` as indented Markdown: 대 → 소(summary) → 소소 → PRs, per the approved
-    report-tree mockup — headings nest one level per tree depth (capped at H6), each node's
-    summary (if any) as an italic line, and its own PRs as :func:`~src.agents.reporter._cite`
-    bullets before its children.
+    report-tree mockup — one heading level per tree depth up to H6 (a bold line beyond that,
+    see :func:`_node_heading`), each node's summary (if any) as an italic line, and its own
+    PRs as :func:`~src.agents.reporter._cite` bullets before its children.
     """
     total = sum(node.count for node in nodes)
     lines = [f"# {title}", "", f"{total} items.", ""]
 
     def render(node: TreeNode, depth: int) -> None:
-        heading = "#" * min(depth + 2, 6)
-        lines.append(f"{heading} {node.name} ({node.count})")
+        lines.append(_node_heading(node.name, node.count, depth))
         if node.summary:
             lines.append(f"_{node.summary}_")
         lines.append("")
@@ -319,10 +340,27 @@ def render_tree_markdown(nodes: list[TreeNode], *, title: str = "vLLM (ROCm) wee
 def tree_from_store(store: Store) -> list[TreeNode]:
     """Read all items from `store`, build the tree, and attach each node's stored T1.5.3
     summary (:func:`~src.agents.summarizer.get_node_summary`) — the impure entry point CLI/
-    dashboard callers use; :func:`build_tree` itself stays store-free and pure for testing."""
+    dashboard callers use; :func:`build_tree` itself stays store-free and pure for testing.
+
+    One node's per-request summary read is not batched against :class:`~src.store.base.Store`
+    (no batch-read API exists) — for `N` tree nodes this is `N` sequential ``get_state`` calls
+    (a full ``state.json`` re-read/re-parse per call on :class:`~src.store.jsonl_store.
+    JsonlStore`, or `N` network round trips on Firestore), the same "one call per item, no
+    cap" shape this codebase has bounded twice before (:mod:`~src.agents.reporter_v1`'s own
+    ``_CHUNK_SIZE``, :mod:`~src.agents.summarizer`'s ``_MAX_ITEMS_PER_NODE``) — not fixed here
+    since it would need a new ``Store``-level batch-read primitive, out of scope for adding
+    tree building itself.
+    """
 
     def lookup(path: CategoryPath) -> str | None:
-        summary = get_node_summary(store, path)
+        try:
+            summary = get_node_summary(store, path)
+        except Exception as exc:  # noqa: BLE001 - a corrupt KB record must not crash the run
+            print(
+                f"reporter_v1: skipping summary for {LEVEL_SEPARATOR.join(path)}: {exc}",
+                file=sys.stderr,
+            )
+            return None
         return summary.text if summary is not None else None
 
     return build_tree(store.query(), summary_lookup=lookup)
