@@ -80,7 +80,10 @@ def _sleep_for_rate_limit(resp: requests.Response) -> bool:
     :func:`_retry_after_wait`.
     """
     if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
-        reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
+        try:
+            reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
+        except ValueError:
+            reset = 0  # malformed header — fall back to a minimal wait, not a crash
         wait = max(reset - int(time.time()), 0) + 1
         print(f"  rate limit hit — waiting {wait}s", file=sys.stderr)
         time.sleep(wait)
@@ -321,8 +324,11 @@ def main(argv: list[str] | None = None) -> None:
                 remote_fetcher=audit.remote_counts,
                 checked_at=now,
             )
-        except Exception as exc:
-            print(f"  !! {stalled_slug} failed to record stall: {exc}", file=sys.stderr)
+        except Exception:
+            # Same "loud, but isolated" contract as main()'s per-repo except below: a bug in
+            # this diagnostic must not look like a routine, silent failure either.
+            print(f"  !! {stalled_slug} failed to record stall:", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
 
     for repo in config.REPOS:
         slug = repo["slug"]

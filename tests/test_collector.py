@@ -147,6 +147,19 @@ def test_rate_limit_waits_on_403(monkeypatch):
     assert slept == [6]  # (1005 - 1000) + 1
 
 
+def test_rate_limit_malformed_reset_header_falls_back_instead_of_raising(monkeypatch):
+    # T0.12: a garbled X-RateLimit-Reset must not raise ValueError (which would escape
+    # main()'s narrowed except as an "UNEXPECTED failure" for what's just a rate-limit hiccup).
+    slept = []
+    monkeypatch.setattr(collector.time, "sleep", lambda s: slept.append(s))
+    monkeypatch.setattr(collector.time, "time", lambda: 1000)
+    resp = FakeResp(
+        403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "not-a-number"}
+    )
+    assert collector._sleep_for_rate_limit(resp) is True
+    assert slept == [1]  # reset falls back to 0 → max(0-1000, 0) + 1 == 1
+
+
 # --------------------------------------------------------------- fetch_repo
 
 

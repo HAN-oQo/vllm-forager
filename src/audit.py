@@ -123,6 +123,10 @@ def reconcile(
     flagged = delta < 0 or ratio > threshold or errors > 0
     return {
         "repo": repo,
+        # A common discriminant with :func:`record_stall`'s "cursor_stall" reason — the two
+        # variants share this sink (data_quality.jsonl) but not every field, so a consumer
+        # (T5.8's health panel) must branch on `reason` rather than assume a uniform schema.
+        "reason": "reconciliation",
         "local_total": local["total"],
         "remote_total": remote["total"],
         "count_delta": delta,
@@ -162,6 +166,15 @@ def _resolve_data_dir(store: Store, data_dir: Path | None, *, caller: str) -> Pa
     return resolved
 
 
+def _persist(
+    store: Store, record: dict, *, checked_at: str, data_dir: Path | None, caller: str
+) -> dict:
+    """Resolve the sink and append `record` — the shared tail of `audit_repo`/`record_stall`."""
+    resolved_dir = _resolve_data_dir(store, data_dir, caller=caller)
+    write_record(resolved_dir, record, checked_at=checked_at)
+    return record
+
+
 def audit_repo(
     store: Store,
     repo: str,
@@ -184,9 +197,7 @@ def audit_repo(
     local = local_counts(store, repo, since)
     remote = remote_fetcher(repo, since)
     record = reconcile(repo, local, remote, errors=errors, gap_threshold=gap_threshold)
-    resolved_dir = _resolve_data_dir(store, data_dir, caller="audit_repo")
-    write_record(resolved_dir, record, checked_at=checked_at)
-    return record
+    return _persist(store, record, checked_at=checked_at, data_dir=data_dir, caller="audit_repo")
 
 
 def record_stall(
@@ -216,6 +227,4 @@ def record_stall(
         "remote_total": remote["total"],
         "flagged": True,
     }
-    resolved_dir = _resolve_data_dir(store, data_dir, caller="record_stall")
-    write_record(resolved_dir, record, checked_at=checked_at)
-    return record
+    return _persist(store, record, checked_at=checked_at, data_dir=data_dir, caller="record_stall")
