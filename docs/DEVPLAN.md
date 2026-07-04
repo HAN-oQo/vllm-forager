@@ -210,7 +210,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Demo:** `STORE=firestore python -m src.collector` (against the Firestore emulator) · `python -m src.store.migrate`.
 > **Acceptance:** `pytest -m m0_6` green — the store contract test passes for **both** jsonl and firestore backends.
 
-- [ ] **T0.6.1 Firestore store** — `src/store/firestore_store.py` implementing `store/base.py` (collection
+- [x] **T0.6.1 Firestore store** — `src/store/firestore_store.py` implementing `store/base.py` (collection
       `items` keyed `repo#number`; collection `state`).
       Test: `tests/test_store_contract.py` — **one contract test parametrized over jsonl + firestore** so both
       satisfy identical assertions; firestore param uses the **Firestore emulator**, marked `integration`.
