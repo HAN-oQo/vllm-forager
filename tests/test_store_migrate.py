@@ -10,11 +10,8 @@
 
 from __future__ import annotations
 
-import os
-import re
-
 import pytest
-import requests
+from firestore_emulator_helpers import clear_firestore_emulator, project_id_for
 
 from src.store import migrate
 from src.store.firestore_store import FirestoreStore
@@ -23,22 +20,10 @@ from src.store.jsonl_store import JsonlStore
 pytestmark = [pytest.mark.m0_6, pytest.mark.integration]
 
 
-def _project_id_for(test_id: str) -> str:
-    """A Firestore project id unique to this test node — see test_store_contract.py."""
-    slug = re.sub(r"[^a-z0-9-]+", "-", test_id.lower()).strip("-")
-    return f"forager-mig-{slug}"[:63]
-
-
-def _clear_firestore_emulator(project: str) -> None:
-    host = os.environ["FIRESTORE_EMULATOR_HOST"]
-    url = f"http://{host}/emulator/v1/projects/{project}/databases/(default)/documents"
-    requests.delete(url, timeout=10)
-
-
 @pytest.fixture
 def firestore_project(request):
-    project = _project_id_for(request.node.name)
-    _clear_firestore_emulator(project)
+    project = project_id_for(request.node.name, prefix="forager-mig")
+    clear_firestore_emulator(project)
     return project
 
 

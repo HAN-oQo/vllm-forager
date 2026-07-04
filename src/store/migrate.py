@@ -37,7 +37,7 @@ def migrate(source_dir: Path, *, firestore_project: str | None) -> dict:
     dest = FirestoreStore(project=firestore_project)
 
     items = source.query()
-    item_totals = dest.upsert_items(items) if items else {}
+    item_totals = dest.upsert_items(items)  # upsert_items([]) already returns {} on its own
 
     state = load_state(source_dir / "state.json")
     for key, value in state.items():
