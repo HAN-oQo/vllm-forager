@@ -41,9 +41,9 @@
   trusting green unit tests alone.
 - **Readable code:** module + public-function **docstrings** (what/why), inline comments on non-obvious logic,
   and **type hints** on public functions. Match the comment density of the existing `src/collector.py`.
-- **Todo format (human-readable):** each todo carries — besides files + `Test:` — a one-line **Why** (rationale)
-  and **e.g.** (a concrete example of the result), so a person can grok it, not just an agent. Fill these in when
-  the todo is concrete; don't fabricate examples for undesigned work.
+- **Todo format (human-readable):** under each todo put **Why** / **e.g.** / **Test** as their own sub-bullets
+  (`  - **Why:** …`) — a one-line rationale, a concrete result example, and the test — so a person can scan it,
+  not just an agent. Fill these in when the todo is concrete; don't fabricate examples for undesigned work.
 
 ## Python conventions & tooling
 
@@ -142,59 +142,46 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Acceptance:** `pytest -m m0` green · `pre-commit run --all-files` clean · a collector run produces non-empty
 > JSONL and a report whose lines carry issue/PR URLs.
 
-- [x] **T0.0 Dev tooling** — black + ruff + mypy + pre-commit + pytest configured (`pyproject.toml`,
-      `.pre-commit-config.yaml`, `pytest.ini`, `requirements-dev.txt`).
-      **Why:** enforce one formatting/lint/type/test standard across every session + CI, so nothing drifts.
-      **e.g.:** `pre-commit run --all-files` → black/ruff/mypy/hygiene all green in one shot.
-      Test: `pre-commit run --all-files` clean · `pytest` green.
+- [x] **T0.0 Dev tooling** — black + ruff + mypy + pre-commit + pytest (`pyproject.toml`, `.pre-commit-config.yaml`, `pytest.ini`, `requirements-dev.txt`).
+  - **Why:** enforce one formatting/lint/type/test standard across every session + CI, so nothing drifts.
+  - **e.g.:** `pre-commit run --all-files` → black/ruff/mypy/hygiene all green in one shot.
+  - **Test:** `pre-commit run --all-files` clean · `pytest` green.
 - [x] **T0.1 Collector: incremental GitHub issue/PR fetch** — `src/collector.py::fetch_repo`.
-      **Why:** pull issues+PRs updated only since the last run (not the whole history) — saves time + rate limit.
-      **e.g.:** `fetch_repo("vllm-project/vllm", "2026-01-01T…")` → normalized issue/PR dicts updated since then.
-      Test: `tests/test_collector.py::test_fetch_repo_pagination`, `::test_fetch_repo_404` (mocks `requests`,
-      asserts paging stops at `< PER_PAGE` and 404 → `[]`).
+  - **Why:** pull issues+PRs updated only since the last run (not the whole history) — saves time + rate limit.
+  - **e.g.:** `fetch_repo("vllm-project/vllm", "2026-01-01T…")` → normalized issue/PR dicts updated since then.
+  - **Test:** `tests/test_collector.py::test_fetch_repo_pagination`, `::test_fetch_repo_404` — mocks `requests`; paging stops at `< PER_PAGE`, 404 → `[]`.
 - [x] **T0.2 Normalization schema** — `src/collector.py::_normalize`.
-      **Why:** flatten GitHub's varied payloads into one minimal schema so later stages consume a consistent shape.
-      **e.g.:** raw issue → `{repo, number, type:"issue|pr", title, labels, url, updated_at, body[:4000]}`.
-      Test: `tests/test_collector.py::test_normalize_issue_vs_pr`, `::test_normalize_body_truncated_and_defaults`.
+  - **Why:** flatten GitHub's varied payloads into one minimal schema so later stages consume a consistent shape.
+  - **e.g.:** raw issue → `{repo, number, type:"issue|pr", title, labels, url, updated_at, body[:4000]}`.
+  - **Test:** `tests/test_collector.py::test_normalize_issue_vs_pr`, `::test_normalize_body_truncated_and_defaults`.
 - [x] **T0.3 JSONL upsert store** — `src/collector.py::_merge_jsonl`.
-      **Why:** re-fetched items overwrite by number (no duplicates, always latest), persisted to a per-repo JSONL.
-      **e.g.:** #123 already stored + an updated copy arrives → that one line is replaced, the rest untouched.
-      Test: `tests/test_collector.py::test_merge_jsonl_upsert_and_order`.
+  - **Why:** re-fetched items overwrite by number (no duplicates, always latest), persisted to a per-repo JSONL.
+  - **e.g.:** #123 already stored + an updated copy arrives → that one line is replaced, the rest untouched.
+  - **Test:** `tests/test_collector.py::test_merge_jsonl_upsert_and_order`.
 - [x] **T0.4 Incremental state cursor** — `src/collector.py::_load_state/_save_state`.
-      **Why:** remember each repo's last-collected time so the next run only fetches newer items (incremental).
-      **e.g.:** `data/state.json` = `{"vllm-project/vllm": "2026-07-03T…Z"}` → next run uses that as `since`.
-      Test: `tests/test_collector.py::test_state_roundtrip`.
+  - **Why:** remember each repo's last-collected time so the next run only fetches newer items (incremental).
+  - **e.g.:** `data/state.json` = `{"vllm-project/vllm": "2026-07-03T…Z"}` → next run uses that as `since`.
+  - **Test:** `tests/test_collector.py::test_state_roundtrip`.
 - [x] **T0.5 Rate-limit handling + auth headers** — `src/collector.py::_headers/_sleep_for_rate_limit`.
-      **Why:** a token lifts the limit 60→5000/hr, and on exhaustion we wait for reset instead of crashing.
-      **e.g.:** `403` + `X-RateLimit-Remaining: 0` → sleep until reset then retry; `GITHUB_TOKEN` → `Bearer` header.
-      Test: `tests/test_collector.py::test_headers_token`, `::test_rate_limit_no_wait_on_ok`,
-      `::test_rate_limit_waits_on_403`.
-- [ ] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`,
-      `get_state`, `set_state`); move JSONL logic into `src/store/jsonl_store.py`; collector writes via the
-      interface.
-      **Why:** so we can swap JSONL → Firestore (M0.6) later without touching the collector/agents — one interface,
-      many backends. **e.g.:** `get_store().upsert_items(recs)` writes JSONL today, Firestore tomorrow, same call.
-      Test: `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.
-- [ ] **T0.7 LLM wrapper (pluggable)** — `src/llm.py::complete` dispatching on `LLM_PROVIDER`
-      (`claude_cli` shells out to `claude -p`; `claude_api`; `local`/vLLM OpenAI-compatible). JSON-mode parsing,
-      timeout, non-zero-exit / HTTP-error handling. **Return call metadata** (tokens / latency / est. cost)
-      alongside the result so the cost-aware bandit (T2.6) can route on reward-per-cost.
-      **Why:** every agent needs an LLM; one wrapper lets us switch claude_cli / API / local-vLLM without editing
-      agents. **e.g.:** `complete("classify: <issue>", json_schema=TAXONOMY)` → `{"category": "rocm-build"}` — same
-      call whether it hits `claude -p` or a local vLLM server.
-      Test: `tests/test_llm.py` — each provider path with subprocess/HTTP **mocked**: asserts prompt passed,
-      stdout/response parsed, `json_schema` returns dict, metadata populated, error path raises cleanly. Live
-      per-provider smoke = `@pytest.mark.integration`.
-- [ ] **T0.8 Baseline weekly report v0 (fixed taxonomy, no LLM)** — `src/agents/reporter.py`: read items from
-      store, bucket by fixed-taxonomy keyword match, emit Markdown with cited links.
-      **Why:** first human-readable deliverable — turns raw JSONL into a weekly digest, and sets the "every claim
-      cites a link" bar before any LLM is involved. **e.g.:** `## ROCm builds (3)` → `- [vllm#123] hipBLAS build
-      fails on gfx90a — https://github.com/vllm-project/vllm/issues/123`.
-      Test: `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
+  - **Why:** a token lifts the limit 60→5000/hr, and on exhaustion we wait for reset instead of crashing.
+  - **e.g.:** `403` + `X-RateLimit-Remaining: 0` → sleep until reset then retry; `GITHUB_TOKEN` → `Bearer` header.
+  - **Test:** `tests/test_collector.py::test_headers_token`, `::test_rate_limit_no_wait_on_ok`, `::test_rate_limit_waits_on_403`.
+- [ ] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`, `get_state`, `set_state`); move JSONL logic into `src/store/jsonl_store.py`; collector writes via the interface.
+  - **Why:** swap JSONL → Firestore (M0.6) later without touching the collector/agents — one interface, many backends.
+  - **e.g.:** `get_store().upsert_items(recs)` writes JSONL today, Firestore tomorrow, same call.
+  - **Test:** `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.
+- [ ] **T0.7 LLM wrapper (pluggable)** — `src/llm.py::complete` dispatching on `LLM_PROVIDER` (`claude_cli` → `claude -p`; `claude_api`; `local`/vLLM OpenAI-compatible); JSON-mode, timeout, error handling; returns call metadata (tokens/latency/cost) for the T2.6 bandit.
+  - **Why:** every agent needs an LLM; one wrapper lets us switch claude_cli / API / local-vLLM without editing agents.
+  - **e.g.:** `complete("classify: <issue>", json_schema=TAXONOMY)` → `{"category": "rocm-build"}` — same call whether it hits `claude -p` or a local vLLM server.
+  - **Test:** `tests/test_llm.py` — each provider mocked (prompt passed, response parsed, `json_schema` → dict, metadata populated, error path raises); live smoke = `@pytest.mark.integration`.
+- [ ] **T0.8 Baseline weekly report v0 (fixed taxonomy, no LLM)** — `src/agents/reporter.py`: read items from store, bucket by fixed-taxonomy keyword match, emit Markdown with cited links.
+  - **Why:** first human-readable deliverable — raw JSONL → a weekly digest, and sets the "every claim cites a link" bar before any LLM is involved.
+  - **e.g.:** `## ROCm builds (3)` → `- [vllm#123] hipBLAS build fails on gfx90a — https://github.com/vllm-project/vllm/issues/123`.
+  - **Test:** `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
 - [ ] **T0.9 Report CLI** — `python -m src.report` writes `data/reports/YYYY-Www.md`.
-      **Why:** one command to produce the weekly report on demand / on a schedule. **e.g.:** `python -m src.report`
-      → writes `data/reports/2026-W27.md` and prints its path.
-      Test: `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
+  - **Why:** one command to produce the weekly report on demand / on a schedule.
+  - **e.g.:** `python -m src.report` → writes `data/reports/2026-W27.md` and prints its path.
+  - **Test:** `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
 - [ ] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` so one repo's
       failure doesn't abort the run; **save state incrementally after each repo**; retry with backoff on 5xx /
       timeouts; honor secondary rate limits (`Retry-After`); validate each record has required fields
