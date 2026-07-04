@@ -301,7 +301,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** both the CLI report and the dashboard must consume one tree structure; counts/gaps roll up so a parent shows its subtree totals.
   - **e.g.:** `data/reports/…tree.json` = nested nodes; the Markdown renders indented `大 → 소(summary) → 소소 → PRs`.
   - **Test:** `tests/test_reporter_v1.py` — fixtures → correct nesting + rolled-up counts; every leaf PR has an evidence URL; empty branches pruned.
-- [ ] **T1.5.5 Dashboard tree UI (match the approved mockup)** — upgrade `dashboard/render.py` (+ `server.py`) to render the tree: **collapsible** nodes, per-node summary line, count + `gap` chips, PR-state chips (merged/open/issue), a **filter** box, light/dark — matching `docs/design/report-tree-mockup.html`.
+- [x] **T1.5.5 Dashboard tree UI (match the approved mockup)** — upgrade `dashboard/render.py` (+ `server.py`) to render the tree: **collapsible** nodes, per-node summary line, count + `gap` chips, PR-state chips (merged/open/issue), a **filter** box, light/dark — matching `docs/design/report-tree-mockup.html`.
   - **Why:** the readability win itself; the same renderer displays the real hierarchy T1.5.1–1.5.4 produce (the mockup is the design spec, not throwaway).
   - **e.g.:** `python -m dashboard` → the collapsible tree (like the mockup) over live KB data; the filter narrows to matches and auto-expands ancestors.
   - **Test:** `tests/test_dashboard.py` — a seeded tree → render produces nested nodes + summaries + evidence links; filtering to a term keeps only matching leaves.

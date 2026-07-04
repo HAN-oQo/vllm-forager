@@ -1,58 +1,39 @@
-"""Pure render functions: KB (store + reports dir) in, HTML/data out — no server involved.
+"""Pure render functions: KB (store) in, HTML/data out — no server involved.
 
 Kept separate from :mod:`dashboard.server` so every render can be unit-tested against a
-seeded store/tmp_path fixture without opening a socket (per T1.9's own test plan).
+seeded store fixture without opening a socket (per T1.9's own test plan).
 
-The report body is read from the **latest already-generated** file under `reports_dir`
-(written by ``python -m src.report``), not regenerated live from the store on every page
-load — :mod:`src.agents.reporter_v1` calls the LLM once per category, so re-rendering it on
-every HTTP request would mean an LLM call per dashboard refresh. Trends and the forecast log
-are cheap, pure store reads (:mod:`src.trends`, :mod:`src.agents.forecaster`), so those ARE
-computed live — the dashboard reflects new items/predictions immediately; only the narrative
-report itself lags to its last scheduled ``python -m src.report`` run.
+T1.5.5: the dashboard's centerpiece is now the same collapsible taxonomy tree T1.5.4's
+``report.py --tree`` writes to disk — :func:`~src.agents.reporter_v1.tree_from_store` is
+called **live** here (not read from a ``.tree.json`` file), matching how Trends/the forecast
+log already work. This also retires T1.9's own "known limitation" (the old flat-report section
+read a local file that could be stale/absent on a different host than whatever last ran
+``python -m src.report``) — the tree section has no such gap, since it's computed the same way
+Trends/forecasts always were: straight from the `Store`.
 
-Known limitation: unlike trends/forecasts, the report section is NOT read through the `Store`
-interface — ``src.report``'s ``generate()`` always writes its Markdown to a **local**
-`reports_dir` file, never into the KB, regardless of the `STORE` backend. If ``STORE=firestore``
-and this dashboard runs on a different host/filesystem than whatever last ran
-``python -m src.report``, `render_report` will return the "no report yet" placeholder
-indefinitely — that's a "wrong host", not "no report exists" — with no way to tell them apart
-from here. A real fix means teaching ``src.report`` to persist report bodies into the KB
-itself; out of scope for this thin M1 slice, where the assumption is a single shared
-`FORAGER_DATA_DIR` (docs/PLAN.md) local to wherever the dashboard runs.
+Node summaries (T1.5.3), counts/gaps (T1.5.4, rolled up), and cited PR/issue rows render as
+collapsible ``<details>`` per node, matching the approved ``docs/design/report-tree-mockup.
+html`` — the design spec, not a throwaway: CSS variables, the expand/collapse + filter
+``<script>``, and the light/dark theming below are adapted from it directly, not reinvented.
+
+Known limitation (not fixed here): the collector normalizes only ``state`` (open/closed), not
+a ``merged``/``merged_at`` field, so a PR's chip treats "closed" as "merged" — a closed-without
+-merging PR would be mislabeled. Distinguishing the two needs a collector change (capturing
+GitHub's own ``merged``/``merged_at`` fields), out of scope for a dashboard-rendering todo.
 """
 
 from __future__ import annotations
 
 from html import escape
-from pathlib import Path
 
 from src.agents.forecaster import Prediction, list_predictions
+from src.agents.reporter_v1 import TreeNode, tree_from_store
 from src.store.base import Store
 from src.trends import trends_from_store
 
-_NO_REPORT_YET = "No report has been generated yet — run `python -m src.report`."
-
-
-def latest_report_path(reports_dir: Path) -> Path | None:
-    """The most recently written ``*.md`` report under `reports_dir`, or None if there are none.
-
-    Report filenames are ISO year-week stamps (``2026-W27.md``, T1.7's ``week_stamp``), which
-    sort lexicographically in chronological order — so the max filename IS the latest report,
-    no filesystem mtime (unreliable across copies/checkouts) needed.
-    """
-    if not reports_dir.is_dir():
-        return None
-    reports = sorted(reports_dir.glob("*.md"))
-    return reports[-1] if reports else None
-
-
-def render_report(reports_dir: Path) -> str:
-    """The latest report's raw Markdown body, or a placeholder if none exists yet."""
-    path = latest_report_path(reports_dir)
-    if path is None:
-        return _NO_REPORT_YET
-    return path.read_text(encoding="utf-8")
+# Depth 0 -> "cat" (top-level taxonomy category), depth 1 -> "sub", depth 2+ -> "leaf" —
+# purely a styling hook (nesting depth), independent of whether a node actually has children.
+_NODE_CLASS_BY_DEPTH = ("cat", "sub")
 
 
 def render_trends(store: Store) -> dict[str, dict[str, int]]:
@@ -70,9 +51,93 @@ def _section(title: str, body_html: str) -> str:
     return f"<section><h2>{title}</h2>{body_html}</section>"
 
 
-def _report_section_html(reports_dir: Path) -> str:
-    body = render_report(reports_dir)
-    return _section("Latest report", f"<pre>{escape(body)}</pre>")
+def _node_class(depth: int) -> str:
+    return _NODE_CLASS_BY_DEPTH[depth] if depth < len(_NODE_CLASS_BY_DEPTH) else "leaf"
+
+
+def _state_chip(pr: dict) -> tuple[str, str]:
+    """``(css-class, label)`` for a PR/issue row's state chip — merged / open pr / issue.
+
+    See this module's docstring: a closed PR is assumed merged, since the collector doesn't
+    capture a real ``merged`` flag.
+    """
+    if pr.get("type") != "pr":
+        return "issue", "issue"
+    if pr.get("state") == "open":
+        return "open", "open pr"
+    return "merged", "merged"
+
+
+def _pr_row_html(pr: dict) -> str:
+    """One cited PR/issue row: ``repo#number``, a linked title, and a state chip."""
+    repo = pr.get("repo") or "?"
+    number = pr.get("number")
+    number = number if number is not None else "?"
+    chip_class, chip_label = _state_chip(pr)
+    url = escape(pr.get("url") or "")
+    title = escape(pr.get("title") or "")
+    return (
+        '<div class="pr">'
+        f'<span class="id">{escape(str(repo))}#{escape(str(number))}</span>'
+        f'<span class="t"><a href="{url}">{title}</a></span>'
+        f'<span class="chip {chip_class}">{escape(chip_label)}</span>'
+        "</div>"
+    )
+
+
+def _gap_chip_html(gaps: int) -> str:
+    if not gaps:
+        return ""
+    label = f"{gaps} gap" if gaps == 1 else f"{gaps} gaps"
+    return f'<span class="tag-gap">{escape(label)}</span>'
+
+
+def _tree_node_html(node: TreeNode, depth: int) -> str:
+    """One collapsible ``<details>`` node: name, count, an optional gap chip and summary
+    line, its own cited PR rows, then its children — recursively, matching the mockup's
+    대(大) → 소(summary) → 소소 → PRs nesting."""
+    summary_html = f'<div class="summary-line">{escape(node.summary)}</div>' if node.summary else ""
+    prs_html = "".join(_pr_row_html(pr) for pr in node.prs)
+    kids_html = "".join(_tree_node_html(child, depth + 1) for child in node.children)
+    body = prs_html + kids_html
+    kids_wrapped = f'<div class="kids">{body}</div>' if body else ""
+    open_attr = " open" if depth == 0 else ""
+    return (
+        f'<details class="{_node_class(depth)}"{open_attr}>'
+        '<summary><span class="chev">▶</span>'
+        f'<span class="name">{escape(node.name)}</span>'
+        f'<span class="count">{node.count}</span>{_gap_chip_html(node.gaps)}</summary>'
+        f"{summary_html}{kids_wrapped}"
+        "</details>"
+    )
+
+
+_TREE_CONTROLS = (
+    '<div class="controls">'
+    '<input id="q" type="search" '
+    'placeholder="Filter — e.g. attention, DeepSeek, fp8, sglang#…" aria-label="Filter report">'
+    '<button class="btn" data-all="1">Expand all</button>'
+    '<button class="btn" data-all="0">Collapse all</button>'
+    "</div>"
+    '<div class="legend">'
+    '<span><span class="dot" style="background:var(--merged)"></span>merged PR</span>'
+    '<span><span class="dot" style="background:var(--open)"></span>open PR</span>'
+    '<span><span class="dot" style="background:var(--issue)"></span>issue</span>'
+    '<span><span class="tag-gap" style="border:none;padding:.02rem .3rem">gap</span>'
+    "present in fork, missing upstream</span>"
+    "</div>"
+)
+
+
+def _tree_section_html(store: Store) -> str:
+    nodes = tree_from_store(store)
+    if not nodes:
+        return _section(
+            "Report tree",
+            "<p>No classified items yet — run <code>python -m src.analyze</code>.</p>",
+        )
+    tree_html = "".join(_tree_node_html(node, 0) for node in nodes)
+    return _section("Report tree", f'{_TREE_CONTROLS}<div id="tree">{tree_html}</div>')
 
 
 def _trends_section_html(store: Store) -> str:
@@ -118,24 +183,139 @@ def _forecasts_section_html(store: Store) -> str:
     return _section("Forecast log", table)
 
 
-def render_page(store: Store, reports_dir: Path) -> str:
-    """The full dashboard page: latest report + per-category trends + the forecast log."""
-    body = (
-        _report_section_html(reports_dir)
-        + _trends_section_html(store)
-        + _forecasts_section_html(store)
-    )
+# The expand/collapse + filter behavior, adapted directly from the approved
+# docs/design/report-tree-mockup.html (same element shapes: #tree, .pr, .btn[data-all], #q).
+_TREE_SCRIPT = """
+document.querySelectorAll('.btn[data-all]').forEach(function(b){
+  b.addEventListener('click',function(){
+    var open=b.dataset.all==='1';
+    document.querySelectorAll('#tree details').forEach(function(d){d.open=open;});
+  });
+});
+var q=document.getElementById('q');
+if(q){
+  q.addEventListener('input',function(){
+    var term=q.value.trim().toLowerCase();
+    var details=document.querySelectorAll('#tree details');
+    if(!term){
+      document.querySelectorAll('#tree .hidden').forEach(function(e){
+        e.classList.remove('hidden');
+      });
+      details.forEach(function(d){
+        d.open=(d.classList.contains('cat')||d.classList.contains('sub'));
+      });
+      return;
+    }
+    document.querySelectorAll('#tree .pr').forEach(function(pr){
+      pr.classList.toggle('hidden', pr.textContent.toLowerCase().indexOf(term)===-1);
+    });
+    details.forEach(function(d){
+      var self=d.querySelector('summary').textContent.toLowerCase().indexOf(term)!==-1;
+      var hasPr=d.querySelector('.pr:not(.hidden)');
+      var vis=self||hasPr;
+      d.classList.toggle('hidden',!vis);
+      d.open=vis;
+      if(self){ d.querySelectorAll('.pr').forEach(function(pr){pr.classList.remove('hidden');}); }
+    });
+  });
+}
+"""
+
+# CSS variables + tree rules adapted directly from the approved mockup — the design spec.
+_STYLE = """
+:root{
+  --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#d7dee8;
+  --ink:#182231; --ink-2:#586576; --ink-3:#8b96a6;
+  --accent:#2f6db3; --merged:#7a5bd0; --merged-soft:#efe9fb;
+  --open:#2e9e6b; --open-soft:#e4f4ec; --issue:#c0872a; --issue-soft:#f7eddb;
+  --gap:#c74b45; --gap-soft:#f8e7e6; --guide:#e2e8f1;
+}
+@media (prefers-color-scheme:dark){
+  :root{
+    --bg:#0f141b; --surface:#151c26; --surface-2:#1b2430; --border:#2a3543;
+    --ink:#e7ecf3; --ink-2:#9dabbd; --ink-3:#6c798b;
+    --accent:#5c9cd9; --merged:#a488e8; --merged-soft:#241d38;
+    --open:#4cbd8a; --open-soft:#12271d; --issue:#d8a24e; --issue-soft:#2b2413;
+    --gap:#e0655e; --gap-soft:#2e1817; --guide:#26313f;
+  }
+}
+:root[data-theme="light"]{
+  --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#d7dee8;
+  --ink:#182231; --ink-2:#586576; --ink-3:#8b96a6;
+  --accent:#2f6db3; --merged:#7a5bd0; --merged-soft:#efe9fb;
+  --open:#2e9e6b; --open-soft:#e4f4ec; --issue:#c0872a; --issue-soft:#f7eddb;
+  --gap:#c74b45; --gap-soft:#f8e7e6; --guide:#e2e8f1;
+}
+:root[data-theme="dark"]{
+  --bg:#0f141b; --surface:#151c26; --surface-2:#1b2430; --border:#2a3543;
+  --ink:#e7ecf3; --ink-2:#9dabbd; --ink-3:#6c798b;
+  --accent:#5c9cd9; --merged:#a488e8; --merged-soft:#241d38;
+  --open:#4cbd8a; --open-soft:#12271d; --issue:#d8a24e; --issue-soft:#2b2413;
+  --gap:#e0655e; --gap-soft:#2e1817; --guide:#26313f;
+}
+body{font-family:system-ui,-apple-system,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+  max-width:900px;margin:2rem auto;padding:0 1rem;background:var(--bg);color:var(--ink)}
+h1{color:var(--ink)}
+section{margin-bottom:2rem}
+pre{white-space:pre-wrap;background:var(--surface-2);padding:1rem;border-radius:4px;color:var(--ink)}
+table{border-collapse:collapse;width:100%}
+td,th{border:1px solid var(--border);padding:.3rem .6rem;text-align:left;color:var(--ink)}
+.week{display:flex;align-items:center;gap:.5rem;margin:.2rem 0}
+.label{width:6rem;flex-shrink:0}
+.bar{background:var(--accent);color:#fff;padding:.1rem .4rem;border-radius:2px;min-width:1.5rem}
+
+.controls{display:flex;flex-wrap:wrap;gap:.5rem;align-items:center;margin:1rem 0}
+.controls input{flex:1;min-width:200px;background:var(--surface);border:1px solid var(--border);
+  color:var(--ink);border-radius:7px;padding:.5rem .7rem;font-size:.9rem}
+.btn{background:var(--surface);border:1px solid var(--border);color:var(--ink-2);
+  border-radius:7px;padding:.5rem .75rem;font-size:.82rem;cursor:pointer}
+.btn:hover{border-color:var(--accent);color:var(--accent)}
+.legend{display:flex;gap:.9rem;flex-wrap:wrap;font-size:.75rem;color:var(--ink-3);margin-bottom:1rem}
+.legend span{display:inline-flex;align-items:center;gap:.35rem}
+.dot{width:.6rem;height:.6rem;border-radius:50%}
+
+details{margin:0}
+summary{list-style:none;cursor:pointer;display:flex;align-items:baseline;gap:.5rem;
+  padding:.4rem .5rem;border-radius:7px}
+summary::-webkit-details-marker{display:none}
+summary:hover{background:var(--surface-2)}
+.chev{color:var(--ink-3);font-size:.7rem;width:.8rem;flex-shrink:0;transition:transform .15s}
+details[open]>summary>.chev{transform:rotate(90deg)}
+.name{font-weight:600}
+.count{font-family:ui-monospace,monospace;font-size:.72rem;color:var(--ink-2);
+  background:var(--surface-2);border:1px solid var(--border);border-radius:999px;
+  padding:.05rem .45rem}
+.cat{background:var(--surface);border:1px solid var(--border);border-radius:10px;
+  padding:.35rem;margin-bottom:.6rem}
+.kids{padding-left:1.15rem;margin-left:.55rem;border-left:1.5px solid var(--guide)}
+.summary-line{color:var(--ink-2);font-size:.83rem;padding:.1rem .5rem .5rem 1.8rem;max-width:66ch}
+.pr{display:flex;align-items:baseline;gap:.6rem;padding:.32rem .5rem .32rem 1.8rem;
+  border-radius:6px;font-size:.9rem}
+.pr:hover{background:var(--surface-2)}
+.pr .id{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--ink-3);
+  flex-shrink:0;min-width:9.5rem}
+.pr .t{color:var(--ink);flex:1}
+.pr .t a{color:inherit}
+.pr .t a:hover{color:var(--accent)}
+.chip{font-size:.66rem;font-weight:600;letter-spacing:.02em;text-transform:uppercase;
+  padding:.08rem .4rem;border-radius:5px;flex-shrink:0}
+.chip.merged{color:var(--merged);background:var(--merged-soft)}
+.chip.open{color:var(--open);background:var(--open-soft)}
+.chip.issue{color:var(--issue);background:var(--issue-soft)}
+.tag-gap{font-size:.66rem;font-weight:600;color:var(--gap);background:var(--gap-soft);
+  border:1px solid var(--gap);border-radius:5px;padding:.02rem .38rem;margin-left:.4rem}
+.hidden{display:none !important}
+"""
+
+
+def render_page(store: Store) -> str:
+    """The full dashboard page: the collapsible report tree + per-category trends + the
+    forecast log."""
+    body = _tree_section_html(store) + _trends_section_html(store) + _forecasts_section_html(store)
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>vllm-forager dashboard</title>"
-        "<style>"
-        "body{font-family:sans-serif;max-width:900px;margin:2rem auto;padding:0 1rem}"
-        "pre{white-space:pre-wrap;background:#f4f4f4;padding:1rem;border-radius:4px}"
-        "table{border-collapse:collapse;width:100%}"
-        "td,th{border:1px solid #ccc;padding:.3rem .6rem;text-align:left}"
-        ".week{display:flex;align-items:center;gap:.5rem;margin:.2rem 0}"
-        ".label{width:6rem;flex-shrink:0}"
-        ".bar{background:#4a7ebb;color:#fff;padding:.1rem .4rem;border-radius:2px;min-width:1.5rem}"
-        "</style></head><body>"
-        "<h1>vllm-forager dashboard</h1>" + body + "</body></html>"
+        f"<style>{_STYLE}</style></head><body>"
+        "<h1>vllm-forager dashboard</h1>" + body + f"<script>{_TREE_SCRIPT}</script>"
+        "</body></html>"
     )
