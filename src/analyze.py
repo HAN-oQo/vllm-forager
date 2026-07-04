@@ -12,17 +12,15 @@ import argparse
 from pathlib import Path
 
 from .agents import analyst
-from .store import get_store
-from .store.base import Store
-from .store.jsonl_store import JsonlStore
+from .store import resolve_store
 
 
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: classify pending items and print how many were classified.
 
-    Store selection matches :func:`src.report.main`: ``--data-dir`` reads a
-    :class:`JsonlStore` at that explicit path; otherwise :func:`~src.store.get_store` picks
-    the backend from env ``STORE``.
+    Store selection is :func:`~src.store.resolve_store`'s shared contract: ``--data-dir``
+    reads a :class:`~src.store.jsonl_store.JsonlStore` at that explicit path; otherwise
+    :func:`~src.store.get_store` picks the backend from env ``STORE``.
     """
     ap = argparse.ArgumentParser(
         prog="python -m src.analyze",
@@ -39,7 +37,7 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    store: Store = JsonlStore(args.data_dir) if args.data_dir is not None else get_store()
+    store, _ = resolve_store(args.data_dir)
     classified = analyst.analyze_store(store)
     print(f"classified {len(classified)} item(s)")
     return 0

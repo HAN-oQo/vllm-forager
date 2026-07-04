@@ -1,7 +1,8 @@
 """``python -m dashboard`` — serve the thin read-only M1 dashboard.
 
-Store/reports-dir selection mirrors :mod:`src.report`'s CLI: with ``--data-dir``, always reads
-a :class:`~src.store.jsonl_store.JsonlStore` at that path; without it, uses
+Store/reports-dir selection uses :func:`src.store.resolve_store` (T1.11), the same shared
+contract as :mod:`src.report`/:mod:`src.analyze`/:mod:`src.forecast`: with ``--data-dir``,
+always reads a :class:`~src.store.jsonl_store.JsonlStore` at that path; without it, uses
 :func:`src.store.get_store` (``STORE=jsonl|firestore``) so ``STORE=firestore`` serves from
 Firestore just like the collector/reporter do.
 """
@@ -11,10 +12,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from src import config
-from src.store import get_store
-from src.store.base import Store
-from src.store.jsonl_store import JsonlStore
+from src.store import resolve_store
 
 from .server import serve
 
@@ -40,14 +38,7 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765).")
     args = ap.parse_args(argv)
 
-    store: Store
-    if args.data_dir is not None:
-        data_dir = args.data_dir
-        store = JsonlStore(data_dir)
-    else:
-        data_dir = config.DATA_DIR
-        store = get_store()
-
+    store, data_dir = resolve_store(args.data_dir)
     return serve(store, data_dir / "reports", host=args.host, port=args.port)
 
 
