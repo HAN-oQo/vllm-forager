@@ -21,6 +21,7 @@ def _item(repo: str, number: int, title: str, **overrides) -> dict:
         "title": title,
         "state": "open",
         "labels": [],
+        "created_at": "2025-01-01T00:00:00Z",
         "updated_at": "2025-01-01T00:00:00Z",
         "url": f"http://x/{repo}/{number}",
         "body": "",

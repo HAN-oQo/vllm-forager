@@ -11,19 +11,34 @@ category is an *addition* to the record, not a replacement of it. Each classifie
 carries ``taxonomy_version``, the version under which it was classified, so a later audit or
 grading pass (T2.2) can ask "what taxonomy was active for this item" without guessing.
 
-An item the model puts outside the active taxonomy (a hallucinated/unknown category name)
-falls back to :data:`OTHER` — mirrors the T0.8 baseline reporter's own fallback bucket, so an
-item is never silently unclassified because the model went off-script.
+An item the model puts outside the active taxonomy (a hallucinated/unknown category name, or
+one that only differs by case/whitespace — matched the same way :func:`~src.taxonomy.add_category`
+already does) falls back to :data:`OTHER` — mirrors the T0.8 baseline reporter's own fallback
+bucket, so an item is never silently unclassified because the model went off-script.
+
+Known limitation (not fixed here): ``Store.upsert_items`` is a full per-``(repo, number)``
+replace on every backend (``JsonlStore.merge_jsonl``'s ``existing[rec["number"]] = rec``;
+``FirestoreStore``'s ``batch.set(doc, it)`` with no ``merge=True``) — it doesn't merge fields.
+The collector's own ``_normalize()`` never carries ``category``/``taxonomy_version`` forward,
+so if it re-fetches an item this module already classified (any new comment/label bumps
+``updated_at`` back into its incremental window), the next collector run silently erases the
+classification and this module's own delta check treats it as never-classified again. Fixing
+this properly means Store-level merge-on-upsert semantics (or a separate classification
+keyspace, mirroring :mod:`src.taxonomy`/:mod:`src.policy`'s ``get_state``/``set_state``
+pattern) across both backends and their shared contract test — out of scope for this module;
+flagged here so the next agent that writes onto item records (T1.5, T2.x) doesn't hit it
+blind.
 """
 
 from __future__ import annotations
+
+import sys
 
 from .. import llm
 from ..store.base import Store
 from ..taxonomy import Taxonomy
 from ..taxonomy import get_active as get_active_taxonomy
-
-OTHER = "Other"
+from .reporter import OTHER
 
 _CATEGORY_SCHEMA = {
     "type": "object",
@@ -36,7 +51,7 @@ _CATEGORY_SCHEMA = {
 _BODY_CHARS = 2000
 
 
-def _prompt(item: dict, categories: list[str]) -> str:
+def _prompt(item: dict, categories: tuple[str, ...]) -> str:
     """The classification prompt for one item: title + a body excerpt + the category list."""
     title = item.get("title") or ""
     body = (item.get("body") or "")[:_BODY_CHARS]
@@ -47,17 +62,36 @@ def _prompt(item: dict, categories: list[str]) -> str:
     )
 
 
+def _canonical_category(raw: object, categories: tuple[str, ...]) -> str:
+    """Match `raw` against `categories` case/whitespace-insensitively; else :data:`OTHER`.
+
+    Mirrors :func:`~src.taxonomy.add_category`'s own ``.strip().casefold()`` normalization,
+    so a reply of ``"ROCm-Build"`` against a taxonomy category ``"rocm-build"`` is recognized
+    as the same category instead of silently becoming :data:`OTHER` for what the model
+    actually got right. Returns the taxonomy's own canonical spelling on a match, not the
+    model's raw casing.
+    """
+    if not isinstance(raw, str):
+        return OTHER
+    normalized = raw.strip().casefold()
+    for category in categories:
+        if category.strip().casefold() == normalized:
+            return category
+    return OTHER
+
+
 def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     """Classify one item into `taxonomy`'s categories.
 
     Returns a **new** dict — `item`'s fields (its ``url`` citation included, unchanged) plus
-    ``category`` and ``taxonomy_version``. A category the model names outside
-    `taxonomy.categories` becomes :data:`OTHER` rather than being trusted verbatim.
+    ``category`` and ``taxonomy_version``.
+
+    Raises:
+        llm.LLMError: the completion call failed (transport error, timeout, non-JSON reply).
     """
-    reply = llm.complete(_prompt(item, list(taxonomy.categories)), json_schema=_CATEGORY_SCHEMA)
-    category = reply.get("category") if isinstance(reply, dict) else None
-    if category not in taxonomy.categories:
-        category = OTHER
+    reply = llm.complete(_prompt(item, taxonomy.categories), json_schema=_CATEGORY_SCHEMA)
+    raw_category = reply.get("category") if isinstance(reply, dict) else None
+    category = _canonical_category(raw_category, taxonomy.categories)
     return {**item, "category": category, "taxonomy_version": taxonomy.version}
 
 
@@ -65,17 +99,36 @@ def analyze_store(store: Store) -> list[dict]:
     """Classify every not-yet-classified item in `store` and write the results back.
 
     "Delta" = items with no ``category`` key yet, so a rerun only classifies what an earlier
-    run (or the most recent collection) hasn't already labeled.
+    run (or the most recent collection) hasn't already labeled. A failing item (an
+    ``llm.LLMError``) is skipped — logged to stderr and left pending for the next run —
+    rather than discarding every other item already classified in this batch.
 
     Returns the newly-classified items (``[]`` if there was nothing to do).
 
     Raises:
-        TaxonomyError: no taxonomy has been created yet — there's nothing to classify into.
+        TaxonomyError: there are pending items but no taxonomy has been created yet.
     """
-    active = get_active_taxonomy(store)
     pending = [item for item in store.query() if "category" not in item]
     if not pending:
         return []
-    classified = [classify_item(item, active) for item in pending]
-    store.upsert_items(classified)
+
+    active = get_active_taxonomy(store)
+    if not active.categories:
+        # Nothing to classify into — every item is trivially Other; skip the LLM entirely.
+        classified = [
+            {**item, "category": OTHER, "taxonomy_version": active.version} for item in pending
+        ]
+    else:
+        classified = []
+        for item in pending:
+            try:
+                classified.append(classify_item(item, active))
+            except llm.LLMError as exc:
+                print(
+                    f"analyst: skipping {item.get('repo')}#{item.get('number')}: {exc}",
+                    file=sys.stderr,
+                )
+
+    if classified:
+        store.upsert_items(classified)
     return classified
