@@ -19,13 +19,17 @@ Design:
   like the collector does. ``--data-dir`` is a JSONL-specific override (pre-dates the store
   factory): passing it always reads a :class:`JsonlStore` at that path, regardless of ``STORE``
   — there's no equivalent "read Firestore instead" flag, so mixing the two isn't meaningful.
+- :func:`week_stamp` is re-exported from :mod:`src.trends` (T1.7), which is where it's
+  actually defined — a pure, dependency-free function belongs in the lowest-altitude shared
+  module, not this CLI, so a future consumer (e.g. M5's dashboard) can use it without pulling
+  in argparse/the store/the LLM-backed reporter stack this module imports.
 """
 
 from __future__ import annotations
 
 import argparse
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import datetime
 from pathlib import Path
 
 from . import config
@@ -33,17 +37,9 @@ from .agents import reporter, reporter_v1
 from .store import get_store
 from .store.base import Store
 from .store.jsonl_store import JsonlStore
+from .trends import week_stamp
 
-
-def week_stamp(when: datetime | None = None) -> str:
-    """The ISO-year/ISO-week stamp used for the filename, e.g. ``2026-W27``.
-
-    ``%G``/``%V`` are the ISO-8601 year and week (not ``%Y``/``%U``): near a year boundary
-    the ISO week's year can differ from the calendar year, and this keeps week numbers
-    contiguous (…W52, W53?, W01…). Defaults to now (UTC) when `when` is omitted.
-    """
-    when = when or datetime.now(timezone.utc)
-    return when.strftime("%G-W%V")
+__all__ = ["week_stamp", "generate", "main"]
 
 
 def generate(

@@ -249,7 +249,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the human-facing deliverable — an LLM-written digest of what moved this week, every claim backed by a source link (evidence principle).
   - **e.g.:** "Spec-decoding activity doubled ([#a](url), [#b](url)); ROCm builds saw 3 new failures ([#c](url))."
   - **Test:** `tests/test_reporter_v1.py` — mock llm → **every claim line has ≥1 evidence URL** (evidence principle).
-- [ ] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
+- [x] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
   - **Why:** momentum over time (not a snapshot) is what reveals *direction* — which techniques are heating up/cooling — and feeds the dashboard charts.
   - **e.g.:** `trends("quantization")` → weekly counts `[3,5,4,9,12]`, a rising topic.
   - **Test:** `tests/test_trends.py` — synthetic items across weeks → correct bucketed counts per category.
