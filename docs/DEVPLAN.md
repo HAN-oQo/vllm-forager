@@ -174,7 +174,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** every agent needs an LLM; one wrapper lets us switch claude_cli / API / local-vLLM without editing agents.
   - **e.g.:** `complete("classify: <issue>", json_schema=TAXONOMY)` → `{"category": "rocm-build"}` — same call whether it hits `claude -p` or a local vLLM server.
   - **Test:** `tests/test_llm.py` — each provider mocked (prompt passed, response parsed, `json_schema` → dict, metadata populated, error path raises); live smoke = `@pytest.mark.integration`.
-- [ ] **T0.8 Baseline weekly report v0 (fixed taxonomy, no LLM)** — `src/agents/reporter.py`: read items from store, bucket by fixed-taxonomy keyword match, emit Markdown with cited links.
+- [x] **T0.8 Baseline weekly report v0 (fixed taxonomy, no LLM)** — `src/agents/reporter.py`: read items from store, bucket by fixed-taxonomy keyword match, emit Markdown with cited links.
   - **Why:** first human-readable deliverable — raw JSONL → a weekly digest, and sets the "every claim cites a link" bar before any LLM is involved.
   - **e.g.:** `## ROCm builds (3)` → `- [vllm#123] hipBLAS build fails on gfx90a — https://github.com/vllm-project/vllm/issues/123`.
   - **Test:** `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
