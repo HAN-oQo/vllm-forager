@@ -15,6 +15,8 @@ log="data/logs/collect-$ts.log"
 [ -f .venv/bin/activate ] && source .venv/bin/activate
 
 started="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+# ntfy: a start ping (best-effort; no-op if NOTIFY_URL isn't configured — see scripts/notify.sh).
+bash scripts/notify.sh "collect started" "vllm-forager:collect" || true
 # -u = unbuffered so progress streams live; tee shows it on the terminal AND writes the log.
 python -u -m src.collector 2>&1 | tee "$log"
 code=${PIPESTATUS[0]}
@@ -57,7 +59,11 @@ cat > data/last_run.json <<JSON
 JSON
 
 echo "[collect] status=$status exit=$code total_records=$total log=$log"
-if [ "$code" -ne 0 ]; then
+# ntfy: an end ping (best-effort; no-op if NOTIFY_URL isn't configured).
+if [ "$code" -eq 0 ]; then
+  bash scripts/notify.sh "collect done: ok · ${total} records" "vllm-forager:collect" || true
+else
+  bash scripts/notify.sh "collect FAILED (exit ${code}) — triage attempted" "vllm-forager:collect" || true
   echo "[collect] failure recorded; attempting self-heal triage" >&2
   bash scripts/triage.sh "$log" || echo "[collect] triage unavailable/skipped" >&2
 fi
