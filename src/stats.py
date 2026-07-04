@@ -7,6 +7,7 @@ Usage:
 from __future__ import annotations
 
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -21,10 +22,18 @@ def summarize(data_dir: Path | None = None) -> dict:
     for path in sorted(data_dir.glob("*.jsonl")):
         counts: Counter[str] = Counter()
         n = 0
-        for line in path.read_text().splitlines():
+        # Split on "\n" only — the collector writes records with ensure_ascii=False, so a
+        # body may contain a literal U+2028/U+2029/U+0085; str.splitlines() would split on
+        # those and break the record. Skip a genuinely corrupt line rather than crashing the
+        # whole summary (mirrors collector._merge_jsonl's tolerance).
+        for lineno, line in enumerate(path.read_text().split("\n"), 1):
             if not line.strip():
                 continue
-            rec = json.loads(line)
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"  !! {path.name}:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
+                continue
             n += 1
             counts[rec.get("type", "?")] += 1
             labels = " ".join(str(x).lower() for x in (rec.get("labels") or []))
