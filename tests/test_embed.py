@@ -59,13 +59,40 @@ def test_embed_local_calls_openai_compatible_endpoint(monkeypatch: pytest.Monkey
     def fake_post(url: str, headers: dict, json: dict, timeout: float) -> _FakeResp:
         captured["url"] = url
         captured["json"] = json
-        return _FakeResp({"data": [{"embedding": [1.0, 0.0]}, {"embedding": [0.0, 1.0]}]})
+        # Deliberately out of request order — the response's `index` field, not list
+        # position, must determine which vector maps to which input.
+        return _FakeResp(
+            {
+                "data": [
+                    {"embedding": [0.0, 1.0], "index": 1},
+                    {"embedding": [1.0, 0.0], "index": 0},
+                ]
+            }
+        )
 
     monkeypatch.setattr(requests, "post", fake_post)
     vectors = embed.embed_texts(["a", "b"], provider="local")
     assert vectors == [[1.0, 0.0], [0.0, 1.0]]
     assert captured["url"] == "http://localhost:8000/v1/embeddings"
     assert captured["json"]["input"] == ["a", "b"]
+
+
+def test_embed_local_count_mismatch_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setattr(
+        requests,
+        "post",
+        lambda *a, **k: _FakeResp({"data": [{"embedding": [1.0, 0.0], "index": 0}]}),
+    )
+    with pytest.raises(embed.EmbedError, match="1 embeddings for 2 inputs"):
+        embed.embed_texts(["a", "b"], provider="local")
+
+
+def test_embed_local_malformed_timeout_raises_embederror(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("LLM_BASE_URL", "http://localhost:8000/v1")
+    monkeypatch.setenv("EMBED_TIMEOUT", "not-a-number")
+    with pytest.raises(embed.EmbedError, match="EMBED_TIMEOUT"):
+        embed.embed_texts(["x"], provider="local")
 
 
 def test_embed_local_bad_shape_raises(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -84,6 +111,23 @@ def test_cosine_similarity_identical_orthogonal_and_zero() -> None:
 def test_build_index_length_mismatch_raises() -> None:
     with pytest.raises(embed.EmbedError, match="length mismatch"):
         embed.build_index(["a", "b"], [[1.0, 0.0]])
+
+
+def test_embed_index_direct_construction_validates_too() -> None:
+    """The invariant lives on EmbedIndex itself, not just the build_index() factory."""
+    with pytest.raises(embed.EmbedError, match="length mismatch"):
+        embed.EmbedIndex(ids=["a", "b"], vectors=[[1.0, 0.0]])
+
+
+def test_build_index_dimension_mismatch_raises() -> None:
+    with pytest.raises(embed.EmbedError, match="inconsistent dimensionality"):
+        embed.build_index(["a", "b"], [[1.0, 0.0], [1.0, 0.0, 0.0]])
+
+
+def test_nearest_negative_k_raises() -> None:
+    index = embed.build_index(["a", "b"], [[1.0, 0.0], [0.0, 1.0]])
+    with pytest.raises(embed.EmbedError, match="k must be >= 0"):
+        embed.nearest(index, query_vector=[1.0, 0.0], k=-1)
 
 
 def test_nearest_returns_closer_doc_first() -> None:
@@ -115,3 +159,9 @@ def test_search_uses_embed_fn_and_orders_by_similarity() -> None:
     results = embed.search(index, "hipBLAS linker error on gfx90a", embed_fn=fixture_model, k=2)
     assert results[0][0] == "hipblas-build-fail"
     assert results[0][1] > results[1][1]
+
+
+def test_search_embed_fn_wrong_count_raises_embederror() -> None:
+    index = embed.build_index(["a"], [[1.0, 0.0]])
+    with pytest.raises(embed.EmbedError, match="returned 0 vectors"):
+        embed.search(index, "q", embed_fn=lambda texts: [])

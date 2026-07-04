@@ -33,12 +33,30 @@ from dataclasses import dataclass
 
 import requests
 
+try:
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except Exception:  # works even if python-dotenv isn't installed
+    pass
+
 DEFAULT_PROVIDER = "hash"
 HASH_DIM = 256  # fixed vector width for the "hash" provider
 
 
 class EmbedError(RuntimeError):
     """Any embedding failure: unknown provider, missing config, or a transport error."""
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var; raise :class:`EmbedError` (not a bare ValueError) if malformed."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise EmbedError(f"{name}={raw!r} is not a valid number") from exc
 
 
 def _embed_hash(texts: list[str]) -> list[list[float]]:
@@ -69,21 +87,31 @@ def _embed_local(texts: list[str]) -> list[list[float]]:
     key = os.getenv("LLM_API_KEY")  # optional — vLLM can be run with an --api-key
     if key:
         headers["Authorization"] = f"Bearer {key}"
+    timeout = _env_float("EMBED_TIMEOUT", 30.0)
     try:
         resp = requests.post(
             f"{base.rstrip('/')}/embeddings",
             headers=headers,
             json={"model": model, "input": texts},
-            timeout=float(os.getenv("EMBED_TIMEOUT") or 30.0),
+            timeout=timeout,
         )
         resp.raise_for_status()
     except requests.RequestException as exc:  # covers HTTPError, Timeout, ConnectionError
         raise EmbedError(f"HTTP request to {base} failed: {exc}") from exc
     try:
         data = resp.json()
-        return [item["embedding"] for item in data["data"]]
+        # Sort by the OpenAI-compatible response's own `index` field rather than trusting
+        # list order — a server that reorders/batches results would otherwise silently
+        # misalign vectors against the requested texts (and downstream ids in build_index).
+        items = sorted(data["data"], key=lambda item: item["index"])
+        vectors = [item["embedding"] for item in items]
     except (KeyError, ValueError, TypeError) as exc:
         raise EmbedError(f"local endpoint returned an unexpected shape: {exc}") from exc
+    if len(vectors) != len(texts):
+        raise EmbedError(
+            f"local endpoint returned {len(vectors)} embeddings for {len(texts)} inputs"
+        )
+    return vectors
 
 
 # Provider dispatch table — the single place that maps EMBED_PROVIDER → implementation.
@@ -130,25 +158,42 @@ def cosine_similarity(a: list[float], b: list[float]) -> float:
 
 @dataclass
 class EmbedIndex:
-    """An in-memory brute-force nearest-neighbor index: parallel ids + vectors."""
+    """An in-memory brute-force nearest-neighbor index: parallel ids + vectors.
+
+    Validated in ``__post_init__`` (not just the ``build_index`` factory) so there is exactly
+    one way to end up with a well-formed index, however it's constructed.
+
+    Raises:
+        EmbedError: ``ids``/``vectors`` have different lengths, or the vectors don't all
+            share one dimensionality.
+    """
 
     ids: list[str]
     vectors: list[list[float]]
 
+    def __post_init__(self) -> None:
+        if len(self.ids) != len(self.vectors):
+            raise EmbedError(
+                f"ids ({len(self.ids)}) and vectors ({len(self.vectors)}) length mismatch"
+            )
+        dims = {len(vec) for vec in self.vectors}
+        if len(dims) > 1:
+            raise EmbedError(f"vectors have inconsistent dimensionality: {sorted(dims)}")
+
 
 def build_index(ids: list[str], vectors: list[list[float]]) -> EmbedIndex:
-    """Build an :class:`EmbedIndex` from parallel id/vector lists.
-
-    Raises:
-        EmbedError: ``ids`` and ``vectors`` have different lengths.
-    """
-    if len(ids) != len(vectors):
-        raise EmbedError(f"ids ({len(ids)}) and vectors ({len(vectors)}) length mismatch")
+    """Build an :class:`EmbedIndex` from parallel id/vector lists (see its own validation)."""
     return EmbedIndex(ids=list(ids), vectors=list(vectors))
 
 
 def nearest(index: EmbedIndex, query_vector: list[float], k: int = 5) -> list[tuple[str, float]]:
-    """Return the top-``k`` ``(id, similarity)`` pairs in ``index``, sorted by similarity desc."""
+    """Return the top-``k`` ``(id, similarity)`` pairs in ``index``, sorted by similarity desc.
+
+    Raises:
+        EmbedError: ``k`` is negative.
+    """
+    if k < 0:
+        raise EmbedError(f"k must be >= 0, got {k}")
     scored = [
         (id_, cosine_similarity(query_vector, vec))
         for id_, vec in zip(index.ids, index.vectors, strict=True)
@@ -164,6 +209,12 @@ def search(
     embed_fn: Callable[[list[str]], list[list[float]]] = embed_texts,
     k: int = 5,
 ) -> list[tuple[str, float]]:
-    """Embed ``query_text`` with ``embed_fn`` and return its top-``k`` neighbors in ``index``."""
-    [query_vector] = embed_fn([query_text])
-    return nearest(index, query_vector, k=k)
+    """Embed ``query_text`` with ``embed_fn`` and return its top-``k`` neighbors in ``index``.
+
+    Raises:
+        EmbedError: ``embed_fn`` returns something other than exactly one vector.
+    """
+    vectors = embed_fn([query_text])
+    if len(vectors) != 1:
+        raise EmbedError(f"embed_fn returned {len(vectors)} vectors for 1 query text")
+    return nearest(index, vectors[0], k=k)
