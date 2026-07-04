@@ -1,0 +1,35 @@
+name: notify-merged-pr
+
+# Ping ntfy whenever ANY pull request is merged into this repo — server-side, so you are
+# told about every merge regardless of whether a local wait-merge.sh happened to be polling
+# it (e.g. merges you do straight from the GitHub UI / phone).
+#
+# Setup (once): add a repository secret NOTIFY_URL = your ntfy topic, e.g.
+#   gh secret set NOTIFY_URL --body "https://ntfy.sh/<your-secret-topic>"
+# If the secret is unset the job is a silent no-op (safe for forks, which can't read it).
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  notify:
+    # Only when the PR was actually merged (not merely closed).
+    if: github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: ntfy on merged PR
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          MERGER: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          [ -n "$NOTIFY_URL" ] || { echo "NOTIFY_URL secret unset — skipping"; exit 0; }
+          curl -s --max-time 10 \
+            -H "Title: vllm-forager: PR merged" \
+            -H "Click: $PR_URL" \
+            -d "#${PR_NUM} -> ${BASE}: ${PR_TITLE} (by ${MERGER})" \
+            "$NOTIFY_URL" >/dev/null || true
