@@ -315,7 +315,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > risk/effort/impact).
 > **Acceptance:** `pytest -m m2` green · every candidate carries risk, effort, and impact scores + evidence links.
 
-- [ ] **T2.1 Grader** — `src/agents/grader.py`: resolve matured predictions vs reality (merged / in release / adopted); compute precision/recall + Brier.
+- [x] **T2.1 Grader** — `src/agents/grader.py`: resolve matured predictions vs reality (merged / in release / adopted); compute precision/recall + Brier.
   - **Why:** grading its own past predictions is *the* self-evolution signal — without it the agent can't tell if its judgment is any good.
   - **e.g.:** a Q3 forecast "X will merge" is now merged → scored a hit; aggregate → precision 0.68, Brier 0.19.
   - **Test:** `tests/test_grader.py` — synthetic predictions + outcomes → known metric values.

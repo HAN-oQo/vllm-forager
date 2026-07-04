@@ -29,7 +29,7 @@ from datetime import datetime, timezone
 from .store.base import Store
 
 # The same GitHub-API-style timestamp format every other stage in this codebase already uses
-# (collector.py's cursor, forecaster.py's _TS_FORMAT) — created_at is machine-written by the
+# (collector.py's cursor, forecaster.py's TS_FORMAT) — created_at is machine-written by the
 # collector from GitHub's own API, never LLM-generated, so (unlike forecaster.py's due_date)
 # there's no real-world formatting drift here to tolerate; strict parsing is the right choice.
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
