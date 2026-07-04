@@ -74,6 +74,13 @@ test → `pytest`/`pre-commit` green → `gh pr create` → **`/code-review --co
 go, **STOPs and asks** on anything ambiguous, and **never self-merges** (`gh pr merge` is denied). Stop it anytime
 with Esc; start a fresh session per milestone to keep context clean.
 
+**Idle-on-you notification.** Any point where the loop is waiting specifically on *you* — a milestone-boundary
+sign-off, an ambiguous-todo question, any other stop that isn't a tracked background job — schedule a ~30 minute
+fallback notification (`scripts/notify.sh`) before ending that turn. On firing: if you've since replied, it's a
+no-op (the conversation already moved on); otherwise it pings you and reschedules. This is separate from
+`wait-merge.sh`'s own notification (that one fires once, on the actual merge) — this one exists so a session
+never silently sits blocked on you for 30+ minutes with no signal that it's waiting.
+
 ## Your side (Mac)
 - Review the PR + CI (green) → optional `/code-review` on the diff → **merge**. That merge is what releases the
   poll and lets the loop advance.
