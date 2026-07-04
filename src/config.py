@@ -42,3 +42,19 @@ INITIAL_LOOKBACK_DAYS = 180
 # Scheduler cadence: how often the data-plane collection runs, in hours.
 # 24h (daily) for now; the M4 orchestrator reads this to decide when to re-collect.
 COLLECT_INTERVAL_HOURS = 24
+
+# Collector robustness (T0.10)
+# Longest issue/PR body we persist, in characters. Capped to keep JSONL small in M0; raise
+# via env FORAGER_BODY_MAX_CHARS when the body feeds RAG chunking (M1) and truncation loses
+# signal. Malformed env → ValueError at import (a config error should be loud, not silent).
+BODY_MAX_CHARS = int(os.getenv("FORAGER_BODY_MAX_CHARS") or 4000)
+# Per-request HTTP timeout (seconds) — a hung connection must not stall the whole run.
+REQUEST_TIMEOUT_S = 30
+# Transient-failure retries (5xx / timeout / connection error) before giving up on a request.
+MAX_RETRIES = 4
+# Exponential backoff base (seconds): wait before retry N = BACKOFF_BASE_S * 2**N.
+BACKOFF_BASE_S = 2.0
+# Max rate-limit waits (primary or secondary) before giving up on a request. Bounds a stuck
+# limiter — a persistent Retry-After, or a past/stale X-RateLimit-Reset — so it can't spin
+# forever; per-repo isolation in main() then skips just that repo instead of hanging the run.
+MAX_RATE_LIMIT_RETRIES = 10

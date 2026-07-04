@@ -1,11 +1,17 @@
-"""Robustness tests for the collector (T0.10): deep-pagination cursor-windowing and
-per-repo failure isolation. Offline & deterministic (no network)."""
+"""Robustness tests for the collector (T0.10). Offline & deterministic (no network / sleeps).
+
+Deep-pagination cursor-windowing and per-repo failure isolation shipped first (#3); this file
+also covers the rest of T0.10: retry/backoff on transient failures (5xx / connection /
+timeout), primary + secondary (`Retry-After`) rate-limit handling, record schema validation
+(log + skip malformed), and the configurable `body` cap.
+"""
 
 import json
 import sys
 from datetime import datetime, timezone
 
 import pytest
+import requests
 
 from src import collector, config
 
@@ -23,11 +29,12 @@ class FakeResp:
 
     def raise_for_status(self):
         if self.status_code >= 400:
-            raise AssertionError("unexpected error status")
+            raise requests.HTTPError(f"HTTP {self.status_code}")
 
 
 def _rec(n, t):
-    return {"number": n, "title": str(n), "updated_at": t}
+    # A minimal-but-valid raw GitHub item (html_url present so it survives schema validation).
+    return {"number": n, "title": str(n), "updated_at": t, "html_url": f"http://x/{n}"}
 
 
 def test_fetch_repo_windows_past_page_cap(monkeypatch):
@@ -122,3 +129,143 @@ def test_main_uses_lookback_window(tmp_path, monkeypatch):
     since = datetime.strptime(seen["since"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
     age_days = (datetime.now(timezone.utc) - since).days
     assert 179 <= age_days <= 181
+
+
+# ===================================================================================
+# T0.10 remaining: retry/backoff, secondary rate limits, schema validation, body cap.
+# ===================================================================================
+
+
+@pytest.fixture
+def no_sleep(monkeypatch):
+    """Patch out real sleeping; return the list of recorded wait durations."""
+    waits: list[float] = []
+    monkeypatch.setattr(collector.time, "sleep", lambda s: waits.append(s))
+    return waits
+
+
+def _seq_get(monkeypatch, items):
+    """Patch requests.get to return/raise successive `items` (Exception instances are raised)."""
+    it = iter(items)
+
+    def fake_get(*args, **kwargs):
+        nxt = next(it)
+        if isinstance(nxt, Exception):
+            raise nxt
+        return nxt
+
+    monkeypatch.setattr(collector.requests, "get", fake_get)
+
+
+# --------------------------------------------------------------- retry / backoff
+
+
+def test_request_retries_5xx_then_succeeds(monkeypatch, no_sleep):
+    _seq_get(monkeypatch, [FakeResp(500), FakeResp(502), FakeResp(200, [{"ok": 1}])])
+    resp = collector._request("http://x", {})
+    assert resp.status_code == 200
+    assert len(no_sleep) == 2  # backed off twice before the 200
+
+
+def test_request_retries_connection_error_then_succeeds(monkeypatch, no_sleep):
+    _seq_get(monkeypatch, [requests.ConnectionError("reset"), FakeResp(200, [])])
+    assert collector._request("http://x", {}).status_code == 200
+    assert len(no_sleep) == 1
+
+
+def test_request_gives_up_after_max_retries(monkeypatch, no_sleep):
+    monkeypatch.setattr(config, "MAX_RETRIES", 2)
+    monkeypatch.setattr(collector.requests, "get", lambda *a, **k: FakeResp(503))
+    with pytest.raises(requests.HTTPError):
+        collector._request("http://x", {})
+    assert len(no_sleep) == 2  # retried MAX_RETRIES times, then raised
+
+
+def test_request_backoff_is_exponential(monkeypatch, no_sleep):
+    monkeypatch.setattr(config, "BACKOFF_BASE_S", 1.0)
+    _seq_get(monkeypatch, [FakeResp(500), FakeResp(500), FakeResp(200, [])])
+    collector._request("http://x", {})
+    assert no_sleep == [1.0, 2.0]  # 1*2**0, 1*2**1
+
+
+# ------------------------------------------------------------------ rate limits
+
+
+def test_request_honors_secondary_rate_limit_retry_after(monkeypatch, no_sleep):
+    _seq_get(monkeypatch, [FakeResp(403, headers={"Retry-After": "3"}), FakeResp(200, [])])
+    resp = collector._request("http://x", {})
+    assert resp.status_code == 200
+    assert no_sleep == [4.0]  # 3 + 1s cushion; a rate-limit wait is not a retry attempt
+
+
+def test_request_waits_for_primary_rate_limit_then_succeeds(monkeypatch, no_sleep):
+    monkeypatch.setattr(collector.time, "time", lambda: 1000)
+    limited = FakeResp(403, headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "1002"})
+    _seq_get(monkeypatch, [limited, FakeResp(200, [])])
+    assert collector._request("http://x", {}).status_code == 200
+    assert no_sleep == [3]  # (1002 - 1000) + 1
+
+
+def test_request_403_without_retry_after_is_returned_not_retried(monkeypatch, no_sleep):
+    # A real 403 (no rate-limit signal) is returned so the caller can surface it — not looped on.
+    monkeypatch.setattr(collector.requests, "get", lambda *a, **k: FakeResp(403))
+    resp = collector._request("http://x", {})
+    assert resp.status_code == 403
+    assert no_sleep == []
+
+
+def test_request_gives_up_on_persistent_rate_limit(monkeypatch, no_sleep):
+    # A limiter that never clears (Retry-After on every response) must not spin forever: after
+    # MAX_RATE_LIMIT_RETRIES waits, _request raises so main()'s per-repo isolation can skip it.
+    monkeypatch.setattr(config, "MAX_RATE_LIMIT_RETRIES", 3)
+    monkeypatch.setattr(
+        collector.requests, "get", lambda *a, **k: FakeResp(429, headers={"Retry-After": "1"})
+    )
+    with pytest.raises(requests.HTTPError):
+        collector._request("http://x", {})
+    assert len(no_sleep) == 3  # waited the cap, then raised instead of looping forever
+
+
+# ------------------------------------------------- schema validation / body cap
+
+
+def test_fetch_repo_skips_malformed_record(monkeypatch, capsys):
+    monkeypatch.setattr(config, "PER_PAGE", 10)
+    batch = [
+        {
+            "number": 1,
+            "title": "ok",
+            "updated_at": "2025-01-01T00:00:00Z",
+            "html_url": "http://x/1",
+        },
+        {"number": 2, "title": "no url", "updated_at": "2025-01-02T00:00:00Z"},  # missing html_url
+    ]
+    monkeypatch.setattr(collector.requests, "get", lambda *a, **k: FakeResp(200, batch))
+    out = collector.fetch_repo("o/r", "2025-01-01T00:00:00Z")
+    assert [r["number"] for r in out] == [1]  # #2 skipped — url is None
+    err = capsys.readouterr().err
+    assert "skipping malformed item #2" in err and "url" in err
+
+
+def test_body_cap_is_configurable(monkeypatch):
+    monkeypatch.setattr(config, "BODY_MAX_CHARS", 10)
+    rec = collector._normalize({"number": 1, "body": "y" * 100}, "o/r")
+    assert len(rec["body"]) == 10
+
+
+# ------------------------------------------------------------- monotonic cursor
+
+
+def test_state_cursor_is_monotonic(tmp_path, monkeypatch):
+    """A successful run only advances a repo's cursor forward (never backwards)."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(config, "REPOS", [{"slug": "o/r", "role": "x"}])
+
+    old_cursor = "2000-01-01T00:00:00Z"
+    collector._save_state({"o/r": old_cursor})
+    monkeypatch.setattr(collector, "fetch_repo", lambda slug, since: [])
+    collector.main([])  # exercise the argv seam (no sys.argv monkeypatch needed)
+
+    new_cursor = json.loads((tmp_path / "state.json").read_text())["o/r"]
+    assert new_cursor > old_cursor  # advanced forward — never rewound
