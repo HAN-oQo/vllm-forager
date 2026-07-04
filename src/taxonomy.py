@@ -56,7 +56,7 @@ _ACTIVE_KEY = "taxonomy_active_version"
 # level containing this substring is rejected at ingestion (_normalize_path) — otherwise a
 # depth-1 category named e.g. "a > b" would flatten to the same label as the distinct 2-level
 # path ("a", "b"), making them indistinguishable to analyst.py's label-based matching.
-_LEVEL_SEPARATOR = " > "
+LEVEL_SEPARATOR = " > "
 
 CategoryPath = tuple[str, ...]
 
@@ -82,7 +82,7 @@ def _normalize_path(entry: str | Sequence[str]) -> CategoryPath:
     Raises:
         TaxonomyError: `entry` is neither a string nor a sequence of strings, the resulting
             path is empty, a level is empty/whitespace-only, or a level contains the literal
-            :data:`_LEVEL_SEPARATOR` (which would make it flatten ambiguously — see
+            :data:`LEVEL_SEPARATOR` (which would make it flatten ambiguously — see
             :attr:`Taxonomy.labels`).
     """
     if isinstance(entry, str):
@@ -100,9 +100,9 @@ def _normalize_path(entry: str | Sequence[str]) -> CategoryPath:
             raise TaxonomyError(
                 f"every level of a category path must be a non-empty string: {path!r}"
             )
-        if _LEVEL_SEPARATOR in level:
+        if LEVEL_SEPARATOR in level:
             raise TaxonomyError(
-                f"a category level cannot contain {_LEVEL_SEPARATOR!r} (ambiguous once "
+                f"a category level cannot contain {LEVEL_SEPARATOR!r} (ambiguous once "
                 f"flattened): {level!r}"
             )
     return path  # type: ignore[return-value]  # every element validated to be `str` above
@@ -134,7 +134,7 @@ class Taxonomy:
         teaches it to classify per-level) keeps working unchanged against a now-path-capable
         taxonomy.
         """
-        return tuple(_LEVEL_SEPARATOR.join(path) for path in self.categories)
+        return tuple(LEVEL_SEPARATOR.join(path) for path in self.categories)
 
     def children(self, prefix: CategoryPath = ()) -> tuple[str, ...]:
         """The distinct, canonically-spelled values immediately below `prefix` in the tree.
@@ -145,9 +145,12 @@ class Taxonomy:
         insensitive (:func:`casefold_label`); for two paths whose corresponding level differs
         only by case/whitespace, the spelling from whichever path is listed first in
         :attr:`categories` wins — this is T1.5.2's "controlled per-level label set to prevent
-        drift": a classifier walks the tree one level at a time, each step limited to exactly
-        the options this method returns for the path chosen so far, so the model can't invent
-        a label that doesn't already exist at that level.
+        drift." As of T1.5.2, :func:`~src.agents.analyst._canonical_path` uses this
+        *post-hoc*: the model generates a whole path in one guess, then this method validates
+        it level by level, keeping only the prefix that matches at each step — not (yet) an
+        interactive walk where the model is shown this method's output before choosing each
+        level. Either usage keeps a hallucinated/drifted label out of the KB; only the
+        model's prompting differs.
 
         Returns ``()`` if no path extends past `prefix` — either `prefix` is itself a leaf
         (registered as a complete category, e.g. its own entry in :attr:`categories`), or it

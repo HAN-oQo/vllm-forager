@@ -23,9 +23,21 @@ completely off-script) falls back to a depth-1 :data:`OTHER` path — mirrors th
 reporter's own fallback bucket, so an item is never silently unclassified.
 
 Two fields are written: ``path`` (the list of levels — T1.5.4's tree report reads this) and
-``category`` (``path`` flattened via :attr:`~src.taxonomy.Taxonomy.labels`' same `` > ``
-join — kept for T1.6/T1.7's reporter/trends modules, which only know how to group by one flat
-string per item and haven't been taught to read ``path`` yet).
+``category`` (``path`` flattened via :data:`~src.taxonomy.LEVEL_SEPARATOR` — the same join
+:attr:`~src.taxonomy.Taxonomy.labels` uses — kept for T1.6/T1.7's reporter/trends modules,
+which only know how to group by one flat string per item and haven't been taught to read
+``path`` yet). Known limitation, not fixed here: once the taxonomy grows past depth 1,
+:mod:`src.trends`'s ``category_trends`` will bucket by the *full* flattened path (e.g. an
+opaque ``"ROCm/AMD > DeepSeek-V4 > performance"`` bucket) rather than rolling up under
+``"ROCm/AMD"`` — a T1.6/T1.7 concern to fix once ``path`` is available to group by, not this
+module's.
+
+Known limitation, not fixed here: :func:`_path_prompt` lists every known path in one
+unbounded, comma-joined hint string, and the model never sees :meth:`~src.taxonomy.
+Taxonomy.children`'s exact per-level options before answering (:func:`_canonical_path`
+validates its whole guess post-hoc instead) — both fine at today's taxonomy size (never
+seeded in production yet), but worth revisiting once the taxonomy is large/deep enough that
+prompt length or guess-then-validate accuracy actually matters (T1.5.4/T2.3).
 
 Previously a known limitation, fixed in T1.10: ``Store.upsert_items`` now merges the given
 fields onto an existing ``(repo, number)`` record rather than fully replacing it (both
@@ -44,7 +56,7 @@ import sys
 
 from .. import llm
 from ..store.base import Store
-from ..taxonomy import CategoryPath, Taxonomy, casefold_label
+from ..taxonomy import LEVEL_SEPARATOR, CategoryPath, Taxonomy, casefold_label
 from ..taxonomy import get_active as get_active_taxonomy
 from .reporter import OTHER
 
@@ -99,12 +111,28 @@ def _canonical_path(raw: object, taxonomy: Taxonomy) -> CategoryPath:
     return tuple(validated) if validated else (OTHER,)
 
 
+def _classified_record(item: dict, path: CategoryPath, taxonomy_version: int) -> dict:
+    """`item`'s fields (its ``url`` citation included, unchanged) plus ``path`` (list of
+    levels), ``category`` (``path`` flattened via :data:`~src.taxonomy.LEVEL_SEPARATOR`, for
+    callers that only read a flat label), and ``taxonomy_version``.
+
+    The one place a classification result — LLM-produced or a fallback — is assembled, so
+    :func:`classify_item` and :func:`analyze_store`'s empty-taxonomy short-circuit can never
+    silently disagree on the shape of "no valid classification" (e.g. if :data:`OTHER`'s own
+    representation ever changes).
+    """
+    return {
+        **item,
+        "path": list(path),
+        "category": LEVEL_SEPARATOR.join(path),
+        "taxonomy_version": taxonomy_version,
+    }
+
+
 def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     """Classify one item into a path in `taxonomy`'s tree.
 
-    Returns a **new** dict — `item`'s fields (its ``url`` citation included, unchanged) plus
-    ``path`` (list of levels), ``category`` (``path`` flattened, for callers that only read a
-    flat label), and ``taxonomy_version``.
+    Returns a **new** dict — see :func:`_classified_record`.
 
     Raises:
         llm.LLMError: the completion call failed (transport error, timeout, non-JSON reply).
@@ -112,12 +140,7 @@ def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     reply = llm.complete(_path_prompt(item, taxonomy), json_schema=_PATH_SCHEMA)
     raw_path = reply.get("path") if isinstance(reply, dict) else None
     path = _canonical_path(raw_path, taxonomy)
-    return {
-        **item,
-        "path": list(path),
-        "category": " > ".join(path),
-        "taxonomy_version": taxonomy.version,
-    }
+    return _classified_record(item, path, taxonomy.version)
 
 
 def analyze_store(store: Store) -> list[dict]:
@@ -142,10 +165,7 @@ def analyze_store(store: Store) -> list[dict]:
     active = get_active_taxonomy(store)
     if not active.categories:
         # Nothing to classify into — every item is trivially Other; skip the LLM entirely.
-        classified = [
-            {**item, "path": [OTHER], "category": OTHER, "taxonomy_version": active.version}
-            for item in pending
-        ]
+        classified = [_classified_record(item, (OTHER,), active.version) for item in pending]
     else:
         classified = []
         for item in pending:
