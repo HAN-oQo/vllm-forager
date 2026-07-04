@@ -18,6 +18,25 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 
 
+def merge_record(old: dict | None, new: dict) -> dict:
+    """The one shallow-merge every backend's ``upsert_items`` must apply: `new`'s fields win.
+
+    A field present on `old` but absent from `new` is preserved; any field `new` does specify
+    overwrites `old`'s value for that key (T1.10). `old=None` (no existing record) is just
+    `new` itself. This is intentionally **shallow** — a field whose value is itself a nested
+    dict is replaced wholesale, not recursively merged, matching plain Python dict-update
+    semantics; a backend whose native merge is deeper (e.g. Firestore's ``set(merge=True)``
+    recursively merges nested maps) must constrain itself to this shallow contract, not the
+    other way around, so every backend behaves identically regardless of field shape.
+
+    No opt-out exists (a caller can't currently force a full replace or delete a single field)
+    — a known limitation, not a bug: nothing in this codebase needs it yet (see analyst.py/
+    forecaster.py), but a future caller that does (e.g. resetting a field to force
+    reclassification) will need a new primitive, not a workaround here.
+    """
+    return {**(old or {}), **new}
+
+
 class Store(ABC):
     """Abstract KB store: a set of items (issues/PRs) plus a small state key-value map."""
 
@@ -26,15 +45,15 @@ class Store(ABC):
         """Insert-or-update `items`, matched on their (repo, number).
 
         An item that already has a stored record is updated by **merging** the given fields
-        onto it, not replacing it wholesale: a field present on the existing record but absent
-        from the new one is preserved, while any field the new record does specify overwrites
-        the old value. (T1.10 — before this, a caller that writes a *partial* record, or a
-        collector re-normalization that never carries forward a field another stage added,
-        would silently erase that field.) Items may span multiple repos; the backend routes
-        each to the right place. Returns ``{repo: total_item_count}`` for **each repo
-        touched** — the post-upsert total for that repo, so a caller (e.g. the collector's
-        progress log) never needs a second full read to report it. Repos with no items in the
-        batch are absent from the map; an empty `items` returns ``{}``.
+        onto it (see :func:`merge_record`), not replacing it wholesale: a field present on the
+        existing record but absent from the new one is preserved, while any field the new
+        record does specify overwrites the old value. (T1.10 — before this, a caller that
+        writes a *partial* record, or a collector re-normalization that never carries forward a
+        field another stage added, would silently erase that field.) Items may span multiple
+        repos; the backend routes each to the right place. Returns ``{repo: total_item_count}``
+        for **each repo touched** — the post-upsert total for that repo, so a caller (e.g. the
+        collector's progress log) never needs a second full read to report it. Repos with no
+        items in the batch are absent from the map; an empty `items` returns ``{}``.
         """
 
     @abstractmethod

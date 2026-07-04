@@ -23,7 +23,7 @@ import sys
 from collections import defaultdict
 from pathlib import Path
 
-from .base import Store
+from .base import Store, merge_record
 
 # --------------------------------------------------------------------- file-level helpers
 
@@ -80,7 +80,7 @@ def merge_jsonl(path: Path, records: list[dict]) -> int:
     """
     existing = _read_items(path)
     for rec in records:
-        existing[rec["number"]] = {**existing.get(rec["number"], {}), **rec}
+        existing[rec["number"]] = merge_record(existing.get(rec["number"]), rec)
     _write_items(path, existing)
     return len(existing)
 

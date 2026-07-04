@@ -123,6 +123,17 @@ def test_upsert_dedupes_same_item_within_one_call_by_merging(store):
     assert record["category"] == "build"  # preserved from the first record in the same batch
 
 
+def test_upsert_overwrites_a_nested_dict_field_wholesale_not_recursively(store):
+    """T1.10's merge is shallow at the top level: a dict-valued field must be replaced
+    wholesale on re-upsert, identically on both backends — not recursively merged into the old
+    value (Firestore's `set(merge=True)` would do exactly that if used instead of
+    `merge=<field names>`, silently diverging from JsonlStore's plain dict-spread)."""
+    store.upsert_items([_item("o/r", 1, meta={"a": 1, "b": 2})])
+    store.upsert_items([_item("o/r", 1, meta={"a": 99})])
+
+    assert store.get_item("o/r", 1)["meta"] == {"a": 99}  # "b" is gone, not merged in
+
+
 def test_upsert_routes_items_by_repo(store):
     assert store.upsert_items([_item("o/a", 1), _item("o/b", 1)]) == {"o/a": 1, "o/b": 1}
     assert store.get_item("o/a", 1) is not None

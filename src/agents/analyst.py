@@ -22,7 +22,10 @@ backends). Before that fix, the collector's own ``_normalize()`` — which never
 ``category``/``taxonomy_version`` forward — would silently erase this module's classification
 the next time it re-fetched an already-classified item (any new comment/label bumps
 ``updated_at`` back into the incremental window). Now the collector's re-normalized record
-simply doesn't mention ``category``, and the store-level merge leaves the existing value alone.
+simply doesn't mention ``category``, and the store-level merge leaves the existing value alone
+— which also means the "delta" check above (``"category" not in item``) no longer treats a
+re-clobbered item as unclassified again, so a re-collected item doesn't get repeatedly and
+wastefully re-sent through ``llm.complete``.
 """
 
 from __future__ import annotations

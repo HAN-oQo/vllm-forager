@@ -24,9 +24,12 @@ state map on every call, so :func:`list_predictions` (an unconditional full-log 
 -write in :func:`record_prediction` also has no locking, a race that matters more here than
 for taxonomy/policy since predictions are written continuously, not rarely. The real fix is a
 Store-level primitive for a large, independent, queryable record collection (distinct from
-the small state map and the GitHub-item-shaped ``items`` bucket) — recommend bundling this
-into the same Store-layer follow-up flagged by T1.4's review (item-field clobbering), since
-both point at the same underlying gap.
+the small state map and the GitHub-item-shaped ``items`` bucket) — this is a *different* gap
+than T1.4's item-field-clobbering issue (fixed by T1.10's merge-on-upsert semantics): that one
+was about *how* a write lands on an existing record, this one is about the state map's own
+read/write shape not scaling to an ever-growing collection. Recommend a dedicated follow-up
+when the log's cost actually bites, not bundled into a merge-semantics fix that doesn't touch
+this axis at all.
 """
 
 from __future__ import annotations
