@@ -41,6 +41,9 @@
   trusting green unit tests alone.
 - **Readable code:** module + public-function **docstrings** (what/why), inline comments on non-obvious logic,
   and **type hints** on public functions. Match the comment density of the existing `src/collector.py`.
+- **Todo format (human-readable):** each todo carries — besides files + `Test:` — a one-line **Why** (rationale)
+  and **e.g.** (a concrete example of the result), so a person can grok it, not just an agent. Fill these in when
+  the todo is concrete; don't fabricate examples for undesigned work.
 
 ## Python conventions & tooling
 
@@ -157,18 +160,28 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 - [ ] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`,
       `get_state`, `set_state`); move JSONL logic into `src/store/jsonl_store.py`; collector writes via the
       interface.
+      **Why:** so we can swap JSONL → Firestore (M0.6) later without touching the collector/agents — one interface,
+      many backends. **e.g.:** `get_store().upsert_items(recs)` writes JSONL today, Firestore tomorrow, same call.
       Test: `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.
 - [ ] **T0.7 LLM wrapper (pluggable)** — `src/llm.py::complete` dispatching on `LLM_PROVIDER`
       (`claude_cli` shells out to `claude -p`; `claude_api`; `local`/vLLM OpenAI-compatible). JSON-mode parsing,
       timeout, non-zero-exit / HTTP-error handling. **Return call metadata** (tokens / latency / est. cost)
       alongside the result so the cost-aware bandit (T2.6) can route on reward-per-cost.
+      **Why:** every agent needs an LLM; one wrapper lets us switch claude_cli / API / local-vLLM without editing
+      agents. **e.g.:** `complete("classify: <issue>", json_schema=TAXONOMY)` → `{"category": "rocm-build"}` — same
+      call whether it hits `claude -p` or a local vLLM server.
       Test: `tests/test_llm.py` — each provider path with subprocess/HTTP **mocked**: asserts prompt passed,
       stdout/response parsed, `json_schema` returns dict, metadata populated, error path raises cleanly. Live
       per-provider smoke = `@pytest.mark.integration`.
 - [ ] **T0.8 Baseline weekly report v0 (fixed taxonomy, no LLM)** — `src/agents/reporter.py`: read items from
       store, bucket by fixed-taxonomy keyword match, emit Markdown with cited links.
+      **Why:** first human-readable deliverable — turns raw JSONL into a weekly digest, and sets the "every claim
+      cites a link" bar before any LLM is involved. **e.g.:** `## ROCm builds (3)` → `- [vllm#123] hipBLAS build
+      fails on gfx90a — https://github.com/vllm-project/vllm/issues/123`.
       Test: `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
 - [ ] **T0.9 Report CLI** — `python -m src.report` writes `data/reports/YYYY-Www.md`.
+      **Why:** one command to produce the weekly report on demand / on a schedule. **e.g.:** `python -m src.report`
+      → writes `data/reports/2026-W27.md` and prints its path.
       Test: `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
 - [ ] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` so one repo's
       failure doesn't abort the run; **save state incrementally after each repo**; retry with backoff on 5xx /
