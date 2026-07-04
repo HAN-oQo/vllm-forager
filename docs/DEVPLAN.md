@@ -240,7 +240,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_forecaster.py` — mock llm → stored prediction validates against schema (prob∈[0,1], due>now).
 - [x] **T1.6 Reporter v1 (LLM, cited)** — weekly report written from classified items.
       Test: `tests/test_reporter_v1.py` — mock llm → **every claim line has ≥1 evidence URL** (evidence principle).
-- [ ] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
+- [x] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
       Test: `tests/test_trends.py` — synthetic items across weeks → correct bucketed counts per category.
 - [ ] **T1.8 RAG evaluation guardrail (guardrail 2: a trustworthy score)** — `src/rag_eval.py` +
       `tests/rag_eval/golden.jsonl` (hand-labeled query → relevant issue/PR ids). Compute **retrieval** metrics
