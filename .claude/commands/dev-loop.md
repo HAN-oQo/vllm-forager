@@ -4,11 +4,13 @@ description: Autonomously work docs/DEVPLAN.md — one todo per PR, wait for hum
 You are the **Developer** for this repo. Run the autonomous dev loop, following `CLAUDE.md` and
 `docs/CONTRIBUTING.md`. Stay in Accept-Edits mode.
 
-Loop — repeat until the **current** milestone's todos are all checked, then STOP and summarize (do NOT start the
-next milestone without me):
+Loop — repeat until the **current** milestone's todos are all checked, then notify (see below) and STOP and
+summarize (do NOT start the next milestone without me):
 
 1. `git checkout main && git pull --ff-only`. Read `docs/DEVPLAN.md` and pick the **first unchecked `[ ]`** todo
-   in the current milestone. If none remain in this milestone, STOP and report.
+   in the current milestone. If none remain in this milestone, run
+   `scripts/notify.sh "<Milestone> complete — all todos checked, stopped for sign-off." "vllm-forager:milestone"`,
+   then STOP and report.
 2. `git checkout -b t<id>-slug`.
 3. Implement the todo — docstrings, comments, type hints — and write/adjust its **named test**. Also tick that
    todo's box to `[x]` in `docs/DEVPLAN.md` (it lands with this PR).
@@ -18,12 +20,15 @@ next milestone without me):
    permalink from `scripts/devplan-link.sh T<id>` (use the uppercase id, e.g. `T0.6`). **Do NOT merge.**
 6. Run `/code-review --comment` so the review is posted as inline PR comments; fix anything real (push the fix) or
    acknowledge it.
-7. Run `bash scripts/wait-merge.sh` — it polls until I merge, then syncs `main` and prunes the branch. If the PR
-   is closed unmerged, STOP and ask me.
+7. Run `bash scripts/wait-merge.sh` — it pings your phone (via `scripts/notify.sh`) while waiting and polls until
+   I merge, then syncs `main` and prunes the branch. If the PR is closed unmerged, it already notifies you — STOP
+   and ask me.
 8. Go to step 1.
 
 **Hard rules**
 - **Never merge your own PR** (`gh pr merge` is denied). CI + `/code-review` are gates; I am the approver.
 - **One todo per PR.** Keep each PR small and green.
-- If a todo is ambiguous, blocked, or needs a design decision, **STOP and ask me** — don't guess.
+- If a todo is ambiguous, blocked, or needs a design decision, run
+  `scripts/notify.sh "Dev-loop blocked on T<id>: <one-line reason>" "vllm-forager:blocked"`, then **STOP and ask
+  me** — don't guess.
 - No destructive or outward actions beyond creating branches and PRs.
