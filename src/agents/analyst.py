@@ -26,6 +26,12 @@ simply doesn't mention ``category``, and the store-level merge leaves the existi
 — which also means the "delta" check above (``"category" not in item``) no longer treats a
 re-clobbered item as unclassified again, so a re-collected item doesn't get repeatedly and
 wastefully re-sent through ``llm.complete``.
+
+T1.5.1 made a taxonomy category a **path** (e.g. ``("ROCm/AMD", "DeepSeek-V4")``), not a flat
+name — this module still classifies into one flat label per item (via
+:attr:`~src.taxonomy.Taxonomy.labels`, each path's levels joined with `` > ``), unchanged from
+before T1.5.1. Teaching this module to classify into a *path* (writing each level from a
+controlled per-level label set) is T1.5.2's job, not this one's.
 """
 
 from __future__ import annotations
@@ -87,9 +93,9 @@ def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     Raises:
         llm.LLMError: the completion call failed (transport error, timeout, non-JSON reply).
     """
-    reply = llm.complete(_prompt(item, taxonomy.categories), json_schema=_CATEGORY_SCHEMA)
+    reply = llm.complete(_prompt(item, taxonomy.labels), json_schema=_CATEGORY_SCHEMA)
     raw_category = reply.get("category") if isinstance(reply, dict) else None
-    category = _canonical_category(raw_category, taxonomy.categories)
+    category = _canonical_category(raw_category, taxonomy.labels)
     return {**item, "category": category, "taxonomy_version": taxonomy.version}
 
 
