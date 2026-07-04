@@ -97,11 +97,18 @@ def test_reconcile_uses_config_threshold_by_default(monkeypatch):
 # ------------------------------------------------------------------ local_counts
 
 
-def test_local_counts_splits_issue_and_pr(tmp_path):
+def test_local_counts_windowed_by_since(tmp_path):
     store = JsonlStore(tmp_path)
-    store.upsert_items([_item("o/r", 1, "issue"), _item("o/r", 2, "pr"), _item("o/r", 3, "issue")])
-    counts = audit.local_counts(store, "o/r")
-    assert counts == {"issues": 2, "prs": 1, "total": 3, "numbers": [1, 2, 3]}
+    store.upsert_items(
+        [
+            _item("o/r", 1) | {"updated_at": "2025-06-05T00:00:00Z"},  # in window
+            _item("o/r", 2) | {"updated_at": "2025-06-06T00:00:00Z"},  # in window
+            _item("o/r", 3) | {"updated_at": "2024-01-01T00:00:00Z"},  # before since → excluded
+        ]
+    )
+    counts = audit.local_counts(store, "o/r", "2025-06-01T00:00:00Z")
+    # total and numbers both come from the same windowed set (the 2024 item is out).
+    assert counts == {"total": 2, "numbers": [1, 2]}
 
 
 # ------------------------------------------------------- audit_repo (glue + sink)
@@ -168,8 +175,7 @@ def test_audit_repo_appends_across_runs(tmp_path):
 
 @pytest.mark.integration
 def test_remote_counts_live_graphql():
-    # Small, stable repo; just assert the shape + non-negative counts (needs GITHUB_TOKEN).
+    # Small, stable repo; just assert the shape + non-negative count (needs GITHUB_TOKEN).
     counts = audit.remote_counts("llm-d/llm-d", "2026-06-01T00:00:00Z")
-    assert set(counts) == {"issues", "prs", "total"}
-    assert counts["total"] == counts["issues"] + counts["prs"]
+    assert set(counts) == {"total"}
     assert counts["total"] >= 0

@@ -3,9 +3,11 @@
 Guardrail 1b: after collection we must know we didn't *silently* lose data. Two independent
 signals, because either alone has blind spots:
 
-1. **Count reconciliation** — the local item count vs GitHub's authoritative counts over the
-   collected window, via **GraphQL** search (`issueCount` for ``is:issue`` and ``is:pr``).
-   A local total that trails the remote total means we dropped items.
+1. **Count reconciliation** — the local item count vs GitHub's authoritative count over the
+   collected window, via **GraphQL** search ``issueCount`` (``type: ISSUE`` counts issues and
+   PRs together). **Both sides are windowed by** ``since`` so they're comparable: a local total
+   that *trails* remote means this run dropped items; a *positive* delta is deletions/transfers
+   (expected) and is left to the gap scan.
 2. **Gap scan** — missing issue/PR numbers within the collected range. Deleted or transferred
    items leave *legitimate* holes, so a single gap proves nothing; we alert on the gap
    **ratio** (fraction of the observed number range that is missing) crossing a threshold.
@@ -32,8 +34,8 @@ from .store.base import Store
 
 GRAPHQL_URL = "https://api.github.com/graphql"
 
-# A remote-count fetcher: (repo, since) -> {"issues", "prs", "total"}. Injected in offline
-# tests; defaults to the live GraphQL implementation below.
+# A remote-count fetcher: (repo, since) -> {"total": int}. Injected in offline tests; defaults
+# to the live GraphQL implementation below.
 RemoteFetcher = Callable[[str, str], dict]
 
 
@@ -52,34 +54,31 @@ def gap_ratio(numbers: list[int]) -> float:
     return missing / span
 
 
-def local_counts(store: Store, repo: str) -> dict:
-    """Local KB counts for `repo`: issue/PR totals plus the collected numbers (for the gap scan)."""
-    items = store.query(repo=repo)
-    issues = sum(1 for it in items if it.get("type") == "issue")
-    prs = sum(1 for it in items if it.get("type") == "pr")
+def local_counts(store: Store, repo: str, since: str) -> dict:
+    """Local KB counts for `repo` **within the collected window** (updated at/after `since`).
+
+    Windowed to match :func:`remote_counts` (both bounded by the same ``since`` date), so their
+    totals are comparable. Returns ``{"total", "numbers"}`` derived from the *same* windowed item
+    set — ``total`` is the item count, ``numbers`` the int issue/PR numbers (for the gap scan).
+    """
+    since_date = since[:10]
+    items = [it for it in store.query(repo=repo) if (it.get("updated_at") or "")[:10] >= since_date]
     numbers = [it["number"] for it in items if isinstance(it.get("number"), int)]
-    return {"issues": issues, "prs": prs, "total": issues + prs, "numbers": numbers}
+    return {"total": len(items), "numbers": numbers}
 
 
 def remote_counts(repo: str, since: str) -> dict:
-    """GitHub GraphQL counts of issues + PRs for `repo` updated at/after `since` (a date/ISO ts).
+    """GitHub GraphQL count of issues + PRs for `repo` updated at/after `since` (a date/ISO ts).
 
-    Uses the search connection's ``issueCount`` (``type: ISSUE`` covers both issues and PRs;
-    the ``is:issue`` / ``is:pr`` qualifiers split them). Live network call — offline tests inject
-    a fake via the `remote_fetcher` parameter of :func:`audit_repo`. Raises on HTTP or GraphQL
-    errors so the caller records it as an error rather than a silent zero.
+    A single search (``type: ISSUE`` counts issues and PRs together) over the window; its
+    ``issueCount`` is the authoritative total to reconcile against. Live network call — offline
+    tests inject a fake via the `remote_fetcher` parameter of :func:`audit_repo`. Raises on HTTP
+    errors, GraphQL errors, *or* a partial/None payload, so the caller records it as an error
+    rather than a silent zero.
     """
     since_date = since[:10]  # search's updated: qualifier takes a date (or full ISO) bound
-    query = (
-        "query($qi: String!, $qp: String!) {"
-        "  issues: search(query: $qi, type: ISSUE) { issueCount }"
-        "  prs: search(query: $qp, type: ISSUE) { issueCount }"
-        "}"
-    )
-    variables = {
-        "qi": f"repo:{repo} is:issue updated:>={since_date}",
-        "qp": f"repo:{repo} is:pr updated:>={since_date}",
-    }
+    query = "query($q: String!) { search(query: $q, type: ISSUE) { issueCount } }"
+    variables = {"q": f"repo:{repo} updated:>={since_date}"}
     resp = requests.post(
         GRAPHQL_URL,
         headers=_headers(),
@@ -90,10 +89,10 @@ def remote_counts(repo: str, since: str) -> dict:
     payload = resp.json()
     if payload.get("errors"):
         raise RuntimeError(f"GraphQL errors for {repo}: {payload['errors']}")
-    data = payload["data"]
-    issues = int(data["issues"]["issueCount"])
-    prs = int(data["prs"]["issueCount"])
-    return {"issues": issues, "prs": prs, "total": issues + prs}
+    search = (payload.get("data") or {}).get("search")
+    if not search or search.get("issueCount") is None:
+        raise RuntimeError(f"unexpected GraphQL payload for {repo}: {payload}")
+    return {"total": int(search["issueCount"])}
 
 
 def reconcile(
@@ -114,6 +113,9 @@ def reconcile(
     """
     threshold = config.DATA_QUALITY_GAP_RATIO_THRESHOLD if gap_threshold is None else gap_threshold
     ratio = gap_ratio(local.get("numbers", []))
+    # With both counts windowed, a NEGATIVE delta means we hold fewer than GitHub reports for
+    # the window ⇒ probable silent loss. A positive delta is deletions/transfers (expected) and
+    # is covered by the gap scan, so it is not itself a flag.
     delta = local["total"] - remote["total"]
     flagged = delta < 0 or ratio > threshold or errors > 0
     return {
@@ -150,18 +152,28 @@ def audit_repo(
     remote_fetcher: RemoteFetcher = remote_counts,
     errors: int = 0,
     checked_at: str,
+    data_dir: Path | None = None,
     gap_threshold: float | None = None,
 ) -> dict:
     """Reconcile `repo` (local vs remote), persist the ``data_quality`` record, and return it.
 
-    `remote_fetcher` is injectable so offline tests avoid the network. `since` bounds the remote
-    count to the collected window; `errors` is the collection error count for this repo (folded
-    into the flag). Requires `checked_at` (an ISO timestamp) from the caller so this stays
-    deterministic under test.
+    `remote_fetcher` is injectable so offline tests avoid the network. `since` bounds *both* the
+    remote and local counts to the collected window (comparable totals); `errors` is the
+    collection error count for this repo (folded into the flag). Requires `checked_at` (an ISO
+    timestamp) so this stays deterministic under test.
+
+    Persistence target: `data_dir` if given, else the store's ``data_dir`` (JsonlStore). A store
+    without one (a future non-JSONL backend) raises loudly rather than silently misrouting the
+    records to disk — until M0.6 gives the ``data_quality`` record a home on the Store interface.
     """
-    local = local_counts(store, repo)
+    local = local_counts(store, repo, since)
     remote = remote_fetcher(repo, since)
     record = reconcile(repo, local, remote, errors=errors, gap_threshold=gap_threshold)
-    data_dir = getattr(store, "data_dir", config.DATA_DIR)
-    write_record(data_dir, record, checked_at=checked_at)
+    resolved_dir = data_dir if data_dir is not None else getattr(store, "data_dir", None)
+    if resolved_dir is None:
+        raise TypeError(
+            "audit_repo needs a JsonlStore or an explicit data_dir; "
+            f"{type(store).__name__} exposes no data_dir"
+        )
+    write_record(resolved_dir, record, checked_at=checked_at)
     return record
