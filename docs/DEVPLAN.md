@@ -182,7 +182,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** one command to produce the weekly report on demand / on a schedule.
   - **e.g.:** `python -m src.report` → writes `data/reports/2026-W27.md` and prints its path.
   - **Test:** `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
-- [ ] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` so one repo's
+- [x] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` so one repo's
       failure doesn't abort the run; **save state incrementally after each repo**; retry with backoff on 5xx /
       timeouts; honor secondary rate limits (`Retry-After`); validate each record has required fields
       (`number,url,updated_at,type`) and log+skip malformed; make the `body` cap configurable (raise for RAG).

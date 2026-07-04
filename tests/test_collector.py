@@ -154,10 +154,28 @@ def test_fetch_repo_pagination(monkeypatch):
     monkeypatch.setattr(config, "PER_PAGE", 2)
     pages = {
         1: [
-            {"number": 1, "title": "a", "updated_at": "2025-01-01T00:00:00Z"},
-            {"number": 2, "title": "b", "pull_request": {}, "updated_at": "2025-01-02T00:00:00Z"},
+            {
+                "number": 1,
+                "title": "a",
+                "updated_at": "2025-01-01T00:00:00Z",
+                "html_url": "http://x/1",
+            },
+            {
+                "number": 2,
+                "title": "b",
+                "pull_request": {},
+                "updated_at": "2025-01-02T00:00:00Z",
+                "html_url": "http://x/2",
+            },
         ],
-        2: [{"number": 3, "title": "c", "updated_at": "2025-01-03T00:00:00Z"}],
+        2: [
+            {
+                "number": 3,
+                "title": "c",
+                "updated_at": "2025-01-03T00:00:00Z",
+                "html_url": "http://x/3",
+            }
+        ],
     }
 
     def fake_get(url, headers=None, params=None, timeout=None):

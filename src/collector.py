@@ -9,6 +9,10 @@ This endpoint returns issues and PRs together (PRs have a `pull_request` key), a
 - The last collection time is stored per repo in data/state.json → the next run only
   fetches items after it.
 - With GITHUB_TOKEN set, the rate limit goes from 60 to 5000/hr.
+- Robustness (T0.10): each HTTP GET goes through :func:`_request`, which retries transient
+  failures (5xx / timeout / connection) with exponential backoff and honors both primary and
+  secondary (`Retry-After`) rate limits; records missing a required field are logged+skipped;
+  one repo's failure is isolated (its cursor preserved) so the rest of the run continues.
 
 Usage:
     python -m src.collector            # incremental collection for all repos
@@ -63,7 +67,12 @@ def _save_state(state: dict) -> None:
 
 
 def _sleep_for_rate_limit(resp: requests.Response) -> bool:
-    """Wait until reset if we hit the rate limit. Returns True if we waited."""
+    """Wait until reset if we hit the **primary** rate limit. Returns True if we waited.
+
+    The primary limit is signalled by ``403`` + ``X-RateLimit-Remaining: 0``; we sleep until
+    ``X-RateLimit-Reset``. Secondary/abuse limits (``Retry-After``) are handled separately by
+    :func:`_retry_after_wait`.
+    """
     if resp.status_code == 403 and resp.headers.get("X-RateLimit-Remaining") == "0":
         reset = int(resp.headers.get("X-RateLimit-Reset", "0"))
         wait = max(reset - int(time.time()), 0) + 1
@@ -71,6 +80,82 @@ def _sleep_for_rate_limit(resp: requests.Response) -> bool:
         time.sleep(wait)
         return True
     return False
+
+
+def _retry_after_wait(resp: requests.Response) -> float | None:
+    """Seconds to wait for a **secondary** rate limit (``Retry-After``), or None if not signalled.
+
+    GitHub returns ``403``/``429`` with a ``Retry-After`` header (delta-seconds) for
+    secondary/abuse rate limits — distinct from the primary limit handled by
+    :func:`_sleep_for_rate_limit`. A ``403``/``429`` *without* ``Retry-After`` is a real error
+    (auth, forbidden), not a rate limit, so we return None and let the caller surface it. A
+    +1s cushion avoids retrying a hair too early.
+    """
+    if resp.status_code in (403, 429):
+        retry_after = resp.headers.get("Retry-After")
+        if retry_after is not None:
+            try:
+                return max(float(retry_after), 0.0) + 1.0
+            except ValueError:
+                return None
+    return None
+
+
+def _backoff_wait(attempt: int, reason: str) -> None:
+    """Sleep with exponential backoff before retrying a transient failure (attempt is 0-based)."""
+    wait = config.BACKOFF_BASE_S * (2**attempt)
+    print(
+        f"  transient failure ({reason}) — retry {attempt + 1} in {wait:.0f}s",
+        file=sys.stderr,
+    )
+    time.sleep(wait)
+
+
+def _request(url: str, params: dict) -> requests.Response:
+    """GET `url` with retry/backoff on transient failures and rate-limit handling.
+
+    - Primary rate limit (``X-RateLimit-Remaining: 0``) → wait for reset, retry (no attempt used).
+    - Secondary rate limit (``403``/``429`` + ``Retry-After``) → wait that long, retry (no attempt).
+    - ``5xx`` and connection/timeout errors → exponential backoff, up to :data:`config.MAX_RETRIES`.
+    - Anything else (``2xx`` / ``4xx`` incl. ``404``) is returned for the caller to interpret.
+
+    Rate-limit waits do **not** consume a retry (they aren't failures); only transient errors do.
+    Raises the underlying error (``HTTPError`` for a stuck ``5xx``, or the connection exception)
+    once :data:`config.MAX_RETRIES` transient retries are exhausted — the per-repo isolation in
+    :func:`main` then skips just that repo.
+    """
+    attempt = 0
+    while True:
+        try:
+            resp = requests.get(
+                url, headers=_headers(), params=params, timeout=config.REQUEST_TIMEOUT_S
+            )
+        except requests.RequestException as exc:  # timeout, connection reset, DNS — transient
+            if attempt >= config.MAX_RETRIES:
+                raise
+            _backoff_wait(attempt, reason=type(exc).__name__)
+            attempt += 1
+            continue
+
+        if _sleep_for_rate_limit(resp):
+            continue  # primary limit — waited; retry the same request
+        wait = _retry_after_wait(resp)
+        if wait is not None:
+            print(f"  secondary rate limit — waiting {wait:.0f}s", file=sys.stderr)
+            time.sleep(wait)
+            continue
+        if resp.status_code >= 500:
+            if attempt >= config.MAX_RETRIES:
+                resp.raise_for_status()  # give up: surface the 5xx to the caller
+            _backoff_wait(attempt, reason=f"HTTP {resp.status_code}")
+            attempt += 1
+            continue
+        return resp
+
+
+# A collected record must carry these before we store it — the identity/sort keys everything
+# downstream depends on. Anything missing one is logged and skipped rather than persisted.
+REQUIRED_FIELDS = ("number", "url", "updated_at", "type")
 
 
 # GitHub's list endpoints refuse deep pagination past ~1000 items (page * per_page),
@@ -103,9 +188,7 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
                 "direction": "asc",
                 "page": page,
             }
-            resp = requests.get(url, headers=_headers(), params=params, timeout=30)
-            if _sleep_for_rate_limit(resp):
-                continue
+            resp = _request(url, params)  # retry/backoff + rate-limit handling live here
             if resp.status_code == 404:
                 print(f"  !! {slug} 404 — check the slug", file=sys.stderr)
                 return list(collected.values())
@@ -114,9 +197,19 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
             if not batch:
                 return list(collected.values())
             for it in batch:
-                rec = _normalize(it, slug)
-                collected[rec["number"]] = rec
+                # Advance the cursor on every item with a timestamp — even one we skip below —
+                # so a window of malformed items can't stall forward progress.
                 last_updated = it.get("updated_at") or last_updated
+                rec = _normalize(it, slug)
+                missing = [f for f in REQUIRED_FIELDS if rec.get(f) is None]
+                if missing:
+                    print(
+                        f"  !! {slug} skipping malformed item #{it.get('number')}: "
+                        f"missing {missing}",
+                        file=sys.stderr,
+                    )
+                    continue
+                collected[rec["number"]] = rec
             at = (last_updated or window_since)[:10]
             print(
                 f"    … {slug}: +{len(batch)} ({len(collected)} so far, up to {at})",
@@ -147,7 +240,7 @@ def _normalize(it: dict, slug: str) -> dict:
         "created_at": it.get("created_at"),
         "updated_at": it.get("updated_at"),
         "url": it.get("html_url"),
-        "body": (it.get("body") or "")[:4000],
+        "body": (it.get("body") or "")[: config.BODY_MAX_CHARS],
     }
 
 
@@ -160,12 +253,12 @@ def _merge_jsonl(path, records: list[dict]) -> int:
     return merge_jsonl(path, records)
 
 
-def main() -> None:
+def main(argv: list[str] | None = None) -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument(
         "--full", action="store_true", help="ignore state; re-fetch the lookback window"
     )
-    args = ap.parse_args()
+    args = ap.parse_args(argv)
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
     store = JsonlStore(config.DATA_DIR)  # write via the pluggable Store interface (T0.6)
