@@ -111,7 +111,7 @@ def test_forecast_item_non_dict_reply_raises(monkeypatch: pytest.MonkeyPatch) ->
 def test_forecast_item_tolerates_iso8601_variants(
     monkeypatch: pytest.MonkeyPatch, due_date: str
 ) -> None:
-    """Regression: a plain strptime used to reject anything but the exact _TS_FORMAT string,
+    """Regression: a plain strptime used to reject anything but the exact TS_FORMAT string,
     which real (non-mocked) LLM replies routinely deviate from (millis, "+00:00" vs "Z")."""
     monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply(due_date=due_date))
     prediction = forecaster.forecast_item(_item("o/r", 1, "x"), now=_NOW)

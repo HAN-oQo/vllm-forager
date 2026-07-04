@@ -49,11 +49,12 @@ _COUNT_KEY = "prediction_count"
 # The format every other timestamp in this codebase already uses (collector.py's cursor,
 # GitHub's own API) — keeping predictions' timestamps in the same shape avoids a second,
 # incompatible date convention in the KB. Only used to *render* timestamps we generate
-# ourselves (created_at); see _parse_ts for what we accept back from the model.
-_TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+# ourselves (created_at); see parse_ts for what we accept back from the model. Public (with
+# parse_ts below) — T2.1's grader parses/renders the same due_date/created_at timestamps.
+TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 # What we accept when *parsing* a timestamp: the base second-precision form, with optional
-# fractional seconds and a "Z"/"+00:00"-style UTC marker — an LLM told to use _TS_FORMAT
+# fractional seconds and a "Z"/"+00:00"-style UTC marker — an LLM told to use TS_FORMAT
 # routinely still adds milliseconds or spells the offset differently, so exact-string
 # matching (a plain strptime) would silently reject most real (non-mocked) replies.
 _TS_RE = re.compile(r"^(?P<base>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|\+00:?00)?$")
@@ -74,7 +75,7 @@ class ForecastError(RuntimeError):
     """Any forecaster failure: an out-of-range/malformed prediction, or a corrupt KB record."""
 
 
-def _parse_ts(raw: str) -> datetime:
+def parse_ts(raw: str) -> datetime:
     """Parse a UTC timestamp (tolerating fractional seconds and a "Z"/"+00:00" marker).
 
     Raises:
@@ -120,8 +121,8 @@ class Prediction:
     def __post_init__(self) -> None:
         if not 0.0 <= self.prob <= 1.0:
             raise ForecastError(f"prob must be in [0, 1], got {self.prob}")
-        created = _parse_ts(self.created_at)
-        due = _parse_ts(self.due_date)
+        created = parse_ts(self.created_at)
+        due = parse_ts(self.due_date)
         if due <= created:
             raise ForecastError(f"due_date {self.due_date!r} must be after {self.created_at!r}")
 
@@ -181,7 +182,7 @@ def forecast_item(item: dict, *, now: datetime | None = None) -> Prediction:
         "(e.g. will it be merged/closed/widely adopted, and by when). Reply with a `claim` "
         "(what you predict), a `resolution_rule` (exactly how to check later whether it came "
         "true), a `prob` (your confidence it resolves true, 0.0-1.0), and a `due_date` "
-        f"(UTC timestamp in {_TS_FORMAT!r} format, after {when.strftime(_TS_FORMAT)}) by "
+        f"(UTC timestamp in {TS_FORMAT!r} format, after {when.strftime(TS_FORMAT)}) by "
         "which it should be resolvable.\n\n"
         f"Title: {title}\n\nBody: {body}"
     )
@@ -195,7 +196,7 @@ def forecast_item(item: dict, *, now: datetime | None = None) -> Prediction:
             prob=reply["prob"],
             due_date=reply["due_date"],
             evidence=(item.get("url") or "",),
-            created_at=when.strftime(_TS_FORMAT),
+            created_at=when.strftime(TS_FORMAT),
         )
     except KeyError as exc:
         raise ForecastError(f"model reply missing required field: {exc}") from exc
@@ -209,15 +210,27 @@ def record_prediction(store: Store, prediction: Prediction) -> int:
     return next_id
 
 
-def list_predictions(store: Store) -> list[Prediction]:
-    """Return every recorded prediction, oldest first."""
+def iter_predictions(store: Store) -> list[tuple[int, Prediction]]:
+    """Every recorded prediction with its 1-based log index, oldest first.
+
+    The index is the stable identity :mod:`~src.agents.grader` (T2.1) keys a grade against
+    (``grade@<same index>``) — predictions are an append-only log with no other identifier, so
+    "which prediction does this grade resolve" has to be this position, not e.g. equality on
+    the `Prediction` value itself (two genuinely different predictions could coincidentally
+    have identical fields).
+    """
     count = _parse_count(store.get_state(_COUNT_KEY))
-    predictions = []
+    result = []
     for i in range(1, count + 1):
         stored = store.get_state(f"{_PREDICTION_KEY_PREFIX}{i}")
         if stored is not None:
-            predictions.append(Prediction.from_json(stored))
-    return predictions
+            result.append((i, Prediction.from_json(stored)))
+    return result
+
+
+def list_predictions(store: Store) -> list[Prediction]:
+    """Return every recorded prediction, oldest first."""
+    return [prediction for _, prediction in iter_predictions(store)]
 
 
 def forecast_store(store: Store, *, now: datetime | None = None) -> list[Prediction]:
