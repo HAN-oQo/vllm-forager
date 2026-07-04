@@ -230,3 +230,181 @@ def test_report_from_store_reads_all_items(tmp_path, monkeypatch: pytest.MonkeyP
     report = reporter_v1.report_from_store(store)
 
     assert "http://x/o/r/1" in report
+
+
+# --------------------------------------------------------------------- T1.5.4: tree report
+
+
+def test_build_tree_nests_by_path_and_rolls_up_counts() -> None:
+    """The DEVPLAN's named scenario: correct nesting + rolled-up counts."""
+    items = [
+        _item("o/r", 1, "MLA regression", path=["ROCm/AMD", "DeepSeek-V4", "performance"]),
+        _item("o/r", 2, "MoE fused gate", path=["ROCm/AMD", "DeepSeek-V4"]),
+        _item("o/r", 3, "unrelated build fix", path=["ROCm/AMD"]),
+    ]
+
+    tree = reporter_v1.build_tree(items)
+
+    assert len(tree) == 1
+    root = tree[0]
+    assert root.name == "ROCm/AMD"
+    assert root.count == 3  # rolled up: its own 1 + DeepSeek-V4's subtree of 2
+    assert [pr["number"] for pr in root.prs] == [3]  # only the item classified exactly here
+
+    deepseek = root.children[0]
+    assert deepseek.name == "DeepSeek-V4"
+    assert deepseek.count == 2
+    assert [pr["number"] for pr in deepseek.prs] == [2]
+
+    performance = deepseek.children[0]
+    assert performance.name == "performance"
+    assert performance.count == 1
+    assert [pr["number"] for pr in performance.prs] == [1]
+    assert performance.children == ()
+
+
+def test_build_tree_every_leaf_pr_has_an_evidence_url() -> None:
+    """The DEVPLAN's named scenario: every leaf PR has an evidence URL."""
+    item = _item("o/r", 1, "no url item", path=["ROCm/AMD"])
+    del item["url"]
+
+    tree = reporter_v1.build_tree([item])
+
+    assert tree[0].prs[0]["url"] == "https://github.com/o/r/issues/1"
+
+
+def test_render_tree_markdown_renders_placeholder_not_none_for_missing_repo_and_number() -> None:
+    """Regression: _pr_entry used to set repo/number to None (not omit them), so _cite's own
+    "?" fallback never fired — the tree report rendered the literal string "[None#None]"."""
+    item = {"title": "orphan item", "path": ["ROCm/AMD"]}
+
+    tree = reporter_v1.build_tree([item])
+    md = reporter_v1.render_tree_markdown(tree)
+
+    assert "[?#?]" in md
+    assert "None" not in md
+
+
+def test_build_tree_prunes_empty_branches_by_construction() -> None:
+    """The DEVPLAN's named scenario: empty branches pruned — no node with count == 0 can ever
+    be constructed, since a node only exists because some item's path passes through it."""
+    items = [_item("o/r", 1, "x", path=["ROCm/AMD", "DeepSeek-V4"])]
+
+    def all_nodes(nodes):
+        for node in nodes:
+            yield node
+            yield from all_nodes(node.children)
+
+    tree = reporter_v1.build_tree(items)
+
+    assert all(node.count > 0 for node in all_nodes(tree))
+
+
+def test_build_tree_unclassified_and_other_items_share_one_flat_other_node() -> None:
+    items = [
+        _item("o/r", 1, "never classified"),  # no `path` key
+        _item("o/r", 2, "explicit other", path=[OTHER]),
+        _item("o/r", 3, "real category", path=["ROCm/AMD"]),
+    ]
+
+    tree = reporter_v1.build_tree(items)
+
+    other = next(node for node in tree if node.name == OTHER)
+    assert other.count == 2
+    assert other.children == ()
+    assert {pr["number"] for pr in other.prs} == {1, 2}
+
+
+def test_build_tree_attaches_node_summaries_via_lookup() -> None:
+    items = [_item("o/r", 1, "x", path=["ROCm/AMD", "DeepSeek-V4"])]
+
+    def lookup(path):
+        return "a synthesis" if path == ("ROCm/AMD", "DeepSeek-V4") else None
+
+    tree = reporter_v1.build_tree(items, summary_lookup=lookup)
+
+    assert tree[0].summary is None  # root has no summary in this lookup
+    assert tree[0].children[0].summary == "a synthesis"
+
+
+def test_build_tree_empty_items_returns_empty_tree() -> None:
+    assert reporter_v1.build_tree([]) == []
+
+
+def test_tree_node_to_dict_matches_the_devplan_shape() -> None:
+    items = [_item("o/r", 1, "x", path=["ROCm/AMD"])]
+    node = reporter_v1.build_tree(items)[0]
+
+    d = node.to_dict()
+
+    assert set(d) == {"name", "summary", "count", "gaps", "children", "prs"}
+    assert d["name"] == "ROCm/AMD"
+    assert d["count"] == 1
+    assert d["gaps"] == 0
+    assert d["children"] == []
+    assert len(d["prs"]) == 1
+
+
+def test_render_tree_markdown_nests_headings_and_shows_summary() -> None:
+    items = [
+        _item("o/r", 1, "MLA regression", path=["ROCm/AMD", "DeepSeek-V4"]),
+    ]
+    tree = reporter_v1.build_tree(
+        items, summary_lookup=lambda path: "the synthesis" if len(path) == 2 else None
+    )
+
+    md = reporter_v1.render_tree_markdown(tree, title="Weekly digest")
+
+    assert "# Weekly digest" in md
+    assert "## ROCm/AMD (1)" in md
+    assert "### DeepSeek-V4 (1)" in md
+    assert "_the synthesis_" in md
+    assert "http://x/o/r/1" in md
+
+
+def test_render_tree_markdown_falls_back_to_bold_past_h6() -> None:
+    """Markdown doesn't render a 7th '#' as a heading at all — depth >= 5 (heading level 7+)
+    must fall back to a bold line instead of silently stopping being a heading."""
+    deep_path = ["a", "b", "c", "d", "e", "f"]  # depth 6 -> heading level 8
+    items = [_item("o/r", 1, "deep item", path=deep_path)]
+
+    tree = reporter_v1.build_tree(items)
+    md = reporter_v1.render_tree_markdown(tree)
+
+    assert "####### " not in md  # never emits a non-heading run of 7+ '#'
+    assert "**f (1)**" in md  # the deepest node falls back to bold
+    assert "###### e (1)" in md  # the level just above the cap is still a real H6 heading
+
+
+def test_tree_from_store_recovers_from_a_corrupt_stored_summary(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A corrupted node_summary@<path> record must not crash the whole tree build — only
+    that one node's summary is omitted."""
+    from src.store.jsonl_store import JsonlStore
+
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, "x", path=["ROCm/AMD"])])
+    store.set_state("node_summary@ROCm/AMD", "not valid json")
+
+    tree = reporter_v1.tree_from_store(store)
+
+    assert tree[0].name == "ROCm/AMD"
+    assert tree[0].summary is None
+
+
+def test_tree_from_store_reads_items_and_summaries(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from src.agents import summarizer
+    from src.store.jsonl_store import JsonlStore
+
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, "x", path=["ROCm/AMD"])])
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"summary": "a synthesis"})
+    summarizer.summarize_store(store)
+
+    tree = reporter_v1.tree_from_store(store)
+
+    assert tree[0].name == "ROCm/AMD"
+    assert tree[0].summary == "a synthesis"
