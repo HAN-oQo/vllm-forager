@@ -36,3 +36,21 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     for item in items:
         if "integration" in item.keywords:
             item.add_marker(skip)
+
+
+@pytest.fixture(autouse=True)
+def _default_offline_store_backend(monkeypatch):
+    """Never let an ambient ``STORE=firestore`` (real shell env or a shared ``.env``, per
+    ``docs/RUNBOOK.md``'s shared-data-dir setup) silently switch a test onto FirestoreStore.
+
+    `src.store.get_store` (T0.6.2) is env-driven via :data:`src.config.STORE_BACKEND` — which
+    is cached at import time (like every other config.py value), so clearing the *env var*
+    here would do nothing; the constant itself must be reset. `src.collector.main` /
+    `src.report.main` call `get_store()` by default — a test that doesn't care about the
+    backend must still get the offline JSONL default, not a live network dependency. A test
+    that *wants* firestore sets ``config.STORE_BACKEND`` itself via `monkeypatch.setattr`,
+    which overrides this within that test.
+    """
+    from src import config
+
+    monkeypatch.setattr(config, "STORE_BACKEND", "jsonl")

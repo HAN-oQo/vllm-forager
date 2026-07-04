@@ -44,7 +44,8 @@ except Exception:  # works even if python-dotenv isn't installed
     pass
 
 from . import config
-from .store.jsonl_store import JsonlStore, load_state, merge_jsonl, save_state
+from .store import get_store
+from .store.jsonl_store import load_state, merge_jsonl, save_state
 
 API = "https://api.github.com"
 
@@ -290,7 +291,7 @@ def main(argv: list[str] | None = None) -> None:
     args = ap.parse_args(argv)
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    store = JsonlStore(config.DATA_DIR)  # write via the pluggable Store interface (T0.6)
+    store = get_store()  # backend selected by env STORE=jsonl|firestore (default jsonl, T0.6.2)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     # First run / --full: start from a rolling lookback window, not the beginning of time.
@@ -316,6 +317,9 @@ def main(argv: list[str] | None = None) -> None:
         # diagnostic must not itself abort collection of the records already fetched.
         # `remote_fetcher=audit.remote_counts` is a live attribute lookup at call time (not
         # record_stall's early-bound default), so tests can monkeypatch audit.remote_counts.
+        # `data_dir=config.DATA_DIR` is explicit (T0.6.2): `store` may now be a FirestoreStore
+        # (no `.data_dir`), and record_stall's own data_dir inference would otherwise raise —
+        # the data_quality audit trail always lives on local disk regardless of item backend.
         try:
             audit.record_stall(
                 store,
@@ -323,6 +327,7 @@ def main(argv: list[str] | None = None) -> None:
                 window_since,
                 remote_fetcher=audit.remote_counts,
                 checked_at=now,
+                data_dir=config.DATA_DIR,
             )
         except Exception:
             # Same "loud, but isolated" contract as main()'s per-repo except below: a bug in
@@ -348,7 +353,7 @@ def main(argv: list[str] | None = None) -> None:
         store.set_state(slug, now)  # persist progress per repo so a later failure can't lose it
         # `slug` is absent from totals only when there were no records to write this cycle.
         total_str = f" · {totals[slug]} total" if slug in totals else ""
-        print(f"  +{len(records)} updated{total_str} → {slug.replace('/', '__')}.jsonl")
+        print(f"  +{len(records)} updated{total_str} → {slug} ({type(store).__name__})")
 
     print("done.")
 

@@ -9,8 +9,11 @@ lives in the reporter so it stays pure and testable.
 Design:
 - :func:`generate` is the injectable core (store + output dir + clock in, path out) so tests
   never touch the real ``data/`` tree or wall-clock.
-- :func:`main` is the thin CLI wrapper: it wires the default :class:`JsonlStore` over
-  :data:`src.config.DATA_DIR` (overridable with ``--data-dir``) and prints the written path.
+- :func:`main` is the thin CLI wrapper. With no ``--data-dir``, it uses
+  :func:`src.store.get_store` (T0.6.2) — so ``STORE=firestore`` reports from Firestore just
+  like the collector does. ``--data-dir`` is a JSONL-specific override (pre-dates the store
+  factory): passing it always reads a :class:`JsonlStore` at that path, regardless of ``STORE``
+  — there's no equivalent "read Firestore instead" flag, so mixing the two isn't meaningful.
 """
 
 from __future__ import annotations
@@ -21,6 +24,7 @@ from pathlib import Path
 
 from . import config
 from .agents import reporter
+from .store import get_store
 from .store.base import Store
 from .store.jsonl_store import JsonlStore
 
@@ -61,9 +65,14 @@ def generate(
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: write ``<data-dir>/reports/YYYY-Www.md`` and print its path.
 
-    `argv` is parsed (defaults to ``sys.argv`` when None). ``--data-dir`` overrides the store
-    location (defaults to :data:`src.config.DATA_DIR`); the report is always written to a
-    ``reports/`` subdirectory of that data dir. Returns a process exit code (0 on success).
+    `argv` is parsed (defaults to ``sys.argv`` when None). The report is always written to a
+    ``reports/`` subdirectory of the data dir (``--data-dir`` if given, else
+    :data:`src.config.DATA_DIR`). Returns a process exit code (0 on success).
+
+    Store selection: with ``--data-dir``, reads a :class:`JsonlStore` at that explicit path
+    (the pre-T0.6.2 behavior, kept for anyone pointing this at an arbitrary JSONL export).
+    Without it, uses :func:`~src.store.get_store` — so ``STORE=firestore`` reports read from
+    Firestore, matching the collector's own backend selection.
     """
     ap = argparse.ArgumentParser(
         prog="python -m src.report",
@@ -72,13 +81,22 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument(
         "--data-dir",
         type=Path,
-        default=config.DATA_DIR,
-        help="KB data directory to read the store from (default: config.DATA_DIR).",
+        default=None,
+        help=(
+            "Read a JSONL store at this path instead of the STORE-selected backend "
+            "(default: config.DATA_DIR, backend from env STORE=jsonl|firestore)."
+        ),
     )
     args = ap.parse_args(argv)
 
-    store = JsonlStore(args.data_dir)
-    path = generate(store, args.data_dir / "reports")
+    if args.data_dir is not None:
+        store: Store = JsonlStore(args.data_dir)
+        reports_dir = args.data_dir / "reports"
+    else:
+        store = get_store()
+        reports_dir = config.DATA_DIR / "reports"
+
+    path = generate(store, reports_dir)
     print(path)
     return 0
 
