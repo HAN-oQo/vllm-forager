@@ -84,6 +84,12 @@ with Esc; start a fresh session per milestone to keep context clean.
 prunes the merged branch. Override cadence with `POLL_INTERVAL` (default 60s). If the PR is **closed unmerged**,
 it stops (exit 1) instead of advancing.
 
+**Run it as a tracked background task, not `nohup ... & disown`.** A Claude Code session must launch
+`wait-merge.sh` via its tool's own background-execution option (e.g. the Bash tool's `run_in_background: true`)
+so the harness keeps a handle on the process and can notify the session when it exits. `nohup ... & disown`
+detaches the process from the shell's job table — the script still runs and still syncs `main` correctly, but the
+session loses any way to learn it happened, and will sit waiting even after you've merged.
+
 ## Branch protection (set once — GitHub → Settings → Branches → `main`)
 - Require the **CI** status check to pass before merging.
 - Require a pull request before merging (blocks direct agent pushes).
