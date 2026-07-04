@@ -10,22 +10,40 @@ Storage: same as :mod:`src.taxonomy` — the KB's generic state map (``get_state
 ``set_state``), keyed ``policy@1``, ``policy@2``, ... plus one ``policy_active_version``
 pointer. Known limitations (race on concurrent writers; redundant full-state.json I/O per
 call) are the same as documented in :mod:`src.taxonomy` and not repeated here.
+
+Known duplication (not fixed here): this module's version/active-pointer machinery is
+structurally near-identical to :mod:`src.taxonomy`'s — the two evolved independently rather
+than sharing a base, because their "evolve" semantics genuinely differ (taxonomy appends one
+category; policy merges partial field updates). A shared read/version-bookkeeping helper is a
+reasonable future refactor once a third versioned-object need clarifies the right boundary,
+not done here to avoid re-touching the already-merged, already-tested ``taxonomy.py``.
 """
 
 from __future__ import annotations
 
 import json
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from types import MappingProxyType
+from typing import TypeVar
 
+from . import taxonomy
 from .store.base import Store
 
 _VERSION_KEY_PREFIX = "policy@"
 _ACTIVE_KEY = "policy_active_version"
 
+_K = TypeVar("_K")
+_V = TypeVar("_V")
+
 
 class PolicyError(RuntimeError):
-    """Any policy failure: no policy exists yet, or an unknown/corrupt version."""
+    """Any policy failure: no policy exists yet, an unknown/corrupt version, or a dangling
+    ``active_taxonomy_version`` reference."""
+
+
+def _freeze(mapping: dict[_K, _V]) -> MappingProxyType[_K, _V]:
+    """Defensively copy `mapping` and wrap it read-only."""
+    return MappingProxyType(dict(mapping))
 
 
 @dataclass(frozen=True)
@@ -35,7 +53,9 @@ class Policy:
     ``scoring_weights``/``prompt_templates`` are ``MappingProxyType`` (not plain ``dict``) so
     ``policy.scoring_weights["x"] = 1`` fails loudly instead of silently mutating a version
     that's supposed to be immutable — the same lesson learned from T1.2's ``categories``
-    needing a ``tuple`` instead of a ``list``.
+    needing a ``tuple`` instead of a ``list``. Unlike :class:`~src.taxonomy.Taxonomy`,
+    ``Policy`` is intentionally **not hashable** — a mapping value can never be hashable, and
+    nothing in this codebase needs a ``Policy`` as a set/dict key.
     """
 
     version: int
@@ -65,11 +85,11 @@ class Policy:
             data = json.loads(raw)
             return Policy(
                 version=data["version"],
-                scoring_weights=MappingProxyType(dict(data["scoring_weights"])),
-                prompt_templates=MappingProxyType(dict(data["prompt_templates"])),
+                scoring_weights=_freeze({k: float(v) for k, v in data["scoring_weights"].items()}),
+                prompt_templates=_freeze(data["prompt_templates"]),
                 active_taxonomy_version=data["active_taxonomy_version"],
             )
-        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
             raise PolicyError(f"corrupt policy record: {exc}") from exc
 
 
@@ -85,6 +105,18 @@ def _parse_version(raw: str) -> int:
         raise PolicyError(f"corrupt active-version pointer: {raw!r}") from exc
 
 
+def _require_taxonomy_version(store: Store, version: int) -> None:
+    """Confirm `version` is a real taxonomy version before letting a policy reference it.
+
+    Raises:
+        PolicyError: no such taxonomy version exists.
+    """
+    try:
+        taxonomy.get_taxonomy(store, version)
+    except taxonomy.TaxonomyError as exc:
+        raise PolicyError(f"active_taxonomy_version {version} is invalid: {exc}") from exc
+
+
 def create_policy(
     store: Store,
     *,
@@ -96,14 +128,15 @@ def create_policy(
 
     Raises:
         PolicyError: a policy already exists — evolve it with :func:`update_policy` instead
-            of creating a second v1.
+            of creating a second v1 — or `active_taxonomy_version` doesn't exist.
     """
     if store.get_state(_ACTIVE_KEY) is not None:
         raise PolicyError("a policy already exists; use update_policy() to evolve it")
+    _require_taxonomy_version(store, active_taxonomy_version)
     policy = Policy(
         version=1,
-        scoring_weights=MappingProxyType(dict(scoring_weights)),
-        prompt_templates=MappingProxyType(dict(prompt_templates)),
+        scoring_weights=_freeze({k: float(v) for k, v in scoring_weights.items()}),
+        prompt_templates=_freeze(prompt_templates),
         active_taxonomy_version=active_taxonomy_version,
     )
     store.set_state(_version_key(1), policy.to_json())
@@ -150,29 +183,31 @@ def update_policy(
 ) -> Policy:
     """Evolve the policy: create version N+1 and activate it.
 
-    Any field left ``None`` carries over unchanged from the current active version — a
-    caller only passes what actually changed (e.g. T2.2's grading pass adjusts just
-    ``scoring_weights``). The prior version is left untouched (append-only), so a grading
-    record that names "graded against policy v2" can still look v2 up after v3 becomes
-    active.
+    Each of ``scoring_weights``/``prompt_templates`` is **merged** key-by-key into the
+    current version's mapping (only the keys you pass are added/overwritten; every other
+    key carries over unchanged) — a caller adjusting one category's weight doesn't need to
+    restate every other category. ``active_taxonomy_version`` left ``None`` carries over
+    unchanged. The prior version is left untouched (append-only), so a grading record that
+    names "graded against policy v2" can still look v2 up after v3 becomes active.
 
     Raises:
-        PolicyError: no policy exists yet.
+        PolicyError: no policy exists yet, or `active_taxonomy_version` doesn't exist.
     """
     current = get_active(store)
-    updated = Policy(
+    new_taxonomy_version = (
+        active_taxonomy_version
+        if active_taxonomy_version is not None
+        else current.active_taxonomy_version
+    )
+    _require_taxonomy_version(store, new_taxonomy_version)
+    merged_weights = {**current.scoring_weights, **(scoring_weights or {})}
+    merged_templates = {**current.prompt_templates, **(prompt_templates or {})}
+    updated = replace(
+        current,
         version=current.version + 1,
-        scoring_weights=MappingProxyType(
-            dict(scoring_weights if scoring_weights is not None else current.scoring_weights)
-        ),
-        prompt_templates=MappingProxyType(
-            dict(prompt_templates if prompt_templates is not None else current.prompt_templates)
-        ),
-        active_taxonomy_version=(
-            active_taxonomy_version
-            if active_taxonomy_version is not None
-            else current.active_taxonomy_version
-        ),
+        scoring_weights=_freeze({k: float(v) for k, v in merged_weights.items()}),
+        prompt_templates=_freeze(merged_templates),
+        active_taxonomy_version=new_taxonomy_version,
     )
     store.set_state(_version_key(updated.version), updated.to_json())
     store.set_state(_ACTIVE_KEY, str(updated.version))
