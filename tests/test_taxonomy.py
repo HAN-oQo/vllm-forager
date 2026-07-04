@@ -28,15 +28,21 @@ def test_create_taxonomy_is_v1_and_active(store: JsonlStore) -> None:
 
 
 def test_create_taxonomy_accepts_multi_level_paths(store: JsonlStore) -> None:
-    """T1.5.1's named scenario: a category is a path, not just a flat name."""
+    """T1.5.1's named scenario: a category is a path, not just a flat name — and it round-trips
+    through the store, not just the in-memory return value."""
     v1 = taxonomy.create_taxonomy(
         store, [["ROCm/AMD", "DeepSeek-V4", "performance", "attention"], "quantization"]
     )
-    assert v1.categories == (
+    expected = (
         ("ROCm/AMD", "DeepSeek-V4", "performance", "attention"),
         ("quantization",),
     )
+    assert v1.categories == expected
     assert v1.labels == ("ROCm/AMD > DeepSeek-V4 > performance > attention", "quantization")
+
+    # round-trips through the store, not just the in-memory return value
+    assert taxonomy.get_active(store).categories == expected
+    assert taxonomy.get_taxonomy(store, 1).categories == expected
 
 
 def test_create_taxonomy_twice_raises(store: JsonlStore) -> None:
@@ -74,9 +80,14 @@ def test_add_category_bumps_version_both_retrievable_active_is_latest(
 
 
 def test_add_category_accepts_a_multi_level_path(store: JsonlStore) -> None:
+    """Versioning still holds for a multi-level path — round-trips through the store, not
+    just the in-memory return value."""
     taxonomy.create_taxonomy(store, ["rocm-build"])
     v2 = taxonomy.add_category(store, ["Quantization", "FP8 KV cache"])
-    assert v2.categories == (("rocm-build",), ("Quantization", "FP8 KV cache"))
+    expected = (("rocm-build",), ("Quantization", "FP8 KV cache"))
+    assert v2.categories == expected
+    assert taxonomy.get_active(store).categories == expected
+    assert taxonomy.get_taxonomy(store, 2).categories == expected
 
 
 def test_add_category_duplicate_raises(store: JsonlStore) -> None:
@@ -105,6 +116,48 @@ def test_add_category_duplicate_path_case_and_whitespace_insensitive_raises(
 def test_add_category_before_create_raises(store: JsonlStore) -> None:
     with pytest.raises(taxonomy.TaxonomyError, match="no taxonomy exists"):
         taxonomy.add_category(store, "rocm-build")
+
+
+# --------------------------------------------------------------------- path validation
+
+
+def test_create_taxonomy_rejects_a_non_string_non_sequence_entry(store: JsonlStore) -> None:
+    """A bad direct-call argument must raise TaxonomyError, not a raw TypeError."""
+    with pytest.raises(taxonomy.TaxonomyError, match="must be a string or a sequence"):
+        taxonomy.create_taxonomy(store, [42])
+
+
+def test_add_category_rejects_a_non_string_level(store: JsonlStore) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    with pytest.raises(taxonomy.TaxonomyError, match="non-empty string"):
+        taxonomy.add_category(store, ["Quantization", 8])
+
+
+def test_create_taxonomy_rejects_an_empty_path(store: JsonlStore) -> None:
+    with pytest.raises(taxonomy.TaxonomyError, match="at least one level"):
+        taxonomy.create_taxonomy(store, [[]])
+
+
+def test_add_category_rejects_a_blank_level(store: JsonlStore) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    with pytest.raises(taxonomy.TaxonomyError, match="non-empty string"):
+        taxonomy.add_category(store, "   ")
+
+
+def test_add_category_rejects_a_level_containing_the_separator(store: JsonlStore) -> None:
+    """A level containing the literal ' > ' separator would make Taxonomy.labels flatten it
+    to the same string as an unrelated multi-level path — rejected at ingestion instead."""
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    with pytest.raises(taxonomy.TaxonomyError, match="ambiguous once flattened"):
+        taxonomy.add_category(store, "a > b")
+
+
+def test_taxonomy_from_json_rejects_a_dict_entry() -> None:
+    """A dict entry must not silently become a wrong-but-valid path via tuple(dict) iterating
+    its keys — it must raise TaxonomyError like every other malformed entry."""
+    raw = '{"version": 1, "categories": [{"name": "rocm-build"}]}'
+    with pytest.raises(taxonomy.TaxonomyError, match="must be a string or a sequence"):
+        taxonomy.Taxonomy.from_json(raw)
 
 
 def test_taxonomy_json_roundtrip() -> None:

@@ -40,7 +40,7 @@ import sys
 
 from .. import llm
 from ..store.base import Store
-from ..taxonomy import Taxonomy
+from ..taxonomy import Taxonomy, casefold_label
 from ..taxonomy import get_active as get_active_taxonomy
 from .reporter import OTHER
 
@@ -69,17 +69,17 @@ def _prompt(item: dict, categories: tuple[str, ...]) -> str:
 def _canonical_category(raw: object, categories: tuple[str, ...]) -> str:
     """Match `raw` against `categories` case/whitespace-insensitively; else :data:`OTHER`.
 
-    Mirrors :func:`~src.taxonomy.add_category`'s own ``.strip().casefold()`` normalization,
-    so a reply of ``"ROCm-Build"`` against a taxonomy category ``"rocm-build"`` is recognized
-    as the same category instead of silently becoming :data:`OTHER` for what the model
-    actually got right. Returns the taxonomy's own canonical spelling on a match, not the
-    model's raw casing.
+    Uses :func:`~src.taxonomy.casefold_label` — the same normalization
+    :func:`~src.taxonomy.add_category` uses to dedup categories — so a reply of
+    ``"ROCm-Build"`` against a taxonomy category ``"rocm-build"`` is recognized as the same
+    category instead of silently becoming :data:`OTHER` for what the model actually got right.
+    Returns the taxonomy's own canonical spelling on a match, not the model's raw casing.
     """
     if not isinstance(raw, str):
         return OTHER
-    normalized = raw.strip().casefold()
+    normalized = casefold_label(raw)
     for category in categories:
-        if category.strip().casefold() == normalized:
+        if casefold_label(category) == normalized:
             return category
     return OTHER
 

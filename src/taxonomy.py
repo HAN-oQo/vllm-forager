@@ -27,6 +27,15 @@ read-then-write over a plain key-value store with no locking or compare-and-swap
 concurrent callers evolving the taxonomy at once can race (one addition silently lost).
 Real fixes belongs at the Store layer — see the still-open ``T4.3 Locking / idempotency``
 DEVPLAN todo — rather than reinvented per caller.
+
+Known limitations left for later todos, not this one: (1) no per-level accessor exists (e.g.
+"what are the valid level-0 names", or "the children of a given prefix") — T1.5.2 needs this
+to classify "each level from a controlled per-level label set," and should add it here
+(reusing :func:`casefold_label`) rather than duplicate ad hoc set-comprehensions in
+``analyst.py``. (2) a new path that is a prefix or extension of an existing one is allowed
+(e.g. ``("ROCm/AMD",)`` and ``("ROCm/AMD", "DeepSeek-V4")`` can both be active categories) —
+whether a node can be simultaneously a leaf (has classified items) and a branch (has children)
+is undefined here; T1.5.4's tree-building is where that needs resolving.
 """
 
 from __future__ import annotations
@@ -40,6 +49,12 @@ from .store.base import Store
 _VERSION_KEY_PREFIX = "taxonomy@"
 _ACTIVE_KEY = "taxonomy_active_version"
 
+# Joins a CategoryPath's levels into one display/matching string (see Taxonomy.labels). A
+# level containing this substring is rejected at ingestion (_normalize_path) — otherwise a
+# depth-1 category named e.g. "a > b" would flatten to the same label as the distinct 2-level
+# path ("a", "b"), making them indistinguishable to analyst.py's label-based matching.
+_LEVEL_SEPARATOR = " > "
+
 CategoryPath = tuple[str, ...]
 
 
@@ -48,14 +63,51 @@ class TaxonomyError(RuntimeError):
     duplicate category."""
 
 
+def casefold_label(label: str) -> str:
+    """The one normalization every case/whitespace-insensitive taxonomy comparison uses.
+
+    Shared by :func:`_casefold_path` (path dedup, here) and
+    :func:`~src.agents.analyst._canonical_category` (LLM-reply matching) so the two can never
+    silently drift apart on what counts as "the same" category.
+    """
+    return label.strip().casefold()
+
+
 def _normalize_path(entry: str | Sequence[str]) -> CategoryPath:
-    """A single string is a depth-1 path; a sequence of strings is a multi-level path."""
-    return (entry,) if isinstance(entry, str) else tuple(entry)
+    """A single string is a depth-1 path; a sequence of strings is a multi-level path.
+
+    Raises:
+        TaxonomyError: `entry` is neither a string nor a sequence of strings, the resulting
+            path is empty, a level is empty/whitespace-only, or a level contains the literal
+            :data:`_LEVEL_SEPARATOR` (which would make it flatten ambiguously — see
+            :attr:`Taxonomy.labels`).
+    """
+    if isinstance(entry, str):
+        path: tuple[object, ...] = (entry,)
+    elif isinstance(entry, Sequence) and not isinstance(entry, (bytes, bytearray)):
+        path = tuple(entry)
+    else:
+        raise TaxonomyError(
+            f"a category path must be a string or a sequence of strings, got {entry!r}"
+        )
+    if not path:
+        raise TaxonomyError("a category path must have at least one level")
+    for level in path:
+        if not isinstance(level, str) or not level.strip():
+            raise TaxonomyError(
+                f"every level of a category path must be a non-empty string: {path!r}"
+            )
+        if _LEVEL_SEPARATOR in level:
+            raise TaxonomyError(
+                f"a category level cannot contain {_LEVEL_SEPARATOR!r} (ambiguous once "
+                f"flattened): {level!r}"
+            )
+    return path  # type: ignore[return-value]  # every element validated to be `str` above
 
 
 def _casefold_path(path: CategoryPath) -> CategoryPath:
-    """Per-level ``.strip().casefold()`` — how two paths are compared for dedup."""
-    return tuple(level.strip().casefold() for level in path)
+    """Per-level :func:`casefold_label` — how two paths are compared for dedup."""
+    return tuple(casefold_label(level) for level in path)
 
 
 @dataclass(frozen=True)
@@ -79,7 +131,7 @@ class Taxonomy:
         teaches it to classify per-level) keeps working unchanged against a now-path-capable
         taxonomy.
         """
-        return tuple(" > ".join(path) for path in self.categories)
+        return tuple(_LEVEL_SEPARATOR.join(path) for path in self.categories)
 
     def to_json(self) -> str:
         """Serialize for storage in the KB's state map."""
