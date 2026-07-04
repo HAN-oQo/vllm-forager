@@ -150,6 +150,12 @@ crontab -e
 Cadence is 24h (`config.COLLECT_INTERVAL_HOURS`); the collector only fetches items updated since the last run
 (`data/state.json`).
 
+> **Ordering matters for the report:** `python -m src.report` (T1.6) groups items by the category the Analyst
+> assigned them (`python -m src.analyze`, T1.4) — an item the Analyst hasn't classified yet renders under a plain
+> "Other" bucket instead of a real category. If you're scheduling collection, also schedule `python -m
+> src.analyze` to run after each collection cycle and before `python -m src.report`, or every report after a
+> fresh collection will show mostly-uncategorized items until analyze catches up.
+
 **Progress & health:** running `./scripts/collect.sh` **streams progress live** to the terminal (via `tee`; the
 collector prints `… <repo>: +N (M so far)` per page) while also writing `data/logs/`. `data/last_run.json` holds
 the last run's `status`, `exit_code`, timestamps, **record counts** (per repo + `total_records`), and (on failure)
