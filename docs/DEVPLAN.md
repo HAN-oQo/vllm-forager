@@ -257,7 +257,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the report is only worth trusting if retrieval/citation quality is *measured* — this is the gate that catches hallucination/drift before a bad report ships.
   - **e.g.:** a run scores Recall@10 = 0.72 (< 0.8) → flagged; an absent-topic query must return "no evidence", not a fabricated cite.
   - **Test:** `tests/test_rag_eval.py` — offline: metric math on a fixed ranked list (known Recall@k/MRR/nDCG), every claim carries a citation, an absent-topic query ⇒ "no evidence"; live retrieval + LLM-judge = `@pytest.mark.integration`.
-- [ ] **T1.9 Thin read-only dashboard** — early slice of the M5 dashboard pulled forward to right after M1; a local `dashboard/` web view over the KB (read via the store interface, so JSONL now / Firestore after M0.6 both work).
+- [x] **T1.9 Thin read-only dashboard** — early slice of the M5 dashboard pulled forward to right after M1; a local `dashboard/` web view over the KB (read via the store interface, so JSONL now / Firestore after M0.6 both work).
   - **Why:** view M1 outputs (report · trends · forecasts) in one screen instead of running CLI commands — the "follow-along" tool; PLAN.md sanctions an early thin version as soon as there's a loop to watch.
   - **e.g.:** `python -m dashboard` → localhost shows the latest cited report + per-category trend charts + the forecast log. Read-only, no auth.
   - **Test:** `tests/test_dashboard.py` — seed a store fixture on `tmp_path`, assert the render functions return the report body + correct trend series (offline); a live server smoke = `@pytest.mark.integration`.
