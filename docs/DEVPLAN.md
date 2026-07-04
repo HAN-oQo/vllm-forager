@@ -182,26 +182,19 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** one command to produce the weekly report on demand / on a schedule.
   - **e.g.:** `python -m src.report` → writes `data/reports/2026-W27.md` and prints its path.
   - **Test:** `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
-- [x] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` so one repo's
-      failure doesn't abort the run; **save state incrementally after each repo**; retry with backoff on 5xx /
-      timeouts; honor secondary rate limits (`Retry-After`); validate each record has required fields
-      (`number,url,updated_at,type`) and log+skip malformed; make the `body` cap configurable (raise for RAG).
-      Test: `tests/test_collector_robust.py` — repo #2 raises ⇒ repo #1 cursor persisted; `5xx,5xx,200` ⇒ succeeds;
-      `403 + Retry-After` waits then continues; malformed record skipped+logged; state cursor is monotonic.
-      > **Partly shipped in #3:** cursor-windowing past the ~1000-item pagination cap + per-repo isolation +
-      > incremental state save (with tests). Remaining: retry/backoff, secondary-rate-limit, schema validation,
-      > configurable `body` cap.
-- [x] **T0.11 Collection data-quality guardrail (guardrail 1b: reconciliation)** — `src/audit.py`: compare local
-      counts vs GitHub **GraphQL** `issues.totalCount + pullRequests.totalCount` over the collected window; scan
-      collected `number`s for gaps (alert on gap *ratio* — deleted/transferred are allowed); write a `data_quality`
-      record (count delta, gap ratio, error count) to the KB each run.
-      Test: `tests/test_audit.py` — offline: synthetic local vs remote → delta computed, gap-ratio flagged over
-      threshold; live GraphQL compare on a small repo = `@pytest.mark.integration`.
-- [x] **T0.12 Collector review follow-ups** (from the #3 review): log the cursor-stall case to the `data_quality`
-      metric (not just stderr) + fall back to GraphQL for single-timestamp clusters >1000; make non-network
-      failures in `main` loud (narrow the `except`, log the traceback) instead of looking like a transient skip;
-      add `pytest-timeout` so the stall-guard test fails fast rather than hanging the suite.
-      Test: `tests/test_audit.py::test_stall_recorded`; `tests/test_collector_robust.py` (timeout marker).
+- [x] **T0.10 Collector robustness (guardrail 1a: collect without error)** — per-repo `try/except` (one repo's failure doesn't abort the run); save state incrementally after each repo; retry+backoff on 5xx/timeouts; honor secondary rate limits (`Retry-After`); validate required fields (`number,url,updated_at,type`) + log/skip malformed; configurable `body` cap (raise for RAG).
+  - **Why:** a 24h unattended collector must survive one flaky repo / transient 5xx without losing the other repos' progress — partial success beats an all-or-nothing crash.
+  - **e.g.:** repo #2 throws mid-run → repo #1's cursor is already saved, so the next run resumes there instead of re-fetching everything.
+  - **Test:** `tests/test_collector_robust.py` — repo #2 raises ⇒ repo #1 cursor persisted; `5xx,5xx,200` ⇒ succeeds; `403 + Retry-After` waits then continues; malformed record skipped+logged; cursor monotonic.
+  - **Note:** partly shipped in #3 (cursor-windowing past the ~1000-item pagination cap + per-repo isolation + incremental state save, with tests). Remaining: retry/backoff, secondary-rate-limit, schema validation, configurable `body` cap.
+- [x] **T0.11 Collection data-quality guardrail (guardrail 1b: reconciliation)** — `src/audit.py`: compare local counts vs GitHub **GraphQL** `issues.totalCount + pullRequests.totalCount` over the window; scan collected `number`s for gaps (alert on gap *ratio* — deleted/transferred allowed); write a `data_quality` record (count delta, gap ratio, error count) to the KB each run.
+  - **Why:** "the collector ran without error" ≠ "we got everything" — reconciling against GitHub's own totals is the only way to *trust the numbers* every later stage builds on.
+  - **e.g.:** GitHub reports 420 issues in the window, we stored 400 → `data_quality.delta = -20` flagged, so a silent gap surfaces instead of poisoning the report.
+  - **Test:** `tests/test_audit.py` — offline: synthetic local vs remote → delta computed, gap-ratio flagged over threshold; live GraphQL compare on a small repo = `@pytest.mark.integration`.
+- [x] **T0.12 Collector review follow-ups** (from the #3 review) — log the cursor-stall case to the `data_quality` metric (not just stderr) + GraphQL fallback for single-timestamp clusters >1000; make non-network failures in `main` loud (narrow the `except`, log the traceback) instead of looking like a transient skip; add `pytest-timeout` so the stall-guard test fails fast.
+  - **Why:** the #3 fix worked but could hide real failures (a silent stall / a swallowed non-network bug reads like "nothing new") — make every failure mode visible + testable.
+  - **e.g.:** a single timestamp holds >1000 items (pagination cap) → GraphQL fallback fetches them + records a stall event, instead of silently truncating.
+  - **Test:** `tests/test_audit.py::test_stall_recorded`; `tests/test_collector_robust.py` (timeout marker).
 
 ## M0.6 — Storage: Firestore KB backend
 
@@ -210,46 +203,64 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Demo:** `STORE=firestore python -m src.collector` (against the Firestore emulator) · `python -m src.store.migrate`.
 > **Acceptance:** `pytest -m m0_6` green — the store contract test passes for **both** jsonl and firestore backends.
 
-- [x] **T0.6.1 Firestore store** — `src/store/firestore_store.py` implementing `store/base.py` (collection
-      `items` keyed `repo#number`; collection `state`).
-      Test: `tests/test_store_contract.py` — **one contract test parametrized over jsonl + firestore** so both
-      satisfy identical assertions; firestore param uses the **Firestore emulator**, marked `integration`.
+- [x] **T0.6.1 Firestore store** — `src/store/firestore_store.py` implementing `store/base.py` (collection `items` keyed `repo#number`; collection `state`).
+  - **Why:** the real shared KB — concurrent-safe reads/writes (scheduler writes while the dashboard reads), queryable by field, no whole-file rewrites like JSONL.
+  - **e.g.:** `STORE=firestore` → `upsert_items` writes one doc per issue keyed `vllm-project/vllm#123`; the dashboard reads it live.
+  - **Test:** `tests/test_store_contract.py` — **one contract test parametrized over jsonl + firestore** so both satisfy identical assertions; firestore param uses the **Firestore emulator**, marked `integration`.
 - [x] **T0.6.2 Store factory** — `src/store/__init__.py::get_store()` selects impl via env `STORE=jsonl|firestore`.
-      Test: `tests/test_store_factory.py` — env selects the right class (firestore import mocked).
+  - **Why:** callers ask for "the store" and get the configured backend — no agent hardcodes JSONL vs Firestore.
+  - **e.g.:** `STORE=firestore python -m src.collector` → same collector code, Firestore backend.
+  - **Test:** `tests/test_store_factory.py` — env selects the right class (firestore import mocked).
 - [x] **T0.6.3 Migration** — `python -m src.store.migrate` (jsonl → firestore).
-      Test: `tests/test_store_migrate.py` (`integration`) — sample jsonl → docs present in emulator.
+  - **Why:** carry the data already collected under JSONL into Firestore without re-fetching from GitHub.
+  - **e.g.:** `python -m src.store.migrate` → every `data/*.jsonl` item becomes a Firestore `items` doc.
+  - **Test:** `tests/test_store_migrate.py` (`integration`) — sample jsonl → docs present in emulator.
 
 ## M1 — Intelligence plane (inner loop)
 
 > **Expected output:** LLM-classified items (taxonomy + evidence) in the KB; versioned `taxonomy@v` + `policy@v`;
 > timestamped calibrated forecasts; per-category trend series; an LLM-written **cited** weekly report.
 > **Demo:** `python -m src.analyze` (classify new items) · `python -m src.report` (cited report) ·
-> `python -m src.forecast` (log predictions).
-> **Acceptance:** `pytest -m m1` green · the report's every claim line carries ≥1 evidence URL.
+> `python -m src.forecast` (log predictions) · `python -m dashboard` (thin read-only web view).
+> **Acceptance:** `pytest -m m1` green · the report's every claim line carries ≥1 evidence URL ·
+> the dashboard renders the latest report + trend charts.
 
 - [x] **T1.1 Embeddings + vector index** — `src/embed.py` (embed text/labels; NN search; backend TBD).
-      Test: `tests/test_embed.py` — with a deterministic fixture/mock model, NN of a query returns the
-      semantically closer of two docs.
+  - **Why:** semantic retrieval is the backbone of the cited report + candidate discovery — find related issues by meaning, not exact keywords.
+  - **e.g.:** query "hipBLAS build failure" → nearest neighbors surface the relevant ROCm build issues even without word overlap.
+  - **Test:** `tests/test_embed.py` — with a deterministic fixture/mock model, NN of a query returns the semantically closer of two docs.
 - [x] **T1.2 Taxonomy schema + versioning** — `src/taxonomy.py` (`taxonomy@vN` in KB, active pointer).
-      Test: `tests/test_taxonomy.py` — v1 → add category → v2; both retrievable; `active` returns v2.
+  - **Why:** the classification vocabulary must *evolve* (M2 adds/retires categories) while old labels stay interpretable — so it's versioned, not mutated.
+  - **e.g.:** `taxonomy@v1` → add "disaggregated-prefill" → `taxonomy@v2`; both retrievable, `active` points to v2.
+  - **Test:** `tests/test_taxonomy.py` — v1 → add category → v2; both retrievable; `active` returns v2.
 - [x] **T1.3 Policy object (versioned)** — `src/policy.py` (scoring weights, prompt templates, active taxonomy ref).
-      Test: `tests/test_policy.py` — versions are append-only/immutable; `get_active()` returns latest.
+  - **Why:** the policy is the agent's *learning state* — M2's grading updates it (`policy@v+1`); versioning makes "what changed and why" auditable.
+  - **e.g.:** `policy@v3` = {per-category weights, prompt templates, taxonomy@v2 ref}; the grader later proposes v4.
+  - **Test:** `tests/test_policy.py` — versions are append-only/immutable; `get_active()` returns latest.
 - [x] **T1.4 Analyst agent** — classify delta items into taxonomy via `llm.complete`; write labels + evidence to KB.
-      Test: `tests/test_analyst.py` — mock `llm.complete` → item updated with category + citation preserved.
+  - **Why:** turns raw collected items into the classified, evidence-linked signal every later stage (report, trends, candidates) reads.
+  - **e.g.:** issue #123 → `{category: "rocm-build", evidence: [url]}` written back to its KB record.
+  - **Test:** `tests/test_analyst.py` — mock `llm.complete` → item updated with category + citation preserved.
 - [x] **T1.5 Forecaster agent** — emit calibrated predictions `{claim, resolution_rule, prob, due_date, evidence}`.
-      Test: `tests/test_forecaster.py` — mock llm → stored prediction validates against schema (prob∈[0,1], due>now).
+  - **Why:** the self-evolution loop needs falsifiable, timestamped predictions to grade later — that's what makes the agent's judgment *measurable*.
+  - **e.g.:** `{claim: "spec-decoding lands in ROCm by Q4", prob: 0.7, due: 2026-12-31, evidence:[…]}` logged now, graded when it matures.
+  - **Test:** `tests/test_forecaster.py` — mock llm → stored prediction validates against schema (prob∈[0,1], due>now).
 - [x] **T1.6 Reporter v1 (LLM, cited)** — weekly report written from classified items.
-      Test: `tests/test_reporter_v1.py` — mock llm → **every claim line has ≥1 evidence URL** (evidence principle).
+  - **Why:** the human-facing deliverable — an LLM-written digest of what moved this week, every claim backed by a source link (evidence principle).
+  - **e.g.:** "Spec-decoding activity doubled ([#a](url), [#b](url)); ROCm builds saw 3 new failures ([#c](url))."
+  - **Test:** `tests/test_reporter_v1.py` — mock llm → **every claim line has ≥1 evidence URL** (evidence principle).
 - [x] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
-      Test: `tests/test_trends.py` — synthetic items across weeks → correct bucketed counts per category.
-- [ ] **T1.8 RAG evaluation guardrail (guardrail 2: a trustworthy score)** — `src/rag_eval.py` +
-      `tests/rag_eval/golden.jsonl` (hand-labeled query → relevant issue/PR ids). Compute **retrieval** metrics
-      (Recall@k, MRR, nDCG@k) and **generation** metrics (faithfulness / groundedness via LLM-as-judge,
-      citation-accuracy, hallucination-rate on absent-topic queries). Enforce thresholds (e.g. Recall@10 ≥ 0.8,
-      hallucination_rate = 0) and write scores to the KB each run for drift tracking.
-      Test: `tests/test_rag_eval.py` — offline: metric math on a fixed ranked list (known Recall@k/MRR/nDCG),
-      every claim carries a citation, an absent-topic query ⇒ "no evidence"; live retrieval + LLM-judge =
-      `@pytest.mark.integration`.
+  - **Why:** momentum over time (not a snapshot) is what reveals *direction* — which techniques are heating up/cooling — and feeds the dashboard charts.
+  - **e.g.:** `trends("quantization")` → weekly counts `[3,5,4,9,12]`, a rising topic.
+  - **Test:** `tests/test_trends.py` — synthetic items across weeks → correct bucketed counts per category.
+- [ ] **T1.8 RAG evaluation guardrail (guardrail 2: a trustworthy score)** — `src/rag_eval.py` + `tests/rag_eval/golden.jsonl` (hand-labeled query → relevant ids): **retrieval** metrics (Recall@k, MRR, nDCG@k) + **generation** metrics (faithfulness/groundedness via LLM-judge, citation-accuracy, hallucination-rate); enforce thresholds (e.g. Recall@10 ≥ 0.8, hallucination_rate = 0) + write scores to KB each run for drift.
+  - **Why:** the report is only worth trusting if retrieval/citation quality is *measured* — this is the gate that catches hallucination/drift before a bad report ships.
+  - **e.g.:** a run scores Recall@10 = 0.72 (< 0.8) → flagged; an absent-topic query must return "no evidence", not a fabricated cite.
+  - **Test:** `tests/test_rag_eval.py` — offline: metric math on a fixed ranked list (known Recall@k/MRR/nDCG), every claim carries a citation, an absent-topic query ⇒ "no evidence"; live retrieval + LLM-judge = `@pytest.mark.integration`.
+- [ ] **T1.9 Thin read-only dashboard** — early slice of the M5 dashboard pulled forward to right after M1; a local `dashboard/` web view over the KB (read via the store interface, so JSONL now / Firestore after M0.6 both work).
+  - **Why:** view M1 outputs (report · trends · forecasts) in one screen instead of running CLI commands — the "follow-along" tool; PLAN.md sanctions an early thin version as soon as there's a loop to watch.
+  - **e.g.:** `python -m dashboard` → localhost shows the latest cited report + per-category trend charts + the forecast log. Read-only, no auth.
+  - **Test:** `tests/test_dashboard.py` — seed a store fixture on `tmp_path`, assert the render functions return the report body + correct trend series (offline); a live server smoke = `@pytest.mark.integration`.
 
 ## M2 — Outer loop: grading + candidate discovery
 
@@ -259,31 +270,34 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Demo:** `python -m src.grade` (score past predictions) · `python -m src.candidates` (ranked queue with risk).
 > **Acceptance:** `pytest -m m2` green · candidates come out ranked with risk tiers + evidence links.
 
-- [ ] **T2.1 Grader** — `src/agents/grader.py`: resolve matured predictions vs reality (merged / in release /
-      adopted); compute precision/recall + Brier.
-      Test: `tests/test_grader.py` — synthetic predictions + outcomes → known metric values.
+- [ ] **T2.1 Grader** — `src/agents/grader.py`: resolve matured predictions vs reality (merged / in release / adopted); compute precision/recall + Brier.
+  - **Why:** grading its own past predictions is *the* self-evolution signal — without it the agent can't tell if its judgment is any good.
+  - **e.g.:** a Q3 forecast "X will merge" is now merged → scored a hit; aggregate → precision 0.68, Brier 0.19.
+  - **Test:** `tests/test_grader.py` — synthetic predictions + outcomes → known metric values.
 - [ ] **T2.2 Policy update from grades** — propose `policy@vN+1` from grading results.
-      Test: `tests/test_policy_update.py` — a low-precision category → its weight decreases in the new version.
+  - **Why:** closes the loop — grading is useless unless the scores actually reweight the policy that drives the next round.
+  - **e.g.:** a category with 0.3 precision → its scoring weight drops in `policy@v+1`; a reliable one gains.
+  - **Test:** `tests/test_policy_update.py` — a low-precision category → its weight decreases in the new version.
 - [ ] **T2.3 Curator** — `src/agents/curator.py`: propose new / retire dead taxonomy categories from activity.
-      Test: `tests/test_curator.py` — category with no activity for N weeks → flagged retire; a novel cluster →
-      proposed new category.
+  - **Why:** the taxonomy must track a moving field — new techniques appear, old ones die; a static vocabulary goes stale.
+  - **e.g.:** no activity in a category for N weeks → flagged retire; a novel issue cluster → proposed new category.
+  - **Test:** `tests/test_curator.py` — category with no activity for N weeks → flagged retire; a novel cluster → proposed new category.
 - [ ] **T2.4 Parity matrix** — `src/parity.py`: engine × capability with evidence + gap flags.
-      Test: `tests/test_parity.py` — synthetic capability signals → matrix cell populated + "present in fork,
-      missing upstream" gap flagged.
-- [ ] **T2.5 Candidate discovery + risk ranking** — `src/agents/scout.py`: candidates (ROCm-reproducible /
-      good-first-issue / parity gap), risk-tiered.
-      Test: `tests/test_scout.py` — fixture items → ranked candidates with risk tier + evidence present.
-- [ ] **T2.6 Cost-aware LLM provider selection (bandit)** — `src/llm_bandit.py`: a UCB-style bandit over the
-      `LLM_PROVIDER` options (claude_cli / claude_api / local-vLLM) using per-call reward (task success) vs
-      cost/latency from T0.7's metadata; agents ask the policy which provider to use. *(Borrowed from ShinkaEvolve.)*
-      Test: `tests/test_llm_bandit.py` — synthetic reward/cost history → bandit prefers the best reward-per-cost
-      provider; an unseen provider still gets explored.
-- [ ] **T2.7 Novelty / dedup filter before expensive evaluation** — `src/novelty.py`: reject a candidate *before*
-      a costly MI250 build if it is a near-duplicate of a prior attempt (embedding similarity ≥ threshold) or an
-      LLM-as-novelty-judge rules it redundant. Gates T3.2/T3.3. *(Borrowed from ShinkaEvolve — the biggest
-      sample-efficiency lever.)*
-      Test: `tests/test_novelty.py` — near-duplicate candidate rejected; a genuinely new one passes (embedding +
-      judge mocked).
+  - **Why:** the contribution strategy is "find what exists elsewhere but is missing upstream" — the matrix makes those gaps explicit.
+  - **e.g.:** (ROCm/vllm fork, "fp8 kv-cache") = present, (upstream vllm, same) = missing → gap flagged as a port candidate.
+  - **Test:** `tests/test_parity.py` — synthetic capability signals → matrix cell populated + "present in fork, missing upstream" gap flagged.
+- [ ] **T2.5 Candidate discovery + risk ranking** — `src/agents/scout.py`: candidates (ROCm-reproducible / good-first-issue / parity gap), risk-tiered.
+  - **Why:** this is the "*where can I contribute?*" output — turns signal into a prioritized, actionable queue for the M3 engineer.
+  - **e.g.:** ranked queue `[#c low-risk docs, #d med ROCm build bug, #e high parity port]`, each with evidence links.
+  - **Test:** `tests/test_scout.py` — fixture items → ranked candidates with risk tier + evidence present.
+- [ ] **T2.6 Cost-aware LLM provider selection (bandit)** — `src/llm_bandit.py`: a UCB-style bandit over `LLM_PROVIDER` (claude_cli / claude_api / local-vLLM) using per-call reward (task success) vs cost/latency from T0.7's metadata; agents ask the policy which provider to use. *(Borrowed from ShinkaEvolve.)*
+  - **Why:** different tasks warrant different models — spend big-model budget only where it pays off, cheap/local elsewhere — automatically, from measured reward-per-cost.
+  - **e.g.:** classification runs fine on local vLLM (cheap) while patch-writing routes to a stronger provider — the bandit learns this from outcomes.
+  - **Test:** `tests/test_llm_bandit.py` — synthetic reward/cost history → bandit prefers the best reward-per-cost provider; an unseen provider still gets explored.
+- [ ] **T2.7 Novelty / dedup filter before expensive evaluation** — `src/novelty.py`: reject a candidate *before* a costly MI250 build if it near-duplicates a prior attempt (embedding similarity ≥ threshold) or an LLM-as-novelty-judge rules it redundant. Gates T3.2/T3.3. *(Borrowed from ShinkaEvolve — the biggest sample-efficiency lever.)*
+  - **Why:** MI250 build+verify is the most expensive step — not re-attempting a near-duplicate candidate is the single biggest way to save that budget.
+  - **e.g.:** a new candidate 0.95-similar to a failed prior attempt → rejected before any build; a genuinely new one passes.
+  - **Test:** `tests/test_novelty.py` — near-duplicate candidate rejected; a genuinely new one passes (embedding + judge mocked).
 
 ## M3 — Contribution plane (MI250 verification oracle) — human-gated
 
@@ -294,28 +308,31 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Acceptance:** `pytest -m m3` green · (integration) a real MI250 run yields a verified patch · **T3.6 = a real
 > draft PR URL pasted in the checklist.**
 
-- [ ] **T3.1 Remote runner** — `src/runner.py`: run a command on `mi250-05x` over ssh, stream logs, capture
-      exit code + artifacts.
-      Test: `tests/test_runner.py` — mock subprocess/ssh → correct command composed + result parsed. Real ssh =
-      `integration` (runs only when `MI250_HOST` set).
+- [ ] **T3.1 Remote runner** — `src/runner.py`: run a command on `mi250-05x` over ssh, stream logs, capture exit code + artifacts.
+  - **Why:** the CPU agent needs hands on the GPU box — every repro/build/verify step is a command executed on MI250 with its output captured.
+  - **e.g.:** `run("mi250-051", "pytest test_rocm.py")` → streams logs, returns `{exit: 1, artifacts: […]}`.
+  - **Test:** `tests/test_runner.py` — mock subprocess/ssh → correct command composed + result parsed. Real ssh = `integration` (runs only when `MI250_HOST` set).
 - [ ] **T3.2 Repro harness** — given a candidate, run repro on MI250, capture failing signal → KB `runs`.
-      Test: `tests/test_repro.py` — mock runner returns a failing log → failing signal recorded.
-- [ ] **T3.3 Engineer patch loop** — `llm.complete` generates a patch on a fork branch → rebuild/test on MI250
-      → confirm signal flips.
-      Test: `tests/test_engineer.py` — mock llm+runner: fail→patch→pass ⇒ `verified=True`; fail→patch→fail ⇒
-      `verified=False` and **no PR**.
-- [ ] **T3.4 Ensemble self-review gate** — before the human gate, run N independent adversarial self-critiques of
-      the verified patch (multi-sample vote) via `llm.complete`; require a majority "looks correct" **in addition
-      to** the MI250 pass. Only patches passing **both** the hardware verify (T3.3) and self-review advance.
-      *(Borrowed from The AI Scientist's ensemble reviewer — beat single-reviewer reliability.)*
-      Test: `tests/test_self_review.py` — mock llm votes: majority-approve ⇒ advance; split/reject ⇒ hold (no gate).
-- [ ] **T3.5 Human gate** — assemble `{diff, risk badge, repro evidence, MI250 logs, self-review votes}`;
-      `gh pr create --draft` **only** after an explicit approve flag.
-      Test: `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked).
-      **HARD: nothing reaches upstream without approval.**
+  - **Why:** a fix is only credible if the bug was first *reproduced on real hardware* — the failing signal is the "before" half of the proof.
+  - **e.g.:** candidate #d → run its repro on mi250-051 → capture the failing assertion/log as the baseline signal.
+  - **Test:** `tests/test_repro.py` — mock runner returns a failing log → failing signal recorded.
+- [ ] **T3.3 Engineer patch loop** — `llm.complete` generates a patch on a fork branch → rebuild/test on MI250 → confirm signal flips.
+  - **Why:** the core contribution act — and MI250 is the empirical oracle: a patch counts as verified only when the failing signal actually flips to passing.
+  - **e.g.:** patch applied → rebuild on mi250-051 → the T3.2 failing test now passes ⇒ `verified=True`; still fails ⇒ no PR.
+  - **Test:** `tests/test_engineer.py` — mock llm+runner: fail→patch→pass ⇒ `verified=True`; fail→patch→fail ⇒ `verified=False` and **no PR**.
+- [ ] **T3.4 Ensemble self-review gate** — before the human gate, run N independent adversarial self-critiques of the verified patch (multi-sample vote) via `llm.complete`; require a majority "looks correct" **in addition to** the MI250 pass. *(Borrowed from The AI Scientist's ensemble reviewer.)*
+  - **Why:** a passing test can still hide a bad patch (reward-hacking, side effects) — an adversarial vote catches what the hardware check can't, before spending the human's attention.
+  - **e.g.:** 5 critiques, 4 say "correct" → advance to human gate; a 3–2 split → hold, don't gate.
+  - **Test:** `tests/test_self_review.py` — mock llm votes: majority-approve ⇒ advance; split/reject ⇒ hold (no gate).
+- [ ] **T3.5 Human gate** — assemble `{diff, risk badge, repro evidence, MI250 logs, self-review votes}`; `gh pr create --draft` **only** after an explicit approve flag.
+  - **Why:** the mandatory human checkpoint — nothing reaches upstream vLLM without a person seeing the full evidence bundle and approving (reputation safety).
+  - **e.g.:** `engineer --candidate d` prints the bundle; only `--approve` triggers `gh pr create --draft`.
+  - **Test:** `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked). **HARD: nothing reaches upstream without approval.**
 - [ ] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
-      Test: manual/`integration` — **draft PR URL pasted here**; checked only then.
-      > note: PR URL = …
+  - **Why:** the project's first actual upstream deliverable — proves the whole pipeline end-to-end on a low-risk change before attempting harder fixes.
+  - **e.g.:** a docs/typing fix flows repro→patch→verify→self-review→approve→ a real draft PR URL on vllm-project/vllm.
+  - **Test:** manual/`integration` — **draft PR URL pasted here**; checked only then.
+  - **Note:** PR URL = …
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
@@ -324,33 +341,34 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Demo:** `python -m src.orchestrator --once` (one dry-run tick) · tmux runbook in `docs/`.
 > **Acceptance:** `pytest -m m4` green · a dry-run tick completes and writes a run event **+ a heartbeat**.
 
-- [ ] **T4.1 Orchestrator** — `src/orchestrator.py`: pin active `policy@v`, route deltas → agents, enforce
-      cadences (data plane **daily**, `config.COLLECT_INTERVAL_HOURS=24` / intel daily+weekly / contribution
-      triggered).
-      Test: `tests/test_orchestrator.py` — fake clock + fake agents → correct routing per cadence; gate respected.
+- [ ] **T4.1 Orchestrator** — `src/orchestrator.py`: pin active `policy@v`, route deltas → agents, enforce cadences (data plane **daily**, `config.COLLECT_INTERVAL_HOURS=24` / intel daily+weekly / contribution triggered).
+  - **Why:** the conductor that turns a pile of agents into one always-on pipeline — right thing, right cadence, under one pinned policy version.
+  - **e.g.:** a tick pins `policy@v4`, runs collect (daily), classify+report (weekly), skips contribution unless a candidate triggers it.
+  - **Test:** `tests/test_orchestrator.py` — fake clock + fake agents → correct routing per cadence; gate respected.
 - [ ] **T4.2 Scheduler + tmux runbook** — launch on `ce-master` under tmux (cron/systemd); runbook in `docs/`.
-      Test: `tests/test_schedule_dryrun.py` — a dry-run tick runs end-to-end without error (agents stubbed).
+  - **Why:** "always-on" is the essence of the project — it must survive disconnects/restarts, not depend on a laptop staying open.
+  - **e.g.:** cron kicks the orchestrator daily in a tmux session on ce-master; `docs/RUNBOOK.md` says how to attach/restart.
+  - **Test:** `tests/test_schedule_dryrun.py` — a dry-run tick runs end-to-end without error (agents stubbed).
 - [ ] **T4.3 Locking / idempotency** — overlapping runs don't double-write.
-      Test: `tests/test_locking.py` — second concurrent run backs off; no duplicate KB writes.
+  - **Why:** a scheduled run + a manual run (or a slow run overlapping the next tick) must not corrupt the KB with duplicates.
+  - **e.g.:** a second run starts while the first is mid-flight → it backs off; no item written twice.
+  - **Test:** `tests/test_locking.py` — second concurrent run backs off; no duplicate KB writes.
 - [ ] **T4.4 Run events** — per-stage run records (stage, status, counts, duration) to KB for the dashboard.
-      Test: `tests/test_events.py` — a pipeline tick writes a run event with the expected fields.
-- [ ] **T4.5 Liveness: heartbeat + intermediate output (know what's running)** — every stage/agent writes its
-      lifecycle to KB `runs`: `started` → periodic `heartbeat` (current step + a rolling tail of intermediate
-      output) → `finished` / `failed`, each timestamped with the active `policy@v`. A run is **stalled** if its
-      last heartbeat is older than `N × expected_interval`; a crash must leave a `failed`/`stalled` record (never
-      silent). Powers the T5.8 health panel.
-      Test: `tests/test_liveness.py` — a stage emits started→heartbeat→finished with monotonic timestamps; a stale
-      heartbeat is classified `stalled`; an exception path records `failed` (nothing left silently "running").
-
-- [ ] **T4.6 Collector scheduler + health** — `scripts/collect.sh` runs `python -m src.collector` on a **cron**
-      schedule (ce-master); writes `data/last_run.json` (status / exit / timestamps / error tail) + `data/logs/`.
-      *(Scaffold shipped; follow-ups: real alerting (Slack/email), optional systemd timer.)*
-      Test: `tests/test_collect_health.py` — a stubbed run writes a well-formed `last_run.json` (ok + error cases).
-- [ ] **T4.7 Self-heal triage (human-gated)** — `scripts/triage.sh`: on a collector failure run `claude -p` to
-      diagnose and — only for a code bug, clean tree, no existing `triage/*` PR — fix on a branch, add a test, and
-      **open a PR** (never merges). *(Scaffold shipped; follow-ups: dedupe by error signature, record the attempt
-      in the run / `data_quality` metric.)*
-      Test: integration (needs `claude`+`gh`); the skip-guards are shell-checkable.
+  - **Why:** the audit trail — "what ran, when, how much, how long" — that the dashboard and any debugging read from.
+  - **e.g.:** a tick writes `{stage: collect, status: ok, items: 42, dur_s: 31}` to the `runs` collection.
+  - **Test:** `tests/test_events.py` — a pipeline tick writes a run event with the expected fields.
+- [ ] **T4.5 Liveness: heartbeat + intermediate output (know what's running)** — every stage/agent writes its lifecycle to KB `runs`: `started` → periodic `heartbeat` (current step + a rolling tail of intermediate output) → `finished` / `failed`, each stamped with the active `policy@v`; a run is **stalled** if its last heartbeat is older than `N × expected_interval`. Powers the T5.8 health panel.
+  - **Why:** a crash must never look like "still running" — the dashboard has to distinguish alive / stalled / failed (with partial output) or you can't trust what you see.
+  - **e.g.:** the engineer stage dies mid-build → its record shows `failed` (or `stalled` if silent), not a frozen "running".
+  - **Test:** `tests/test_liveness.py` — a stage emits started→heartbeat→finished with monotonic timestamps; a stale heartbeat is classified `stalled`; an exception path records `failed` (nothing left silently "running").
+- [ ] **T4.6 Collector scheduler + health** — `scripts/collect.sh` runs `python -m src.collector` on a **cron** schedule (ce-master); writes `data/last_run.json` (status / exit / timestamps / error tail) + `data/logs/`. *(Scaffold shipped; follow-ups: real alerting, optional systemd timer.)*
+  - **Why:** the collector is the data lifeline — it needs its own scheduled run + a health record so a silent collection failure is visible.
+  - **e.g.:** `data/last_run.json` = `{status: ok, items: 42, ts: …}`; on failure it carries the exit code + error tail.
+  - **Test:** `tests/test_collect_health.py` — a stubbed run writes a well-formed `last_run.json` (ok + error cases).
+- [ ] **T4.7 Self-heal triage (human-gated)** — `scripts/triage.sh`: on a collector failure run `claude -p` to diagnose and — only for a code bug, clean tree, no existing `triage/*` PR — fix on a branch, add a test, and **open a PR** (never merges). *(Scaffold shipped; follow-ups: dedupe by error signature.)*
+  - **Why:** an unattended pipeline should attempt to fix its own bugs — but as a *proposed PR*, keeping the human merge gate intact (no autonomous self-modification of main).
+  - **e.g.:** collector crashes on a new GitHub payload shape → triage opens a fix PR with a regression test for you to review.
+  - **Test:** integration (needs `claude`+`gh`); the skip-guards are shell-checkable.
 
 ## M5 — Dashboard (Firestore-backed; monitoring + trends + parity)
 
@@ -361,27 +379,38 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Acceptance:** `pytest -m m5` green · panels/charts render from a seeded KB · the health view shows a running
 > stage as active and a stale one as `stalled`.
 
-- [ ] **T5.1 Read layer** — `dashboard/api.py`: read-only access the UI consumes (items/trends/predictions/
-      candidates/parity/runs).
-      Test: `tests/test_dashboard_api.py` — seeded store → each endpoint returns the expected shape.
+- [ ] **T5.1 Read layer** — `dashboard/api.py`: read-only access the UI consumes (items/trends/predictions/candidates/parity/runs).
+  - **Why:** one clean read API keeps the UI decoupled from the KB backend (JSONL/Firestore) and keeps the dashboard strictly read-only.
+  - **e.g.:** `api.trends("quantization")` / `api.candidates()` return plain shapes the panels render.
+  - **Test:** `tests/test_dashboard_api.py` — seeded store → each endpoint returns the expected shape.
 - [ ] **T5.2 Monitoring panels** — collection stats, taxonomy timeline, prediction scoreboard, candidate queue.
-      Test: `tests/test_dashboard_panels.py` — panel data functions return expected shapes from fixtures.
+  - **Why:** the per-stage "is it working + what did it decide" view — the pipeline made legible at a glance.
+  - **e.g.:** a taxonomy-timeline panel shows when each category was added/retired; a scoreboard shows prediction precision over time.
+  - **Test:** `tests/test_dashboard_panels.py` — panel data functions return expected shapes from fixtures.
 - [ ] **T5.3 Trend visualizations** — category momentum over time.
-      Test: `tests/test_dashboard_trends.py` — series endpoint returns bucketed points.
+  - **Why:** the market-reading half of the dashboard — turn T1.7's series into charts that show where the field is heading.
+  - **e.g.:** a line chart of "spec decoding" vs "disaggregated prefill" activity across the last 12 weeks.
+  - **Test:** `tests/test_dashboard_trends.py` — series endpoint returns bucketed points.
 - [ ] **T5.4 Parity diagram** — engine × capability heatmap/matrix; each cell links to evidence.
-      Test: `tests/test_dashboard_parity.py` — matrix endpoint returns cells + evidence + gap flags.
+  - **Why:** the visual counterpart to M2's parity gaps — "who has what, who lags" legible instantly, every cell traceable to sources.
+  - **e.g.:** a heatmap (vllm · ROCm/vllm · SGLang · Dynamo · llm-d) × (paged-KV, spec-decode, fp8 …); red cells = upstream gaps.
+  - **Test:** `tests/test_dashboard_parity.py` — matrix endpoint returns cells + evidence + gap flags.
 - [ ] **T5.5 Pipeline data-flow diagram** — architecture view of the running system.
-      Test: `tests/test_dashboard_diagram.py` — diagram data builds from live stage metadata (smoke).
+  - **Why:** an at-a-glance map of the live pipeline (the rendered counterpart to PLAN.md's diagrams) so onlookers grasp the system fast.
+  - **e.g.:** the 3-plane flow rendered with each stage's current status pulled from live metadata.
+  - **Test:** `tests/test_dashboard_diagram.py` — diagram data builds from live stage metadata (smoke).
 - [ ] **T5.6 Review pane (folds in M3 gate)** — diff + risk + approve/hold in the same UI.
-      Test: `tests/test_dashboard_review.py` — approve action flips candidate status (gate mocked).
-- [ ] **T5.7 Guardrail panels** — data-quality (reconciliation delta, gap ratio, collector error-rate over time)
-      and RAG-eval scores (Recall@k, faithfulness, hallucination-rate) with drift lines + threshold markers.
-      Test: `tests/test_dashboard_guardrails.py` — seeded metrics → panels return series + threshold flags.
-- [ ] **T5.8 Live health / "what's running now" panel** — reads T4.5 events: per stage/agent show
-      **running / idle / stalled / failed** (from heartbeat age), the current step, elapsed time, and a live tail
-      of intermediate output; auto-refresh; a top-level green/red health badge.
-      Test: `tests/test_dashboard_health.py` — seeded run events → a running stage renders active with its step +
-      output tail; a stale heartbeat renders `stalled`; a `failed` event renders red.
+  - **Why:** merge monitoring + the human review gate into one place — approve/hold a patch without leaving the dashboard.
+  - **e.g.:** a candidate card shows the diff + risk badge + MI250 logs; an "approve" button flips it toward a draft PR.
+  - **Test:** `tests/test_dashboard_review.py` — approve action flips candidate status (gate mocked).
+- [ ] **T5.7 Guardrail panels** — data-quality (reconciliation delta, gap ratio, collector error-rate over time) and RAG-eval scores (Recall@k, faithfulness, hallucination-rate) with drift lines + threshold markers.
+  - **Why:** "trust the numbers" made visible — surface the T0.11 + T1.8 guardrails so drift/threshold breaches are seen, not buried.
+  - **e.g.:** a Recall@10 line dipping under the 0.8 marker turns the panel red before a bad report is trusted.
+  - **Test:** `tests/test_dashboard_guardrails.py` — seeded metrics → panels return series + threshold flags.
+- [ ] **T5.8 Live health / "what's running now" panel** — reads T4.5 events: per stage/agent show **running / idle / stalled / failed** (from heartbeat age), the current step, elapsed time, and a live tail of intermediate output; auto-refresh; a top-level green/red health badge.
+  - **Why:** the "is it alive right now?" view — the whole reason liveness (T4.5) exists; a stall must show red, never a frozen "running".
+  - **e.g.:** classifier = 🟢 running "item 40/120", collector = ⚪ idle, engineer = 🔴 stalled (heartbeat 20m old).
+  - **Test:** `tests/test_dashboard_health.py` — seeded run events → a running stage renders active with its step + output tail; a stale heartbeat renders `stalled`; a `failed` event renders red.
 
 ---
 
