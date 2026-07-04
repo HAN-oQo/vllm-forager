@@ -9,13 +9,26 @@ Storage: predictions are NOT bolted onto item records — T1.4's own review foun
 extra fields onto collector-owned item records gets silently clobbered the next time the
 collector re-fetches that item (``Store.upsert_items`` is a full replace, not a merge, on
 every backend). Predictions instead live in their own append-only log in the KB's generic
-state map, the same append-only-sequence pattern :mod:`src.taxonomy`/:mod:`src.policy` use for
-versions: ``prediction@1``, ``prediction@2``, ... plus one ``prediction_count`` index.
+state map: ``prediction@1``, ``prediction@2``, ... plus one ``prediction_count`` index.
+
+Known limitation (not fixed here): unlike :mod:`src.taxonomy`/:mod:`src.policy`, which hold a
+*small, curated* number of versions of one object, this log grows without bound (one entry
+per classified item). ``Store.get_state``/``set_state`` reload/rewrite the *entire* shared
+state map on every call, so :func:`list_predictions` (an unconditional full-log read on every
+:func:`forecast_store` run) and :func:`record_prediction` get more expensive as the log grows
+— and neither backend can filter by ``due_date``/resolution status server-side. The read-then
+-write in :func:`record_prediction` also has no locking, a race that matters more here than
+for taxonomy/policy since predictions are written continuously, not rarely. The real fix is a
+Store-level primitive for a large, independent, queryable record collection (distinct from
+the small state map and the GitHub-item-shaped ``items`` bucket) — recommend bundling this
+into the same Store-layer follow-up flagged by T1.4's review (item-field clobbering), since
+both point at the same underlying gap.
 """
 
 from __future__ import annotations
 
 import json
+import re
 import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -28,8 +41,15 @@ _COUNT_KEY = "prediction_count"
 
 # The format every other timestamp in this codebase already uses (collector.py's cursor,
 # GitHub's own API) — keeping predictions' timestamps in the same shape avoids a second,
-# incompatible date convention in the KB.
+# incompatible date convention in the KB. Only used to *render* timestamps we generate
+# ourselves (created_at); see _parse_ts for what we accept back from the model.
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+# What we accept when *parsing* a timestamp: the base second-precision form, with optional
+# fractional seconds and a "Z"/"+00:00"-style UTC marker — an LLM told to use _TS_FORMAT
+# routinely still adds milliseconds or spells the offset differently, so exact-string
+# matching (a plain strptime) would silently reject most real (non-mocked) replies.
+_TS_RE = re.compile(r"^(?P<base>\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.\d+)?(?:Z|\+00:?00)?$")
 
 _PREDICTION_SCHEMA = {
     "type": "object",
@@ -48,11 +68,26 @@ class ForecastError(RuntimeError):
 
 
 def _parse_ts(raw: str) -> datetime:
-    """Parse a ``_TS_FORMAT`` timestamp; raise :class:`ForecastError` (not ValueError)."""
+    """Parse a UTC timestamp (tolerating fractional seconds and a "Z"/"+00:00" marker).
+
+    Raises:
+        ForecastError: `raw` doesn't match :data:`_TS_RE` (not a bare ValueError) — a non-UTC
+            offset (e.g. ``+05:00``) is rejected rather than silently misread as UTC.
+    """
+    match = _TS_RE.match(raw.strip())
+    if not match:
+        raise ForecastError(f"{raw!r} is not a valid UTC timestamp")
+    return datetime.strptime(match.group("base"), "%Y-%m-%dT%H:%M:%S").replace(tzinfo=timezone.utc)
+
+
+def _parse_count(raw: str | None) -> int:
+    """Parse the prediction-count index; raise :class:`ForecastError` (not ValueError)."""
+    if not raw:
+        return 0
     try:
-        return datetime.strptime(raw, _TS_FORMAT).replace(tzinfo=timezone.utc)
+        return int(raw)
     except ValueError as exc:
-        raise ForecastError(f"{raw!r} is not a valid {_TS_FORMAT!r} timestamp") from exc
+        raise ForecastError(f"corrupt prediction_count {raw!r}") from exc
 
 
 @dataclass(frozen=True)
@@ -161,8 +196,7 @@ def forecast_item(item: dict, *, now: datetime | None = None) -> Prediction:
 
 def record_prediction(store: Store, prediction: Prediction) -> int:
     """Append `prediction` to the KB's prediction log; return its 1-based sequence number."""
-    raw = store.get_state(_COUNT_KEY)
-    next_id = (int(raw) if raw else 0) + 1
+    next_id = _parse_count(store.get_state(_COUNT_KEY)) + 1
     store.set_state(f"{_PREDICTION_KEY_PREFIX}{next_id}", prediction.to_json())
     store.set_state(_COUNT_KEY, str(next_id))
     return next_id
@@ -170,8 +204,7 @@ def record_prediction(store: Store, prediction: Prediction) -> int:
 
 def list_predictions(store: Store) -> list[Prediction]:
     """Return every recorded prediction, oldest first."""
-    raw = store.get_state(_COUNT_KEY)
-    count = int(raw) if raw else 0
+    count = _parse_count(store.get_state(_COUNT_KEY))
     predictions = []
     for i in range(1, count + 1):
         stored = store.get_state(f"{_PREDICTION_KEY_PREFIX}{i}")
@@ -185,9 +218,13 @@ def forecast_store(store: Store, *, now: datetime | None = None) -> list[Predict
 
     "Delta" here is by evidence, not an item-record field (see the module docstring on why):
     an item is skipped once any of its own URLs appears in an existing prediction's evidence.
-    A failing item (``llm.LLMError``/``ForecastError``) is skipped and logged rather than
-    losing every other item's already-produced prediction in the same run. `now` fixes the
-    "made at" timestamp for every prediction in this run (see :func:`forecast_item`).
+    An item with no ``url`` is skipped entirely — it can't carry real evidence (the evidence
+    principle), and matching it against `already_forecast` by absence would either wrongly
+    treat it as forecast-already or re-forecast it forever, depending on how "missing" and
+    "empty" compare. A failing item (``llm.LLMError``/``ForecastError``) is skipped and
+    logged rather than losing every other item's already-produced prediction in the same run.
+    `now` fixes the "made at" timestamp for every prediction in this run (see
+    :func:`forecast_item`).
 
     Returns the newly-recorded predictions (``[]`` if there was nothing to do).
     """
@@ -195,7 +232,7 @@ def forecast_store(store: Store, *, now: datetime | None = None) -> list[Predict
     pending = [
         item
         for item in store.query()
-        if item.get("category") and item.get("url") not in already_forecast
+        if item.get("category") and item.get("url") and item["url"] not in already_forecast
     ]
     predictions = []
     for item in pending:

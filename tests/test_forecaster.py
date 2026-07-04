@@ -99,6 +99,44 @@ def test_forecast_item_non_dict_reply_raises(monkeypatch: pytest.MonkeyPatch) ->
         forecaster.forecast_item(_item("o/r", 1, "x"), now=_NOW)
 
 
+@pytest.mark.parametrize(
+    "due_date",
+    [
+        "2026-02-01T00:00:00Z",
+        "2026-02-01T00:00:00.123Z",
+        "2026-02-01T00:00:00+00:00",
+        "2026-02-01T00:00:00.123456+0000",
+    ],
+)
+def test_forecast_item_tolerates_iso8601_variants(
+    monkeypatch: pytest.MonkeyPatch, due_date: str
+) -> None:
+    """Regression: a plain strptime used to reject anything but the exact _TS_FORMAT string,
+    which real (non-mocked) LLM replies routinely deviate from (millis, "+00:00" vs "Z")."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply(due_date=due_date))
+    prediction = forecaster.forecast_item(_item("o/r", 1, "x"), now=_NOW)
+    assert prediction.due_date == due_date
+
+
+def test_forecast_item_rejects_non_utc_offset(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-zero offset is rejected rather than silently misread as UTC."""
+    monkeypatch.setattr(
+        llm, "complete", lambda *a, **k: _reply(due_date="2026-02-01T00:00:00+05:00")
+    )
+    with pytest.raises(forecaster.ForecastError, match="not a valid UTC timestamp"):
+        forecaster.forecast_item(_item("o/r", 1, "x"), now=_NOW)
+
+
+def test_prediction_from_json_malformed_raises() -> None:
+    with pytest.raises(forecaster.ForecastError, match="corrupt prediction record"):
+        forecaster.Prediction.from_json("not valid json")
+
+
+def test_prediction_from_json_missing_field_raises() -> None:
+    with pytest.raises(forecaster.ForecastError, match="corrupt prediction record"):
+        forecaster.Prediction.from_json('{"claim": "c"}')
+
+
 def test_prediction_json_roundtrip() -> None:
     original = forecaster.Prediction(
         claim="c",
@@ -190,3 +228,40 @@ def test_forecast_store_skips_failing_item_and_persists_the_rest(
 def test_forecast_store_no_pending_returns_empty(tmp_path) -> None:
     store = JsonlStore(tmp_path)
     assert forecaster.forecast_store(store) == []
+
+
+def test_forecast_store_skips_items_with_no_url(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a url-less item used to be re-forecast forever (None never matched the
+    stored "" evidence) and would have persisted an empty-string, non-citing evidence."""
+    store = JsonlStore(tmp_path)
+    item = _item("o/r", 1, "no url", category="rocm-build")
+    del item["url"]
+    store.upsert_items([item])
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+
+    assert forecaster.forecast_store(store, now=_NOW) == []
+    assert forecaster.list_predictions(store) == []
+    # a second run doesn't behave any differently — it's not a transient "not yet" state
+    assert forecaster.forecast_store(store, now=_NOW) == []
+
+
+def test_record_prediction_corrupt_count_raises(tmp_path) -> None:
+    store = JsonlStore(tmp_path)
+    store.set_state("prediction_count", "not-a-number")
+    p = forecaster.Prediction(
+        claim="c",
+        resolution_rule="r",
+        prob=0.5,
+        due_date="2026-02-01T00:00:00Z",
+        evidence=("http://x/1",),
+        created_at="2026-01-01T00:00:00Z",
+    )
+    with pytest.raises(forecaster.ForecastError, match="corrupt prediction_count"):
+        forecaster.record_prediction(store, p)
+
+
+def test_list_predictions_corrupt_count_raises(tmp_path) -> None:
+    store = JsonlStore(tmp_path)
+    store.set_state("prediction_count", "not-a-number")
+    with pytest.raises(forecaster.ForecastError, match="corrupt prediction_count"):
+        forecaster.list_predictions(store)
