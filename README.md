@@ -103,15 +103,29 @@ claude                                    # then: Shift+Tab (Accept-Edits) → /
 PR → `/code-review --comment` → poll until **you** merge → next todo, pausing at each milestone boundary. It never
 self-merges. (Omit `/dev-loop` to drive a manual, step-by-step session.)
 
-**Scheduled collector** — runs the product on a 24h cron, with health + self-heal:
+**Data collector** — runs the product on a schedule. It also does `git checkout`/branches, so give it its **own
+clone** (never collides with `/dev-loop`) and point both clones at one shared data dir:
 
 ```bash
-# on ce-master (set GITHUB_TOKEN in .env first)
-crontab -e
-7 4 * * *  cd ~/vllm-forager && scripts/collect.sh >> data/logs/cron.log 2>&1
+# on ce-master, one-time
+mkdir -p ~/forager-data
+gh repo clone HAN-oQo/vllm-forager ~/vllm-forager-collect
+cd ~/vllm-forager-collect
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt
+cp ~/vllm-forager/.env .env
+echo "FORAGER_DATA_DIR=$HOME/forager-data" >> .env                 # share data
+echo "FORAGER_DATA_DIR=$HOME/forager-data" >> ~/vllm-forager/.env  # dev clone too
 ```
 
-`scripts/collect.sh` records health to `data/last_run.json`; on failure `scripts/triage.sh` opens a **fix PR**
-(never merges). Run it from a separate clone than an active `/dev-loop` session.
+Then run the collect agent in that clone:
+
+```bash
+cd ~/vllm-forager-collect && tmux new -s collect
+claude                                    # then: Shift+Tab (Accept-Edits) → /loop 6h /collect-loop
+```
+
+`/collect-loop` each cycle: collect → report counts, or on failure diagnose (transient → wait; real bug → fix PR,
+never merges). **Separate clones = no git collision; shared `FORAGER_DATA_DIR` = shared data.** (`docs/RUNBOOK.md`
+also covers a simpler cron + `scripts/collect.sh` fallback.)
 
 Watch or steer either: `ssh ce-master && tmux attach -t dev`. Full operator guide: **`docs/RUNBOOK.md`**.
