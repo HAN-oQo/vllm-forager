@@ -317,6 +317,9 @@ def main(argv: list[str] | None = None) -> None:
         # diagnostic must not itself abort collection of the records already fetched.
         # `remote_fetcher=audit.remote_counts` is a live attribute lookup at call time (not
         # record_stall's early-bound default), so tests can monkeypatch audit.remote_counts.
+        # `data_dir=config.DATA_DIR` is explicit (T0.6.2): `store` may now be a FirestoreStore
+        # (no `.data_dir`), and record_stall's own data_dir inference would otherwise raise —
+        # the data_quality audit trail always lives on local disk regardless of item backend.
         try:
             audit.record_stall(
                 store,
@@ -324,6 +327,7 @@ def main(argv: list[str] | None = None) -> None:
                 window_since,
                 remote_fetcher=audit.remote_counts,
                 checked_at=now,
+                data_dir=config.DATA_DIR,
             )
         except Exception:
             # Same "loud, but isolated" contract as main()'s per-repo except below: a bug in
