@@ -170,6 +170,50 @@ def test_audit_repo_appends_across_runs(tmp_path):
     assert len(lines) == 2  # one record appended per run (history retained)
 
 
+# ---------------------------------------------------- record_stall (T0.12 follow-up)
+
+
+def test_stall_recorded(tmp_path):
+    store = JsonlStore(tmp_path)
+    fake_remote = lambda repo, since: {"total": 1234}  # noqa: E731
+
+    rec = audit.record_stall(
+        store,
+        "o/r",
+        "2025-06-01T00:00:00Z",
+        remote_fetcher=fake_remote,
+        checked_at="2026-07-04T00:00:00Z",
+    )
+    assert rec == {
+        "repo": "o/r",
+        "reason": "cursor_stall",
+        "window_since": "2025-06-01T00:00:00Z",
+        "remote_total": 1234,
+        "flagged": True,
+    }
+
+    # Persisted to the same audit sink as reconcile() records (subdir, so query() ignores it).
+    sink = tmp_path / "audit" / "data_quality.jsonl"
+    written = [json.loads(line) for line in sink.read_text().splitlines() if line.strip()]
+    assert len(written) == 1
+    assert written[0]["reason"] == "cursor_stall"
+    assert written[0]["checked_at"] == "2026-07-04T00:00:00Z"
+
+
+def test_stall_recorded_requires_data_dir_for_non_jsonl_store(tmp_path):
+    class NoDirStore:
+        pass  # no `data_dir` attribute — mimics a future non-JSONL Store
+
+    with pytest.raises(TypeError):
+        audit.record_stall(
+            NoDirStore(),
+            "o/r",
+            "2025-06-01T00:00:00Z",
+            remote_fetcher=lambda repo, since: {"total": 1},
+            checked_at="2026-07-04T00:00:00Z",
+        )
+
+
 # ------------------------------------------------------------- live GraphQL smoke
 
 

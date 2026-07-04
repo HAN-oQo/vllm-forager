@@ -56,6 +56,8 @@ def test_fetch_repo_windows_past_page_cap(monkeypatch):
     assert sorted(r["number"] for r in out) == [1, 2, 3, 4, 5, 6]  # past 2-page cap, #4 deduped
 
 
+@pytest.mark.timeout(5)  # backstop (T0.12): a regression reintroducing the infinite loop must
+# fail the suite fast instead of hanging CI.
 def test_fetch_repo_stall_guard_terminates(monkeypatch):
     """Every page full + one shared timestamp → cursor can't advance; must stop, not hang."""
     monkeypatch.setattr(config, "PER_PAGE", 2)
@@ -66,8 +68,12 @@ def test_fetch_repo_stall_guard_terminates(monkeypatch):
         return FakeResp(200, [_rec(10 * p + 1, "t"), _rec(10 * p + 2, "t")])
 
     monkeypatch.setattr(collector.requests, "get", fake_get)
-    out = collector.fetch_repo("o/r", "s0")  # returns instead of looping forever
-    assert len(out) >= 1
+    stalls = []
+    out = collector.fetch_repo(
+        "o/r", "s0", on_stall=lambda slug, since: stalls.append((slug, since))
+    )
+    assert len(out) >= 1  # returns instead of looping forever
+    assert stalls == [("o/r", "t")]  # on_stall fires exactly once, at the stuck cursor value
 
 
 def test_main_isolates_repo_failure_and_saves_state(tmp_path, monkeypatch):
@@ -79,9 +85,9 @@ def test_main_isolates_repo_failure_and_saves_state(tmp_path, monkeypatch):
     )
     monkeypatch.setattr(sys, "argv", ["collector"])
 
-    def fake_fetch(slug, since):
+    def fake_fetch(slug, since, on_stall=None):
         if slug == "o/bad":
-            raise RuntimeError("boom")
+            raise RuntimeError("boom")  # a non-network bug — still isolated (T0.12)
         return [_rec(1, "2025-01-01T00:00:00Z") | {"repo": slug}]
 
     monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
@@ -119,7 +125,7 @@ def test_main_uses_lookback_window(tmp_path, monkeypatch):
 
     seen = {}
 
-    def fake_fetch(slug, since):
+    def fake_fetch(slug, since, on_stall=None):
         seen["since"] = since
         return []
 
@@ -264,8 +270,99 @@ def test_state_cursor_is_monotonic(tmp_path, monkeypatch):
 
     old_cursor = "2000-01-01T00:00:00Z"
     collector._save_state({"o/r": old_cursor})
-    monkeypatch.setattr(collector, "fetch_repo", lambda slug, since: [])
+    monkeypatch.setattr(collector, "fetch_repo", lambda slug, since, on_stall=None: [])
     collector.main([])  # exercise the argv seam (no sys.argv monkeypatch needed)
 
     new_cursor = json.loads((tmp_path / "state.json").read_text())["o/r"]
     assert new_cursor > old_cursor  # advanced forward — never rewound
+
+
+# ===================================================================================
+# T0.12: narrowed except in main() — network failures stay a quiet skip; anything else
+# (a real bug) is loud, with a full traceback, while still isolating the repo.
+# ===================================================================================
+
+
+def _run_main_with_fetch(tmp_path, monkeypatch, fake_fetch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(config, "REPOS", [{"slug": "o/r", "role": "x"}])
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    collector.main([])
+
+
+def test_main_network_failure_is_a_quiet_skip(tmp_path, monkeypatch, capsys):
+    def fake_fetch(slug, since, on_stall=None):
+        raise requests.ConnectionError("connection reset")
+
+    _run_main_with_fetch(tmp_path, monkeypatch, fake_fetch)
+    err = capsys.readouterr().err
+    assert "skipping (cursor preserved)" in err
+    assert "UNEXPECTED" not in err
+    assert "Traceback" not in err  # no traceback dump for an expected/transient failure
+
+
+def test_main_non_network_failure_is_loud_with_traceback(tmp_path, monkeypatch, capsys):
+    def fake_fetch(slug, since, on_stall=None):
+        raise TypeError("not a network problem — a real bug")
+
+    _run_main_with_fetch(tmp_path, monkeypatch, fake_fetch)
+    err = capsys.readouterr().err
+    assert "UNEXPECTED failure" in err
+    assert "skipping (cursor preserved)" in err  # still isolated — the run continues
+    assert "Traceback" in err and "TypeError" in err  # full traceback, not a quiet skip
+
+
+# =========================================================================
+# T0.12: cursor-stall recorded to data_quality (not just stderr).
+# =========================================================================
+
+
+def test_main_records_stall_via_audit(tmp_path, monkeypatch):
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(config, "REPOS", [{"slug": "o/r", "role": "x"}])
+
+    def fake_fetch(slug, since, on_stall=None):
+        if on_stall is not None:
+            on_stall(slug, since)  # simulate the real fetch_repo hitting the stall guard
+        return []
+
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    from src import audit
+
+    monkeypatch.setattr(audit, "remote_counts", lambda repo, since: {"total": 42})
+    collector.main([])
+
+    sink = tmp_path / "audit" / "data_quality.jsonl"
+    assert sink.exists()
+    written = [json.loads(line) for line in sink.read_text().splitlines() if line.strip()]
+    assert written[-1]["repo"] == "o/r"
+    assert written[-1]["reason"] == "cursor_stall"
+    assert written[-1]["remote_total"] == 42
+    assert written[-1]["flagged"] is True
+
+
+def test_main_stall_recording_failure_does_not_abort_repo(tmp_path, monkeypatch, capsys):
+    """If the GraphQL fallback itself fails, that's a diagnostic failure — not fatal."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(config, "REPOS", [{"slug": "o/r", "role": "x"}])
+
+    def fake_fetch(slug, since, on_stall=None):
+        if on_stall is not None:
+            on_stall(slug, since)
+        return [_rec(1, "2025-01-01T00:00:00Z") | {"repo": slug}]
+
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    from src import audit
+
+    def broken_remote(repo, since):
+        raise requests.ConnectionError("graphql unreachable")
+
+    monkeypatch.setattr(audit, "remote_counts", broken_remote)
+    collector.main([])  # must not raise — records the fetched item despite the stall-log failure
+
+    assert (tmp_path / "o__r.jsonl").exists()
+    err = capsys.readouterr().err
+    assert "failed to record stall" in err
