@@ -144,17 +144,29 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 
 - [x] **T0.0 Dev tooling** — black + ruff + mypy + pre-commit + pytest configured (`pyproject.toml`,
       `.pre-commit-config.yaml`, `pytest.ini`, `requirements-dev.txt`).
+      **Why:** enforce one formatting/lint/type/test standard across every session + CI, so nothing drifts.
+      **e.g.:** `pre-commit run --all-files` → black/ruff/mypy/hygiene all green in one shot.
       Test: `pre-commit run --all-files` clean · `pytest` green.
 - [x] **T0.1 Collector: incremental GitHub issue/PR fetch** — `src/collector.py::fetch_repo`.
+      **Why:** pull issues+PRs updated only since the last run (not the whole history) — saves time + rate limit.
+      **e.g.:** `fetch_repo("vllm-project/vllm", "2026-01-01T…")` → normalized issue/PR dicts updated since then.
       Test: `tests/test_collector.py::test_fetch_repo_pagination`, `::test_fetch_repo_404` (mocks `requests`,
       asserts paging stops at `< PER_PAGE` and 404 → `[]`).
 - [x] **T0.2 Normalization schema** — `src/collector.py::_normalize`.
+      **Why:** flatten GitHub's varied payloads into one minimal schema so later stages consume a consistent shape.
+      **e.g.:** raw issue → `{repo, number, type:"issue|pr", title, labels, url, updated_at, body[:4000]}`.
       Test: `tests/test_collector.py::test_normalize_issue_vs_pr`, `::test_normalize_body_truncated_and_defaults`.
 - [x] **T0.3 JSONL upsert store** — `src/collector.py::_merge_jsonl`.
+      **Why:** re-fetched items overwrite by number (no duplicates, always latest), persisted to a per-repo JSONL.
+      **e.g.:** #123 already stored + an updated copy arrives → that one line is replaced, the rest untouched.
       Test: `tests/test_collector.py::test_merge_jsonl_upsert_and_order`.
 - [x] **T0.4 Incremental state cursor** — `src/collector.py::_load_state/_save_state`.
+      **Why:** remember each repo's last-collected time so the next run only fetches newer items (incremental).
+      **e.g.:** `data/state.json` = `{"vllm-project/vllm": "2026-07-03T…Z"}` → next run uses that as `since`.
       Test: `tests/test_collector.py::test_state_roundtrip`.
 - [x] **T0.5 Rate-limit handling + auth headers** — `src/collector.py::_headers/_sleep_for_rate_limit`.
+      **Why:** a token lifts the limit 60→5000/hr, and on exhaustion we wait for reset instead of crashing.
+      **e.g.:** `403` + `X-RateLimit-Remaining: 0` → sleep until reset then retry; `GITHUB_TOKEN` → `Bearer` header.
       Test: `tests/test_collector.py::test_headers_token`, `::test_rate_limit_no_wait_on_ok`,
       `::test_rate_limit_waits_on_403`.
 - [ ] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`,
