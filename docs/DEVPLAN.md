@@ -223,7 +223,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Demo:** `python -m src.analyze` (classify new items) · `python -m src.report` (cited report) ·
 > `python -m src.forecast` (log predictions) · `python -m dashboard` (thin read-only web view).
 > **Acceptance:** `pytest -m m1` green · the report's every claim line carries ≥1 evidence URL ·
-> the dashboard renders the latest report + trend charts.
+> the dashboard renders the latest report + trend charts (superseded by T1.5.5's tree UI, below).
 
 - [x] **T1.1 Embeddings + vector index** — `src/embed.py` (embed text/labels; NN search; backend TBD).
   - **Why:** semantic retrieval is the backbone of the cited report + candidate discovery — find related issues by meaning, not exact keywords.
@@ -259,7 +259,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Test:** `tests/test_rag_eval.py` — offline: metric math on a fixed ranked list (known Recall@k/MRR/nDCG), every claim carries a citation, an absent-topic query ⇒ "no evidence"; live retrieval + LLM-judge = `@pytest.mark.integration`.
 - [x] **T1.9 Thin read-only dashboard** — early slice of the M5 dashboard pulled forward to right after M1; a local `dashboard/` web view over the KB (read via the store interface, so JSONL now / Firestore after M0.6 both work).
   - **Why:** view M1 outputs (report · trends · forecasts) in one screen instead of running CLI commands — the "follow-along" tool; PLAN.md sanctions an early thin version as soon as there's a loop to watch.
-  - **e.g.:** `python -m dashboard` → localhost shows the latest cited report + per-category trend charts + the forecast log. Read-only, no auth.
+  - **e.g.:** `python -m dashboard` → localhost shows the latest cited report + per-category trend charts + the forecast log. Read-only, no auth. (T1.5.5 later replaces the flat report section with a collapsible taxonomy tree — see below.)
   - **Test:** `tests/test_dashboard.py` — seed a store fixture on `tmp_path`, assert the render functions return the report body + correct trend series (offline); a live server smoke = `@pytest.mark.integration`.
 - [x] **T1.10 Store merge-on-upsert semantics** — `src/store/base.py` + both backends: `upsert_items` merges the given fields onto an existing `(repo, number)` record instead of fully replacing it, across `JsonlStore` and `FirestoreStore` (flagged as a known limitation in T1.4's `analyst.py` docstring).
   - **Why:** the collector's `_normalize()` never carries `category`/`taxonomy_version` forward, so re-fetching an already-classified item (any new comment/label bumps `updated_at` back into the incremental window) silently wiped its classification on the next collection cycle.

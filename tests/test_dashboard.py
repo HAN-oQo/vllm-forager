@@ -17,7 +17,7 @@ from pathlib import Path
 
 import pytest
 
-from dashboard.render import _state_chip, render_forecasts, render_page, render_trends
+from dashboard.render import _safe_href, _state_chip, render_forecasts, render_page, render_trends
 from dashboard.server import _make_handler, serve
 from src import llm
 from src.agents import summarizer
@@ -116,6 +116,48 @@ def test_state_chip_closed_pr_is_merged() -> None:
     assert _state_chip({"type": "pr", "state": "closed"}) == ("merged", "merged")
 
 
+def test_state_chip_missing_state_defaults_to_open() -> None:
+    """A malformed/legacy record with no `state` at all renders as "open pr", not "merged" —
+    claiming an unknown state is open is the less misleading of the two guesses."""
+    assert _state_chip({"type": "pr"}) == ("open", "open pr")
+
+
+# --------------------------------------------------------------------- _safe_href
+
+
+def test_safe_href_allows_http_and_https() -> None:
+    assert _safe_href("http://x/1") == "http://x/1"
+    assert _safe_href("https://x/1") == "https://x/1"
+
+
+def test_safe_href_rejects_javascript_scheme() -> None:
+    assert _safe_href("javascript:alert(1)") == ""
+
+
+def test_render_page_never_links_a_javascript_url(tmp_path: Path) -> None:
+    """A malformed/non-GitHub item `url` must never become a clickable href — this dashboard
+    has no auth and renders whatever the KB contains."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items(
+        [
+            {
+                "repo": "o/r",
+                "number": 1,
+                "type": "pr",
+                "title": "x",
+                "state": "open",
+                "url": "javascript:alert(document.cookie)",
+                "created_at": "2026-01-01T00:00:00Z",
+                "path": ["build"],
+            }
+        ]
+    )
+
+    page = render_page(store)
+
+    assert "javascript:" not in page
+
+
 # --------------------------------------------------------------------- report tree section
 
 
@@ -149,7 +191,21 @@ def test_tree_section_renders_nested_nodes_with_summary_and_evidence_links(
     assert '<span class="chip open">open pr</span>' in page  # vllm#3, open
 
 
-def test_tree_section_no_classified_items_yet_shows_placeholder(tmp_path: Path) -> None:
+def test_tree_section_empty_store_shows_placeholder(tmp_path: Path) -> None:
+    """`tree_from_store` returns `[]` only for a literally empty store — see
+    `_tree_section_html`'s own docstring for why unclassified-but-present items don't hit
+    this (they render under `Other` instead; see the test below)."""
+    store = JsonlStore(tmp_path)
+
+    page = render_page(store)
+
+    assert "No classified items yet" in page
+    assert "<details" not in page
+
+
+def test_tree_section_unclassified_items_render_under_other(tmp_path: Path) -> None:
+    """An item with no `path` yet renders under a real `Other` node, not the placeholder —
+    `build_tree` (T1.5.4) folds path-less items there rather than treating them as empty."""
     store = JsonlStore(tmp_path)
     store.upsert_items(
         [
@@ -167,7 +223,8 @@ def test_tree_section_no_classified_items_yet_shows_placeholder(tmp_path: Path) 
 
     page = render_page(store)
 
-    assert "No classified items yet" in page
+    assert '<span class="name">Other</span>' in page
+    assert "run <code>python -m src.analyze</code>" not in page
 
 
 def test_tree_filter_script_and_matchable_text_are_present(tmp_path: Path) -> None:

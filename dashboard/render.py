@@ -20,6 +20,12 @@ Known limitation (not fixed here): the collector normalizes only ``state`` (open
 a ``merged``/``merged_at`` field, so a PR's chip treats "closed" as "merged" — a closed-without
 -merging PR would be mislabeled. Distinguishing the two needs a collector change (capturing
 GitHub's own ``merged``/``merged_at`` fields), out of scope for a dashboard-rendering todo.
+
+Known limitation (not fixed here): every request re-derives the tree (one `Store.query()`) and
+trends (a second, independent `Store.query()`), plus one `get_state()` per taxonomy tree node
+for its summary and one per historical prediction — no caching, batching, or cross-section
+sharing anywhere. See `dashboard/server.py`'s own docstring; fixing this needs a caching layer
+this thin M1 slice doesn't have.
 """
 
 from __future__ import annotations
@@ -27,9 +33,16 @@ from __future__ import annotations
 from html import escape
 
 from src.agents.forecaster import Prediction, list_predictions
+from src.agents.reporter import repo_number_label
 from src.agents.reporter_v1 import TreeNode, tree_from_store
 from src.store.base import Store
 from src.trends import trends_from_store
+
+# Only these schemes are ever rendered as a clickable href — GitHub-sourced items always carry
+# an http(s) url (see reporter.evidence_url), but this dashboard has no auth and renders
+# whatever the KB contains, so a stray `javascript:`/`data:` value in a malformed or
+# non-GitHub-sourced record must never become a clickable link.
+_SAFE_URL_SCHEMES = ("http://", "https://")
 
 # Depth 0 -> "cat" (top-level taxonomy category), depth 1 -> "sub", depth 2+ -> "leaf" —
 # purely a styling hook (nesting depth), independent of whether a node actually has children.
@@ -59,26 +72,32 @@ def _state_chip(pr: dict) -> tuple[str, str]:
     """``(css-class, label)`` for a PR/issue row's state chip — merged / open pr / issue.
 
     See this module's docstring: a closed PR is assumed merged, since the collector doesn't
-    capture a real ``merged`` flag.
+    capture a real ``merged`` flag. A PR record with no/unrecognized ``state`` (only reachable
+    from a malformed/legacy record — the collector always sets ``open``/``closed``) renders as
+    "open pr" rather than "merged": claiming an unknown state is open is the less misleading
+    of the two guesses, since "merged" implies a completed, verifiable action that may not
+    have happened.
     """
     if pr.get("type") != "pr":
         return "issue", "issue"
-    if pr.get("state") == "open":
-        return "open", "open pr"
-    return "merged", "merged"
+    if pr.get("state") == "closed":
+        return "merged", "merged"
+    return "open", "open pr"
+
+
+def _safe_href(url: str) -> str:
+    """`url` if it's http(s), else ``""`` — see this module's ``_SAFE_URL_SCHEMES`` docstring."""
+    return url if url.startswith(_SAFE_URL_SCHEMES) else ""
 
 
 def _pr_row_html(pr: dict) -> str:
     """One cited PR/issue row: ``repo#number``, a linked title, and a state chip."""
-    repo = pr.get("repo") or "?"
-    number = pr.get("number")
-    number = number if number is not None else "?"
     chip_class, chip_label = _state_chip(pr)
-    url = escape(pr.get("url") or "")
+    url = escape(_safe_href(pr.get("url") or ""))
     title = escape(pr.get("title") or "")
     return (
         '<div class="pr">'
-        f'<span class="id">{escape(str(repo))}#{escape(str(number))}</span>'
+        f'<span class="id">{escape(repo_number_label(pr))}</span>'
         f'<span class="t"><a href="{url}">{title}</a></span>'
         f'<span class="chip {chip_class}">{escape(chip_label)}</span>'
         "</div>"
@@ -130,6 +149,15 @@ _TREE_CONTROLS = (
 
 
 def _tree_section_html(store: Store) -> str:
+    """The collapsible report tree, or a placeholder when the store has no items at all.
+
+    Known limitation (inherited from T1.5.4's `build_tree`, not fixed here): an item with no
+    classified ``path`` yet is folded into a real ``Other`` root node, not treated as "nothing
+    to show" — so this placeholder can only ever fire for a literally empty store, never for
+    the "items exist but `python -m src.analyze` hasn't run yet" case its own copy describes.
+    Distinguishing those two would mean `build_tree` (or this function) telling "never
+    classified" apart from "classified into Other" — a `build_tree` change, out of scope here.
+    """
     nodes = tree_from_store(store)
     if not nodes:
         return _section(
@@ -222,8 +250,13 @@ if(q){
 """
 
 # CSS variables + tree rules adapted directly from the approved mockup — the design spec.
+# Only two palettes exist (light/dark); `:root` and `:root[data-theme="light"]` share one rule
+# since they're identical — `:root` always matches the root element regardless of its
+# `data-theme` attribute, so this is equivalent to (not a behavior change from) writing them
+# out separately, and the explicit `[data-theme="dark"]` override still wins on specificity
+# over both the bare `:root` default and the `prefers-color-scheme` media query.
 _STYLE = """
-:root{
+:root, :root[data-theme="light"]{
   --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#d7dee8;
   --ink:#182231; --ink-2:#586576; --ink-3:#8b96a6;
   --accent:#2f6db3; --merged:#7a5bd0; --merged-soft:#efe9fb;
@@ -238,13 +271,6 @@ _STYLE = """
     --open:#4cbd8a; --open-soft:#12271d; --issue:#d8a24e; --issue-soft:#2b2413;
     --gap:#e0655e; --gap-soft:#2e1817; --guide:#26313f;
   }
-}
-:root[data-theme="light"]{
-  --bg:#f6f8fb; --surface:#ffffff; --surface-2:#eef2f7; --border:#d7dee8;
-  --ink:#182231; --ink-2:#586576; --ink-3:#8b96a6;
-  --accent:#2f6db3; --merged:#7a5bd0; --merged-soft:#efe9fb;
-  --open:#2e9e6b; --open-soft:#e4f4ec; --issue:#c0872a; --issue-soft:#f7eddb;
-  --gap:#c74b45; --gap-soft:#f8e7e6; --guide:#e2e8f1;
 }
 :root[data-theme="dark"]{
   --bg:#0f141b; --surface:#151c26; --surface-2:#1b2430; --border:#2a3543;
@@ -287,6 +313,9 @@ details[open]>summary>.chev{transform:rotate(90deg)}
   padding:.05rem .45rem}
 .cat{background:var(--surface);border:1px solid var(--border);border-radius:10px;
   padding:.35rem;margin-bottom:.6rem}
+.cat>summary .name{font-size:1.05rem}
+.sub>summary .name{color:var(--ink)}
+.leaf>summary .name{font-weight:500;font-size:.92rem}
 .kids{padding-left:1.15rem;margin-left:.55rem;border-left:1.5px solid var(--guide)}
 .summary-line{color:var(--ink-2);font-size:.83rem;padding:.1rem .5rem .5rem 1.8rem;max-width:66ch}
 .pr{display:flex;align-items:baseline;gap:.6rem;padding:.32rem .5rem .32rem 1.8rem;
