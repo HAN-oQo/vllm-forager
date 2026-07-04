@@ -128,23 +128,29 @@ def _num(item: dict) -> int:
     return number if isinstance(number, int) else 0
 
 
-def _cite(item: dict) -> str:
+def _cite(item: dict, *, text: str | None = None) -> str:
     """One Markdown bullet for an item, always carrying its source link.
 
     e.g. ``- [vllm-project/vllm#123] hipBLAS build fails on gfx90a — https://github.com/…``
 
-    Internal whitespace in the title is collapsed so a stray newline can't inject report
-    structure (which would also desync the per-section count from the visible bullets). If the
-    item has no ``url``, synthesize the canonical GitHub link (GitHub redirects
+    `text` overrides the item's own title (e.g. reporter_v1's LLM-written claim) — it gets
+    the exact same treatment as the title: internal whitespace collapsed so a stray newline
+    can't inject report structure (which would also desync the per-section count from the
+    visible bullets), and the same URL-or-synthesized-fallback below. This way every caller —
+    whichever text it renders — gets the identical evidence-principle guarantee, from one
+    place, rather than each reimplementing it.
+
+    If the item has no ``url``, synthesize the canonical GitHub link (GitHub redirects
     ``/issues/N`` ↔ ``/pull/N``) so every bullet still cites a source (evidence principle).
     """
     repo = item.get("repo", "?")
     number = item.get("number", "?")
-    title = " ".join((item.get("title") or "").split()) or "(no title)"
+    raw_text = text if text is not None else (item.get("title") or "")
+    rendered = " ".join(raw_text.split()) or "(no title)"
     url = item.get("url") or ""
     if not url and item.get("repo") and item.get("number") is not None:
         url = f"https://github.com/{item['repo']}/issues/{item['number']}"
-    return f"- [{repo}#{number}] {title} — {url}"
+    return f"- [{repo}#{number}] {rendered} — {url}"
 
 
 def build_report(items: list[dict], *, title: str = "vLLM (ROCm) weekly digest") -> str:

@@ -86,3 +86,20 @@ def test_main_on_empty_store_still_writes_a_report(tmp_path, capsys):
     written = Path(capsys.readouterr().out.strip())  # trust main's printed path (no clock race)
     assert written.exists()
     assert "0 items across 0 repos." in written.read_text(encoding="utf-8")
+
+
+def test_main_v0_flag_uses_fixed_keyword_taxonomy_offline(tmp_path, capsys):
+    """--v0 is the offline/no-LLM fallback: an uncategorized item still gets a real
+    keyword-based bucket (v0 behavior), not v1's blanket "Other"."""
+    store = JsonlStore(tmp_path)
+    # No `category` field set (as if T1.4's analyst never ran) — v1 would bucket this as
+    # "Other"; v0's keyword match should still find "ROCm / AMD" from the title.
+    store.upsert_items([_item("o/r", 1, "hipBLAS build fails on gfx90a")])
+
+    rc = report.main(["--data-dir", str(tmp_path), "--v0"])
+
+    assert rc == 0
+    written = Path(capsys.readouterr().out.strip())
+    text = written.read_text(encoding="utf-8")
+    assert "## ROCm / AMD" in text
+    assert "## Other" not in text

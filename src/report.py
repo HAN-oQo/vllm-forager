@@ -24,11 +24,12 @@ Design:
 from __future__ import annotations
 
 import argparse
+from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
-from .agents import reporter_v1
+from .agents import reporter, reporter_v1
 from .store import get_store
 from .store.base import Store
 from .store.jsonl_store import JsonlStore
@@ -51,16 +52,20 @@ def generate(
     *,
     when: datetime | None = None,
     title: str | None = None,
+    render: Callable[..., str] = reporter_v1.report_from_store,
 ) -> Path:
     """Render the weekly report from `store` and write it under `reports_dir`.
 
     Writes ``reports_dir/<week_stamp>.md`` (creating `reports_dir` if needed) and returns the
     path. `when` fixes the week stamp (defaults to now, UTC); `title` overrides the heading
-    (defaults to a week-stamped title so the file names itself in its first line too).
+    (defaults to a week-stamped title so the file names itself in its first line too). `render`
+    is the report-building function (`store, *, title -> markdown`) — defaults to v1's
+    LLM-written digest; pass ``reporter.report_from_store`` (v0) as an offline/no-LLM fallback
+    (the CLI's ``--v0`` flag does this).
     """
     stamp = week_stamp(when)
     resolved_title = title or f"vLLM (ROCm) weekly digest — {stamp}"
-    md = reporter_v1.report_from_store(store, title=resolved_title)
+    md = render(store, title=resolved_title)
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / f"{stamp}.md"
     path.write_text(md, encoding="utf-8")
@@ -92,6 +97,14 @@ def main(argv: list[str] | None = None) -> int:
             "(default: config.DATA_DIR, backend from env STORE=jsonl|firestore)."
         ),
     )
+    ap.add_argument(
+        "--v0",
+        action="store_true",
+        help=(
+            "Render the T0.8 fixed-keyword, LLM-free digest instead of v1's LLM-written one "
+            "— an offline fallback for an LLM outage/cost/bad-output incident."
+        ),
+    )
     args = ap.parse_args(argv)
 
     if args.data_dir is not None:
@@ -101,7 +114,8 @@ def main(argv: list[str] | None = None) -> int:
         store = get_store()
         reports_dir = config.DATA_DIR / "reports"
 
-    path = generate(store, reports_dir)
+    render = reporter.report_from_store if args.v0 else reporter_v1.report_from_store
+    path = generate(store, reports_dir, render=render)
     print(path)
     return 0
 
