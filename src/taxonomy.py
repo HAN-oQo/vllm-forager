@@ -14,8 +14,9 @@ everywhere a path is (:func:`create_taxonomy`, :func:`add_category`) and read ba
 depth-1 path, e.g. ``"rocm-build"`` → ``("rocm-build",)`` — this is what lets a
 taxonomy record written before T1.5.1 (and any single-level category added after it) keep
 working unchanged. :attr:`Taxonomy.labels` renders each path as one flattened string (joined
-with `` > ``) for callers (T1.4's Analyst, until T1.5.2 teaches it to classify per-level) that
-still want one flat label per category rather than a path.
+with `` > ``) for callers that still want one flat label per category rather than a path
+(T1.5.2 onward, this is a display/back-compat convenience, not how classification itself
+works — see :meth:`Taxonomy.children`).
 
 Storage: taxonomy versions are small enough to live in the KB's generic state map
 (:meth:`~src.store.base.Store.get_state` / ``set_state``), keyed ``taxonomy@1``,
@@ -28,14 +29,16 @@ concurrent callers evolving the taxonomy at once can race (one addition silently
 Real fixes belongs at the Store layer — see the still-open ``T4.3 Locking / idempotency``
 DEVPLAN todo — rather than reinvented per caller.
 
-Known limitations left for later todos, not this one: (1) no per-level accessor exists (e.g.
-"what are the valid level-0 names", or "the children of a given prefix") — T1.5.2 needs this
-to classify "each level from a controlled per-level label set," and should add it here
-(reusing :func:`casefold_label`) rather than duplicate ad hoc set-comprehensions in
-``analyst.py``. (2) a new path that is a prefix or extension of an existing one is allowed
-(e.g. ``("ROCm/AMD",)`` and ``("ROCm/AMD", "DeepSeek-V4")`` can both be active categories) —
-whether a node can be simultaneously a leaf (has classified items) and a branch (has children)
-is undefined here; T1.5.4's tree-building is where that needs resolving.
+T1.5.2: :meth:`Taxonomy.children` gives the "controlled per-level label set" T1.4's Analyst
+now classifies against, one level at a time — a classifier limited to exactly what this
+returns for the path chosen so far can never invent a label that doesn't already exist at
+that level ("drift").
+
+Known limitation left for a later todo, not this one: a new path that is a prefix or
+extension of an existing one is allowed (e.g. ``("ROCm/AMD",)`` and ``("ROCm/AMD",
+"DeepSeek-V4")`` can both be active categories) — whether a node can be simultaneously a leaf
+(has classified items) and a branch (has children) is undefined here; T1.5.4's tree-building
+is where that needs resolving.
 """
 
 from __future__ import annotations
@@ -53,7 +56,7 @@ _ACTIVE_KEY = "taxonomy_active_version"
 # level containing this substring is rejected at ingestion (_normalize_path) — otherwise a
 # depth-1 category named e.g. "a > b" would flatten to the same label as the distinct 2-level
 # path ("a", "b"), making them indistinguishable to analyst.py's label-based matching.
-_LEVEL_SEPARATOR = " > "
+LEVEL_SEPARATOR = " > "
 
 CategoryPath = tuple[str, ...]
 
@@ -67,8 +70,8 @@ def casefold_label(label: str) -> str:
     """The one normalization every case/whitespace-insensitive taxonomy comparison uses.
 
     Shared by :func:`_casefold_path` (path dedup, here) and
-    :func:`~src.agents.analyst._canonical_category` (LLM-reply matching) so the two can never
-    silently drift apart on what counts as "the same" category.
+    :func:`~src.agents.analyst._canonical_path` (LLM-reply matching, level by level) so the
+    two can never silently drift apart on what counts as "the same" category.
     """
     return label.strip().casefold()
 
@@ -79,7 +82,7 @@ def _normalize_path(entry: str | Sequence[str]) -> CategoryPath:
     Raises:
         TaxonomyError: `entry` is neither a string nor a sequence of strings, the resulting
             path is empty, a level is empty/whitespace-only, or a level contains the literal
-            :data:`_LEVEL_SEPARATOR` (which would make it flatten ambiguously — see
+            :data:`LEVEL_SEPARATOR` (which would make it flatten ambiguously — see
             :attr:`Taxonomy.labels`).
     """
     if isinstance(entry, str):
@@ -97,9 +100,9 @@ def _normalize_path(entry: str | Sequence[str]) -> CategoryPath:
             raise TaxonomyError(
                 f"every level of a category path must be a non-empty string: {path!r}"
             )
-        if _LEVEL_SEPARATOR in level:
+        if LEVEL_SEPARATOR in level:
             raise TaxonomyError(
-                f"a category level cannot contain {_LEVEL_SEPARATOR!r} (ambiguous once "
+                f"a category level cannot contain {LEVEL_SEPARATOR!r} (ambiguous once "
                 f"flattened): {level!r}"
             )
     return path  # type: ignore[return-value]  # every element validated to be `str` above
@@ -131,7 +134,38 @@ class Taxonomy:
         teaches it to classify per-level) keeps working unchanged against a now-path-capable
         taxonomy.
         """
-        return tuple(_LEVEL_SEPARATOR.join(path) for path in self.categories)
+        return tuple(LEVEL_SEPARATOR.join(path) for path in self.categories)
+
+    def children(self, prefix: CategoryPath = ()) -> tuple[str, ...]:
+        """The distinct, canonically-spelled values immediately below `prefix` in the tree.
+
+        `prefix=()` (the default) returns every valid **level-0** value — the root options.
+        `prefix=("ROCm/AMD",)` returns every valid value immediately under that level-0, and
+        so on. Matching `prefix` against a stored path's own prefix is case/whitespace
+        insensitive (:func:`casefold_label`); for two paths whose corresponding level differs
+        only by case/whitespace, the spelling from whichever path is listed first in
+        :attr:`categories` wins — this is T1.5.2's "controlled per-level label set to prevent
+        drift." As of T1.5.2, :func:`~src.agents.analyst._canonical_path` uses this
+        *post-hoc*: the model generates a whole path in one guess, then this method validates
+        it level by level, keeping only the prefix that matches at each step — not (yet) an
+        interactive walk where the model is shown this method's output before choosing each
+        level. Either usage keeps a hallucinated/drifted label out of the KB; only the
+        model's prompting differs.
+
+        Returns ``()`` if no path extends past `prefix` — either `prefix` is itself a leaf
+        (registered as a complete category, e.g. its own entry in :attr:`categories`), or it
+        doesn't match any known path at all.
+        """
+        normalized_prefix = _casefold_path(prefix)
+        depth = len(normalized_prefix)
+        seen: dict[str, str] = {}
+        for path in self.categories:
+            if len(path) <= depth:
+                continue
+            if _casefold_path(path[:depth]) != normalized_prefix:
+                continue
+            seen.setdefault(casefold_label(path[depth]), path[depth])
+        return tuple(seen.values())
 
     def to_json(self) -> str:
         """Serialize for storage in the KB's state map."""

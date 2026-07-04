@@ -45,6 +45,46 @@ def test_create_taxonomy_accepts_multi_level_paths(store: JsonlStore) -> None:
     assert taxonomy.get_taxonomy(store, 1).categories == expected
 
 
+# --------------------------------------------------------------------- children (T1.5.2)
+
+
+def test_children_of_root_returns_distinct_level_0_values() -> None:
+    t = taxonomy.Taxonomy(
+        version=1,
+        categories=(
+            ("ROCm/AMD", "DeepSeek-V4", "performance"),
+            ("ROCm/AMD", "build"),
+            ("Quantization", "FP8"),
+        ),
+    )
+    assert set(t.children()) == {"ROCm/AMD", "Quantization"}
+
+
+def test_children_of_a_prefix_returns_only_values_immediately_below_it() -> None:
+    t = taxonomy.Taxonomy(
+        version=1,
+        categories=(
+            ("ROCm/AMD", "DeepSeek-V4", "performance"),
+            ("ROCm/AMD", "DeepSeek-V4", "correctness"),
+            ("ROCm/AMD", "build"),
+            ("Quantization", "FP8"),
+        ),
+    )
+    assert set(t.children(("ROCm/AMD",))) == {"DeepSeek-V4", "build"}
+    assert set(t.children(("ROCm/AMD", "DeepSeek-V4"))) == {"performance", "correctness"}
+
+
+def test_children_prefix_match_is_case_and_whitespace_insensitive() -> None:
+    t = taxonomy.Taxonomy(version=1, categories=(("ROCm/AMD", "DeepSeek-V4"),))
+    assert t.children((" rocm/amd ",)) == ("DeepSeek-V4",)
+
+
+def test_children_of_a_leaf_or_unknown_prefix_is_empty() -> None:
+    t = taxonomy.Taxonomy(version=1, categories=(("rocm-build",), ("ROCm/AMD", "build")))
+    assert t.children(("rocm-build",)) == ()  # a registered leaf has no children
+    assert t.children(("nonexistent",)) == ()  # an unknown prefix has no children either
+
+
 def test_create_taxonomy_twice_raises(store: JsonlStore) -> None:
     taxonomy.create_taxonomy(store, ["rocm-build"])
     with pytest.raises(taxonomy.TaxonomyError, match="already exists"):
