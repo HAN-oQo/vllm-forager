@@ -2,15 +2,28 @@
 this thin M1 slice (no Flask/FastAPI): a read-only, single-page, no-auth local tool doesn't
 need a web framework.
 
-`store_factory` is called **fresh on every request** (not once at startup) so a long-running
-dashboard process reflects new items/predictions written by other processes (the collector,
-the forecaster) without needing a restart — the same "always re-read, never cache" contract
-:class:`~src.store.jsonl_store.JsonlStore`/``FirestoreStore`` already give every other caller.
+The `store` is constructed **once** by the caller and reused across every request — a
+:class:`~src.store.base.Store` never caches its own reads (:class:`~src.store.jsonl_store.
+JsonlStore` re-reads its files, :class:`~src.store.firestore_store.FirestoreStore` re-queries
+Firestore, on every call), so a long-running dashboard process still reflects new items/
+predictions without a restart. Constructing the store per-request instead (an earlier
+version of this module did) would open a brand-new ``google.cloud.firestore.Client``/gRPC
+channel on every single HTTP GET under ``STORE=firestore`` with nothing to close it — a
+resource leak over a multi-hour ``serve_forever()`` run.
+
+Known limitations of this thin M1 slice (not fixed here — acceptable for a single-user, local,
+read-only tool; would need addressing before any wider/production use):
+- Every request re-scans the **entire** store (`Store.query()`) and re-reads the **entire**
+  prediction log (one `get_state()` per historical prediction) — no caching, pagination, or
+  limit. Cost grows linearly with KB size and multiplies per page view.
+- The server is single-threaded (:class:`~http.server.HTTPServer`, not
+  ``ThreadingHTTPServer``), so one slow request (a large KB, a slow Firestore round trip)
+  blocks every other concurrent client until it completes.
 """
 
 from __future__ import annotations
 
-from collections.abc import Callable
+import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 
@@ -19,12 +32,20 @@ from src.store.base import Store
 from .render import render_page
 
 
-def _make_handler(
-    store_factory: Callable[[], Store], reports_dir: Path
-) -> type[BaseHTTPRequestHandler]:
+def _make_handler(store: Store, reports_dir: Path) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler's naming convention)
-            page = render_page(store_factory(), reports_dir).encode("utf-8")
+            try:
+                page = render_page(store, reports_dir).encode("utf-8")
+            except Exception:  # noqa: BLE001 — any render/store failure must still get a response
+                traceback.print_exc()
+                body = b"500 Internal Server Error: failed to render the dashboard.\n"
+                self.send_response(500)
+                self.send_header("Content-Type", "text/plain; charset=utf-8")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+                return
             self.send_response(200)
             self.send_header("Content-Type", "text/html; charset=utf-8")
             self.send_header("Content-Length", str(len(page)))
@@ -37,15 +58,20 @@ def _make_handler(
     return Handler
 
 
-def serve(
-    store_factory: Callable[[], Store],
-    reports_dir: Path,
-    *,
-    host: str = "127.0.0.1",
-    port: int = 8765,
-) -> None:
-    """Start the dashboard's HTTP server and block, serving requests until interrupted."""
-    handler = _make_handler(store_factory, reports_dir)
-    with HTTPServer((host, port), handler) as httpd:
+def serve(store: Store, reports_dir: Path, *, host: str = "127.0.0.1", port: int = 8765) -> int:
+    """Start the dashboard's HTTP server and block, serving requests until interrupted.
+
+    Returns a process exit code: 0 on a normal (interrupted) shutdown, 1 if `port` couldn't be
+    bound (e.g. already in use) — the caller (:mod:`dashboard.__main__`) prints nothing further
+    and just propagates this as its own exit code.
+    """
+    handler = _make_handler(store, reports_dir)
+    try:
+        httpd = HTTPServer((host, port), handler)
+    except OSError as exc:
+        print(f"vllm-forager dashboard: failed to bind {host}:{port}: {exc}")
+        return 1
+    with httpd:
         print(f"vllm-forager dashboard: http://{host}:{port}/")
         httpd.serve_forever()
+    return 0

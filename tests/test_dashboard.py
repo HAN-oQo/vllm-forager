@@ -18,7 +18,7 @@ from dashboard.render import (
     render_report,
     render_trends,
 )
-from dashboard.server import serve
+from dashboard.server import _make_handler, serve
 from src.agents.forecaster import Prediction, record_prediction
 from src.store.jsonl_store import JsonlStore
 
@@ -138,6 +138,71 @@ def test_render_page_escapes_untrusted_content(tmp_path: Path) -> None:
     assert "&lt;script&gt;" in page
 
 
+# --------------------------------------------------------------------- server error handling
+
+
+class _FakeResponse:
+    """A duck-typed stand-in for BaseHTTPRequestHandler's response-writing surface.
+
+    do_GET only touches ``send_response``/``send_header``/``end_headers``/``wfile.write`` — this
+    records those calls so the exception-handling branch can be tested without opening a real
+    socket or constructing a full (socket-backed) BaseHTTPRequestHandler.
+    """
+
+    def __init__(self) -> None:
+        self.status: int | None = None
+        self.headers: dict[str, str] = {}
+        self.body = b""
+
+    def send_response(self, status: int) -> None:
+        self.status = status
+
+    def send_header(self, key: str, value: str) -> None:
+        self.headers[key] = value
+
+    def end_headers(self) -> None:
+        pass
+
+    class _Wfile:
+        def __init__(self, outer: _FakeResponse) -> None:
+            self._outer = outer
+
+        def write(self, data: bytes) -> None:
+            self._outer.body += data
+
+    @property
+    def wfile(self) -> _FakeResponse._Wfile:
+        return self._Wfile(self)
+
+
+def test_do_get_returns_500_on_render_failure(tmp_path: Path) -> None:
+    """A corrupt store record must yield a real HTTP 500, not a silently dropped connection."""
+    store = JsonlStore(tmp_path)
+    store.set_state("prediction_count", "not-a-number")  # forecaster._parse_count raises
+    handler_cls = _make_handler(store, tmp_path / "reports")
+    fake = _FakeResponse()
+
+    handler_cls.do_GET(fake)  # type: ignore[arg-type]
+
+    assert fake.status == 500
+    assert b"500 Internal Server Error" in fake.body
+
+
+def test_serve_returns_1_on_port_already_in_use(tmp_path: Path) -> None:
+    import socket
+
+    store = JsonlStore(tmp_path)
+    blocker = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    blocker.bind(("127.0.0.1", 0))
+    blocker.listen(1)
+    port = blocker.getsockname()[1]
+    try:
+        exit_code = serve(store, tmp_path / "reports", host="127.0.0.1", port=port)
+        assert exit_code == 1
+    finally:
+        blocker.close()
+
+
 # --------------------------------------------------------------------- live smoke
 
 
@@ -147,14 +212,12 @@ def test_dashboard_live_smoke(tmp_path: Path) -> None:
     import time
     from http.server import HTTPServer
 
-    from dashboard.server import _make_handler
-
     store = _seeded_store(tmp_path)
     reports_dir = tmp_path / "reports"
     reports_dir.mkdir()
     (reports_dir / "2026-W02.md").write_text("# weekly digest body", encoding="utf-8")
 
-    handler = _make_handler(lambda: store, reports_dir)
+    handler = _make_handler(store, reports_dir)
     httpd = HTTPServer(("127.0.0.1", 0), handler)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

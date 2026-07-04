@@ -20,6 +20,12 @@ from .server import serve
 
 
 def main(argv: list[str] | None = None) -> int:
+    """Parse CLI args and run the dashboard's HTTP server until interrupted.
+
+    `argv` is parsed (defaults to ``sys.argv`` when None). Returns a process exit code: 0 on a
+    normal (interrupted) shutdown, 1 if the bind port was already in use (see
+    :func:`dashboard.server.serve`).
+    """
     ap = argparse.ArgumentParser(
         prog="python -m dashboard",
         description="Serve a local read-only dashboard over the vllm-forager KB.",
@@ -34,18 +40,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765).")
     args = ap.parse_args(argv)
 
+    store: Store
     if args.data_dir is not None:
         data_dir = args.data_dir
-
-        def store_factory() -> Store:
-            return JsonlStore(data_dir)
-
+        store = JsonlStore(data_dir)
     else:
         data_dir = config.DATA_DIR
-        store_factory = get_store
+        store = get_store()
 
-    serve(store_factory, data_dir / "reports", host=args.host, port=args.port)
-    return 0
+    return serve(store, data_dir / "reports", host=args.host, port=args.port)
 
 
 if __name__ == "__main__":

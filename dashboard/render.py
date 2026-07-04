@@ -10,6 +10,16 @@ every HTTP request would mean an LLM call per dashboard refresh. Trends and the 
 are cheap, pure store reads (:mod:`src.trends`, :mod:`src.agents.forecaster`), so those ARE
 computed live — the dashboard reflects new items/predictions immediately; only the narrative
 report itself lags to its last scheduled ``python -m src.report`` run.
+
+Known limitation: unlike trends/forecasts, the report section is NOT read through the `Store`
+interface — ``src.report``'s ``generate()`` always writes its Markdown to a **local**
+`reports_dir` file, never into the KB, regardless of the `STORE` backend. If ``STORE=firestore``
+and this dashboard runs on a different host/filesystem than whatever last ran
+``python -m src.report``, `render_report` will return the "no report yet" placeholder
+indefinitely — that's a "wrong host", not "no report exists" — with no way to tell them apart
+from here. A real fix means teaching ``src.report`` to persist report bodies into the KB
+itself; out of scope for this thin M1 slice, where the assumption is a single shared
+`FORAGER_DATA_DIR` (docs/PLAN.md) local to wherever the dashboard runs.
 """
 
 from __future__ import annotations
@@ -55,33 +65,42 @@ def render_forecasts(store: Store) -> list[Prediction]:
     return list_predictions(store)
 
 
+def _section(title: str, body_html: str) -> str:
+    """Wrap `body_html` in the page's common ``<section><h2>title</h2>...</section>`` shell."""
+    return f"<section><h2>{title}</h2>{body_html}</section>"
+
+
 def _report_section_html(reports_dir: Path) -> str:
     body = render_report(reports_dir)
-    return f"<section><h2>Latest report</h2><pre>{escape(body)}</pre></section>"
+    return _section("Latest report", f"<pre>{escape(body)}</pre>")
 
 
 def _trends_section_html(store: Store) -> str:
     series = render_trends(store)
     if not series:
-        return "<section><h2>Trends</h2><p>No classified items yet.</p></section>"
+        return _section("Trends", "<p>No classified items yet.</p>")
 
     rows = []
     for category in sorted(series):
         weeks = series[category]
         max_count = max(weeks.values())
-        bars = "".join(
-            f'<div class="week"><span class="label">{escape(week)}</span>'
-            f'<div class="bar" style="width:{count / max_count * 100:.0f}%">{count}</div></div>'
-            for week, count in sorted(weeks.items())
-        )
+        bars = "".join(_bar_html(week, count, max_count) for week, count in sorted(weeks.items()))
         rows.append(f"<div class='category'><h3>{escape(category)}</h3>{bars}</div>")
-    return "<section><h2>Trends</h2>" + "".join(rows) + "</section>"
+    return _section("Trends", "".join(rows))
+
+
+def _bar_html(week: str, count: int, max_count: int) -> str:
+    width = count / max_count * 100
+    return (
+        f'<div class="week"><span class="label">{escape(week)}</span>'
+        f'<div class="bar" style="width:{width:.0f}%">{count}</div></div>'
+    )
 
 
 def _forecasts_section_html(store: Store) -> str:
     predictions = render_forecasts(store)
     if not predictions:
-        return "<section><h2>Forecast log</h2><p>No predictions recorded yet.</p></section>"
+        return _section("Forecast log", "<p>No predictions recorded yet.</p>")
 
     rows = "".join(
         "<tr>"
@@ -96,7 +115,7 @@ def _forecasts_section_html(store: Store) -> str:
         "<table><thead><tr><th>Claim</th><th>Prob</th><th>Due</th><th>Evidence</th></tr>"
         f"</thead><tbody>{rows}</tbody></table>"
     )
-    return f"<section><h2>Forecast log</h2>{table}</section>"
+    return _section("Forecast log", table)
 
 
 def render_page(store: Store, reports_dir: Path) -> str:
