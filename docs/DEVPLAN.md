@@ -191,7 +191,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       > **Partly shipped in #3:** cursor-windowing past the ~1000-item pagination cap + per-repo isolation +
       > incremental state save (with tests). Remaining: retry/backoff, secondary-rate-limit, schema validation,
       > configurable `body` cap.
-- [ ] **T0.11 Collection data-quality guardrail (guardrail 1b: reconciliation)** — `src/audit.py`: compare local
+- [x] **T0.11 Collection data-quality guardrail (guardrail 1b: reconciliation)** — `src/audit.py`: compare local
       counts vs GitHub **GraphQL** `issues.totalCount + pullRequests.totalCount` over the collected window; scan
       collected `number`s for gaps (alert on gap *ratio* — deleted/transferred are allowed); write a `data_quality`
       record (count delta, gap ratio, error count) to the KB each run.
