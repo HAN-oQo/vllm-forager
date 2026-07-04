@@ -170,7 +170,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** swap JSONL → Firestore (M0.6) later without touching the collector/agents — one interface, many backends.
   - **e.g.:** `get_store().upsert_items(recs)` writes JSONL today, Firestore tomorrow, same call.
   - **Test:** `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.
-- [ ] **T0.7 LLM wrapper (pluggable)** — `src/llm.py::complete` dispatching on `LLM_PROVIDER` (`claude_cli` → `claude -p`; `claude_api`; `local`/vLLM OpenAI-compatible); JSON-mode, timeout, error handling; returns call metadata (tokens/latency/cost) for the T2.6 bandit.
+- [x] **T0.7 LLM wrapper (pluggable)** — `src/llm.py::complete` dispatching on `LLM_PROVIDER` (`claude_cli` → `claude -p`; `claude_api`; `local`/vLLM OpenAI-compatible); JSON-mode, timeout, error handling; returns call metadata (tokens/latency/cost) for the T2.6 bandit.
   - **Why:** every agent needs an LLM; one wrapper lets us switch claude_cli / API / local-vLLM without editing agents.
   - **e.g.:** `complete("classify: <issue>", json_schema=TAXONOMY)` → `{"category": "rocm-build"}` — same call whether it hits `claude -p` or a local vLLM server.
   - **Test:** `tests/test_llm.py` — each provider mocked (prompt passed, response parsed, `json_schema` → dict, metadata populated, error path raises); live smoke = `@pytest.mark.integration`.
