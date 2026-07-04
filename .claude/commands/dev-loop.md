@@ -14,7 +14,8 @@ next milestone without me):
    todo's box to `[x]` in `docs/DEVPLAN.md` (it lands with this PR).
 4. Run `pytest` and `pre-commit run --all-files` until BOTH are green. Run the todo's **Demo** command if it has
    one and confirm it works.
-5. Commit, push, and `gh pr create` (fill the Summary + checklist). **Do NOT merge.**
+5. Commit, push, and `gh pr create`. Fill the template — including **Milestone/Todo** and a SHA-pinned DEVPLAN
+   permalink from `scripts/devplan-link.sh T<id>` (use the uppercase id, e.g. `T0.6`). **Do NOT merge.**
 6. Run `/code-review --comment` so the review is posted as inline PR comments; fix anything real (push the fix) or
    acknowledge it.
 7. Run `bash scripts/wait-merge.sh` — it polls until I merge, then syncs `main` and prunes the branch. If the PR

@@ -1,5 +1,11 @@
+## Todo
+<!-- Which DEVPLAN item this implements + a SHA-pinned permalink.
+     Generate the permalink with:  scripts/devplan-link.sh T0.6 -->
+- **Milestone / Todo:** T?.? (M?)
+- **DEVPLAN:** <paste `scripts/devplan-link.sh T?.?` output>
+
 ## Summary
-<!-- One line. Link the DEVPLAN todo, e.g. "Implements T0.6." -->
+<!-- One line. -->
 
 ## Checklist
 - [ ] Scoped to **one todo** (or a small cluster of tightly-related ones)

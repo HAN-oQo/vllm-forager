@@ -28,6 +28,9 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
 - **Evidence principle:** every KB record and every report claim carries a source issue/PR link.
 - **Human-in-the-loop merges:** CI + `/code-review` are gates, not approvers — **a human performs every merge to
   `main`**; agents open PRs but never self-merge. See "Git & PR workflow" in `docs/DEVPLAN.md`.
+- **Every PR names its DEVPLAN todo + a permalink.** In the PR body include the milestone/todo (e.g. `T0.6 (M0)`)
+  and a SHA-pinned DEVPLAN permalink from `scripts/devplan-link.sh T0.6`, so each PR traces to exactly what it
+  implemented even after DEVPLAN changes.
 - **NEVER edit on top of a merged or already-opened PR — branch from fresh `main` every time.** Create each branch
   with `git checkout main && git pull`, and **do NOT push follow-up commits to a branch whose PR you've already
   opened** — the human may merge it at any moment, stranding the commit off `main` (this has happened repeatedly).
