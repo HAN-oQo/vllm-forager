@@ -34,7 +34,7 @@ def test_main_classifies_pending_items(tmp_path, monkeypatch: pytest.MonkeyPatch
     store = JsonlStore(tmp_path)
     create_taxonomy(store, ["rocm-build"])
     store.upsert_items([_item("o/r", 1, "hipBLAS build fails on gfx90a")])
-    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"category": "rocm-build"})
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"path": ["rocm-build"]})
 
     rc = analyze.main(["--data-dir", str(tmp_path)])
 

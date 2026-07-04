@@ -289,7 +289,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** a single flat label can't express `AMD → DeepSeek-V4 → performance → attention`; a path is what lets the report nest into a tree.
   - **e.g.:** an item carries `path=["ROCm/AMD","DeepSeek-V4","performance","attention"]` instead of `category="rocm"`.
   - **Test:** `tests/test_taxonomy.py` — a path round-trips through the store; versioning still holds; a legacy flat label still reads as a depth-1 path.
-- [ ] **T1.5.2 Analyst assigns a path** — evolve `src/agents/analyst.py` to classify each item into a taxonomy **path** via `llm.complete` (each level from a controlled per-level label set to prevent drift), writing `path` + evidence to the KB.
+- [x] **T1.5.2 Analyst assigns a path** — evolve `src/agents/analyst.py` to classify each item into a taxonomy **path** via `llm.complete` (each level from a controlled per-level label set to prevent drift), writing `path` + evidence to the KB.
   - **Why:** this is what actually fills the tree — without a per-item path every node stays a flat bucket.
   - **e.g.:** an "MLA decode on MI300" issue → the path above + its source URL, written back onto the item.
   - **Test:** `tests/test_analyst.py` — mock `llm.complete` → item gets a valid path (each level from the allowed set), citation preserved; an off-taxonomy answer is rejected/normalized.
