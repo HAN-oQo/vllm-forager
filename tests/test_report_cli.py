@@ -5,7 +5,9 @@ the ISO-week filename stamp and the injectable :func:`generate` core (fixed cloc
 path, content carries the cited links).
 """
 
+import re
 from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -51,6 +53,15 @@ def test_generate_writes_dated_nonempty_report(tmp_path):
     assert "2026-W27" in text  # week-stamped title
 
 
+def test_generate_custom_title_overrides_default(tmp_path):
+    # The `title` override replaces the heading; the filename still comes from the week stamp.
+    store = JsonlStore(tmp_path)
+    when = datetime(2026, 7, 4, tzinfo=timezone.utc)
+    path = report.generate(store, tmp_path / "reports", when=when, title="Custom heading")
+    assert path.name == "2026-W27.md"
+    assert path.read_text(encoding="utf-8").startswith("# Custom heading")
+
+
 def test_main_creates_nonempty_file_on_tmp_store(tmp_path, capsys):
     store = JsonlStore(tmp_path)
     store.upsert_items([_item("o/r", 1, "MI250 OOM during warmup", labels=["amd"])])
@@ -58,19 +69,20 @@ def test_main_creates_nonempty_file_on_tmp_store(tmp_path, capsys):
     rc = report.main(["--data-dir", str(tmp_path)])
     assert rc == 0
 
-    # main prints the written path; it must exist under reports/ and be non-empty.
-    printed = capsys.readouterr().out.strip()
-    written = tmp_path / "reports" / f"{report.week_stamp()}.md"
-    assert printed == str(written)
-    assert written.exists()
-    assert written.read_text(encoding="utf-8").strip()
+    # Trust main's printed path as the source of truth: it derives the filename from its own
+    # wall-clock read, so recomputing week_stamp() here could race across an ISO-week rollover.
+    printed = Path(capsys.readouterr().out.strip())
+    assert printed.parent == tmp_path / "reports"
+    assert re.fullmatch(r"\d{4}-W\d{2}\.md", printed.name)  # YYYY-Www.md
+    assert printed.exists()
+    assert printed.read_text(encoding="utf-8").strip()  # non-empty
 
 
-def test_main_on_empty_store_still_writes_a_report(tmp_path):
+def test_main_on_empty_store_still_writes_a_report(tmp_path, capsys):
     # No items collected yet → the report is still produced (safe empty digest).
     JsonlStore(tmp_path)  # nothing upserted
     rc = report.main(["--data-dir", str(tmp_path)])
     assert rc == 0
-    written = tmp_path / "reports" / f"{report.week_stamp()}.md"
+    written = Path(capsys.readouterr().out.strip())  # trust main's printed path (no clock race)
     assert written.exists()
     assert "0 items across 0 repos." in written.read_text(encoding="utf-8")
