@@ -215,3 +215,88 @@ def test_node_summary_json_roundtrip() -> None:
     )
     restored = summarizer.NodeSummary.from_json(original.path, original.to_json())
     assert restored == original
+
+
+def test_node_summary_rejects_blank_text() -> None:
+    with pytest.raises(ValueError, match="must not be blank"):
+        summarizer.NodeSummary(path=("a",), text="   ", evidence=("http://x/1",))
+
+
+def test_node_summary_rejects_empty_evidence() -> None:
+    with pytest.raises(ValueError, match="must cite at least one item URL"):
+        summarizer.NodeSummary(path=("a",), text="synthesis", evidence=())
+
+
+def test_node_summary_is_hashable() -> None:
+    """A frozen dataclass gets __hash__ for free — unlike a hand-written __eq__-only class."""
+    a = summarizer.NodeSummary(path=("a",), text="x", evidence=("http://x/1",))
+    b = summarizer.NodeSummary(path=("a",), text="x", evidence=("http://x/1",))
+    assert {a, b} == {a}
+
+
+# --------------------------------------------------------------------- prompt content
+
+
+def test_node_prompt_includes_body_content_not_just_title() -> None:
+    item = _item("o/r", 1, "short title", None, body="the real detail is here" * 20)
+    prompt = summarizer._node_prompt(("ROCm/AMD",), [item])
+    assert "short title" in prompt
+    assert "the real detail is here" in prompt
+
+
+def test_node_prompt_truncates_long_body() -> None:
+    long_body = "x" * (summarizer._BODY_CHARS + 500)
+    item = _item("o/r", 1, "t", None, body=long_body)
+    prompt = summarizer._node_prompt(("a",), [item])
+    assert "x" * summarizer._BODY_CHARS in prompt
+    assert "x" * (summarizer._BODY_CHARS + 1) not in prompt
+
+
+# --------------------------------------------------------------------- item cap
+
+
+def test_summarize_node_caps_items_fed_to_the_prompt_and_evidence(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def fake_complete(prompt: str, **k) -> dict:
+        captured["prompt"] = prompt
+        return {"summary": "synthesis"}
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    items = [_item("o/r", i, f"item {i}", None) for i in range(summarizer._MAX_ITEMS_PER_NODE + 10)]
+
+    result = summarizer.summarize_node(("ROCm/AMD",), items)
+
+    assert result is not None
+    assert len(result.evidence) == summarizer._MAX_ITEMS_PER_NODE
+    # an item beyond the cap never reaches the prompt
+    last_item_title = f"item {summarizer._MAX_ITEMS_PER_NODE + 9}"
+    assert last_item_title not in captured["prompt"]
+
+
+def test_summarize_store_recovers_from_a_non_llmerror_exception(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare OSError (e.g. claude_cli's argv-length limit on an oversized prompt) must not
+    abort the whole run — only the one node it came from."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items(
+        [
+            _item("o/r", 1, "good node item", ["Quantization"]),
+            _item("o/r", 2, "bad node item", ["ROCm/AMD"]),
+        ]
+    )
+
+    def flaky_complete(prompt: str, **kwargs) -> dict:
+        if "ROCm/AMD" in prompt:
+            raise OSError("simulated argv-length failure")
+        return {"summary": "quantization synthesis"}
+
+    monkeypatch.setattr(llm, "complete", flaky_complete)
+
+    summaries = summarizer.summarize_store(store)
+
+    assert set(summaries) == {("Quantization",)}
+    assert summarizer.get_node_summary(store, ("ROCm/AMD",)) is None
