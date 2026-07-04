@@ -13,7 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from src import config
-from src.store import get_store
+from src.store import get_store, resolve_store
 from src.store.firestore_store import FirestoreStore
 from src.store.jsonl_store import JsonlStore
 
@@ -60,3 +60,30 @@ def test_get_store_rejects_unknown_backend(monkeypatch):
     monkeypatch.setattr(config, "STORE_BACKEND", "something-else")
     with pytest.raises(ValueError, match="unknown STORE backend"):
         get_store()
+
+
+# --------------------------------------------------------------------- resolve_store (T1.11)
+
+
+def test_resolve_store_with_data_dir_returns_jsonl_store_at_that_path(monkeypatch, tmp_path):
+    # STORE=firestore would raise if resolve_store ever called get_store() here — proves
+    # the --data-dir branch short-circuits the backend-selected path entirely.
+    monkeypatch.setattr(config, "STORE_BACKEND", "firestore")
+    explicit_dir = tmp_path / "explicit"
+
+    store, data_dir = resolve_store(explicit_dir)
+
+    assert isinstance(store, JsonlStore)
+    assert store.data_dir == explicit_dir
+    assert data_dir == explicit_dir
+
+
+def test_resolve_store_without_data_dir_uses_get_store_and_config_data_dir(monkeypatch, tmp_path):
+    monkeypatch.setattr(config, "STORE_BACKEND", "jsonl")
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+
+    store, data_dir = resolve_store(None)
+
+    assert isinstance(store, JsonlStore)
+    assert store.data_dir == tmp_path
+    assert data_dir == tmp_path

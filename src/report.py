@@ -14,11 +14,12 @@ CLI's default output is v1's.)
 Design:
 - :func:`generate` is the injectable core (store + output dir + clock in, path out) so tests
   never touch the real ``data/`` tree or wall-clock.
-- :func:`main` is the thin CLI wrapper. With no ``--data-dir``, it uses
-  :func:`src.store.get_store` (T0.6.2) — so ``STORE=firestore`` reports from Firestore just
-  like the collector does. ``--data-dir`` is a JSONL-specific override (pre-dates the store
-  factory): passing it always reads a :class:`JsonlStore` at that path, regardless of ``STORE``
-  — there's no equivalent "read Firestore instead" flag, so mixing the two isn't meaningful.
+- :func:`main` is the thin CLI wrapper, using :func:`~src.store.resolve_store` (T1.11) for
+  store selection: with no ``--data-dir``, it uses :func:`src.store.get_store` (T0.6.2) — so
+  ``STORE=firestore`` reports from Firestore just like the collector does. ``--data-dir`` is a
+  JSONL-specific override (pre-dates the store factory): passing it always reads a
+  :class:`JsonlStore` at that path, regardless of ``STORE`` — there's no equivalent "read
+  Firestore instead" flag, so mixing the two isn't meaningful.
 - :func:`week_stamp` is re-exported from :mod:`src.trends` (T1.7), which is where it's
   actually defined — a pure, dependency-free function belongs in the lowest-altitude shared
   module, not this CLI, so a future consumer (e.g. M5's dashboard) can use it without pulling
@@ -32,11 +33,8 @@ from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
 
-from . import config
 from .agents import reporter, reporter_v1
-from .store import get_store
-from .store.base import Store
-from .store.jsonl_store import JsonlStore
+from .store import Store, resolve_store
 from .trends import week_stamp
 
 __all__ = ["week_stamp", "generate", "main"]
@@ -75,10 +73,11 @@ def main(argv: list[str] | None = None) -> int:
     ``reports/`` subdirectory of the data dir (``--data-dir`` if given, else
     :data:`src.config.DATA_DIR`). Returns a process exit code (0 on success).
 
-    Store selection: with ``--data-dir``, reads a :class:`JsonlStore` at that explicit path
-    (the pre-T0.6.2 behavior, kept for anyone pointing this at an arbitrary JSONL export).
-    Without it, uses :func:`~src.store.get_store` — so ``STORE=firestore`` reports read from
-    Firestore, matching the collector's own backend selection.
+    Store selection is :func:`~src.store.resolve_store`'s shared contract: with ``--data-dir``,
+    reads a :class:`~src.store.jsonl_store.JsonlStore` at that explicit path (the pre-T0.6.2
+    behavior, kept for anyone pointing this at an arbitrary JSONL export). Without it, uses
+    :func:`~src.store.get_store` — so ``STORE=firestore`` reports read from Firestore, matching
+    the collector's own backend selection.
     """
     ap = argparse.ArgumentParser(
         prog="python -m src.report",
@@ -103,12 +102,8 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = ap.parse_args(argv)
 
-    if args.data_dir is not None:
-        store: Store = JsonlStore(args.data_dir)
-        reports_dir = args.data_dir / "reports"
-    else:
-        store = get_store()
-        reports_dir = config.DATA_DIR / "reports"
+    store, data_dir = resolve_store(args.data_dir)
+    reports_dir = data_dir / "reports"
 
     render = reporter.report_from_store if args.v0 else reporter_v1.report_from_store
     path = generate(store, reports_dir, render=render)
