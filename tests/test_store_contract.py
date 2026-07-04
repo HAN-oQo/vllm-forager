@@ -91,6 +91,38 @@ def test_upsert_dedupes_same_item_within_one_call(store):
     assert store.get_item("o/r", 1)["title"] == "second"
 
 
+def test_upsert_merges_fields_preserving_ones_not_in_the_new_record(store):
+    """T1.10: a later upsert that omits a field must preserve it, not erase it — e.g. the
+    collector re-normalizing an item must not wipe a `category` T1.4's Analyst added."""
+    store.upsert_items([_item("o/r", 1, title="original")])
+
+    # a partial record (only `category`) merges onto the existing one, not replaces it.
+    store.upsert_items([{"repo": "o/r", "number": 1, "category": "build"}])
+    record = store.get_item("o/r", 1)
+    assert record["category"] == "build"
+    assert record["title"] == "original"  # preserved — this upsert never mentioned it
+
+    # a field the new record DOES specify still overwrites the old value.
+    store.upsert_items([_item("o/r", 1, title="updated")])
+    record = store.get_item("o/r", 1)
+    assert record["title"] == "updated"
+    assert record["category"] == "build"  # untouched — this upsert didn't mention it either
+
+
+def test_upsert_dedupes_same_item_within_one_call_by_merging(store):
+    """Two partial records for the same (repo, number) in one call merge in order, not just
+    last-one-wins on the whole record — matching upsert's own field-level merge semantics."""
+    assert store.upsert_items(
+        [
+            {"repo": "o/r", "number": 1, "title": "t1", "category": "build"},
+            {"repo": "o/r", "number": 1, "title": "t1-renamed"},
+        ]
+    ) == {"o/r": 1}
+    record = store.get_item("o/r", 1)
+    assert record["title"] == "t1-renamed"  # the second record's field wins
+    assert record["category"] == "build"  # preserved from the first record in the same batch
+
+
 def test_upsert_routes_items_by_repo(store):
     assert store.upsert_items([_item("o/a", 1), _item("o/b", 1)]) == {"o/a": 1, "o/b": 1}
     assert store.get_item("o/a", 1) is not None

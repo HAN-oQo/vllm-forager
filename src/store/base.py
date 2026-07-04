@@ -25,11 +25,16 @@ class Store(ABC):
     def upsert_items(self, items: list[dict]) -> dict[str, int]:
         """Insert-or-update `items`, matched on their (repo, number).
 
-        Items may span multiple repos; the backend routes each to the right place.
-        Returns ``{repo: total_item_count}`` for **each repo touched** — the post-upsert
-        total for that repo, so a caller (e.g. the collector's progress log) never needs a
-        second full read to report it. Repos with no items in the batch are absent from the
-        map; an empty `items` returns ``{}``.
+        An item that already has a stored record is updated by **merging** the given fields
+        onto it, not replacing it wholesale: a field present on the existing record but absent
+        from the new one is preserved, while any field the new record does specify overwrites
+        the old value. (T1.10 — before this, a caller that writes a *partial* record, or a
+        collector re-normalization that never carries forward a field another stage added,
+        would silently erase that field.) Items may span multiple repos; the backend routes
+        each to the right place. Returns ``{repo: total_item_count}`` for **each repo
+        touched** — the post-upsert total for that repo, so a caller (e.g. the collector's
+        progress log) never needs a second full read to report it. Repos with no items in the
+        batch are absent from the map; an empty `items` returns ``{}``.
         """
 
     @abstractmethod

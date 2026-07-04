@@ -261,6 +261,14 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** view M1 outputs (report · trends · forecasts) in one screen instead of running CLI commands — the "follow-along" tool; PLAN.md sanctions an early thin version as soon as there's a loop to watch.
   - **e.g.:** `python -m dashboard` → localhost shows the latest cited report + per-category trend charts + the forecast log. Read-only, no auth.
   - **Test:** `tests/test_dashboard.py` — seed a store fixture on `tmp_path`, assert the render functions return the report body + correct trend series (offline); a live server smoke = `@pytest.mark.integration`.
+- [x] **T1.10 Store merge-on-upsert semantics** — `src/store/base.py` + both backends: `upsert_items` merges the given fields onto an existing `(repo, number)` record instead of fully replacing it, across `JsonlStore` and `FirestoreStore` (flagged as a known limitation in T1.4's `analyst.py` docstring).
+  - **Why:** the collector's `_normalize()` never carries `category`/`taxonomy_version` forward, so re-fetching an already-classified item (any new comment/label bumps `updated_at` back into the incremental window) silently wiped its classification on the next collection cycle.
+  - **e.g.:** an item classified `category="build"` gets re-collected after a new comment; the re-normalized record has no `category` key → the stored record keeps `category="build"`, only the fields the new record actually specifies (title/state/labels/etc.) are overwritten.
+  - **Test:** `tests/test_store_contract.py` — a second upsert that omits a previously-set field preserves it; a second upsert that specifies a field overwrites it; both backends (JsonlStore offline, FirestoreStore `@pytest.mark.integration`) pass the same contract.
+- [ ] **T1.11 Shared store-selection CLI helper** — extract the `--data-dir → JsonlStore(data_dir) else get_store()` branch (duplicated across `src/analyze.py`, `src/forecast.py`, `src/report.py`, `dashboard/__main__.py`) into one shared helper.
+  - **Why:** past the codebase's own rule-of-three — a 4th copy landed with T1.9's dashboard; a future change to store selection now needs 4 hand-edited call sites.
+  - **e.g.:** a shared `resolve_store(args.data_dir) -> (store_or_factory, data_dir)` (or similar) helper in `src/store/__init__.py`, called from all 4 CLIs.
+  - **Test:** existing CLI tests (`test_analyze.py`/`test_forecast.py`/`test_report.py`/`test_dashboard.py`) continue to pass unchanged against the shared helper — a refactor, not a behavior change.
 
 ## M2 — Outer loop: grading + candidate discovery
 

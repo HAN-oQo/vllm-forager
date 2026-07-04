@@ -5,11 +5,15 @@ a falsifiable prediction now ("this will become important"), timestamped and wit
 resolution rule, so a later grading pass (T2.1) can compare it against what actually happened
 and score how well-calibrated this pipeline's judgment is.
 
-Storage: predictions are NOT bolted onto item records — T1.4's own review found that writing
-extra fields onto collector-owned item records gets silently clobbered the next time the
-collector re-fetches that item (``Store.upsert_items`` is a full replace, not a merge, on
-every backend). Predictions instead live in their own append-only log in the KB's generic
-state map: ``prediction@1``, ``prediction@2``, ... plus one ``prediction_count`` index.
+Storage: predictions are NOT bolted onto item records — at the time this module was written,
+T1.4's own review had found that writing extra fields onto collector-owned item records gets
+silently clobbered the next time the collector re-fetches that item (``Store.upsert_items``
+was a full replace, not a merge, on every backend — since fixed in T1.10). Predictions still
+belong in their own append-only log rather than on item records: unlike a classification (one
+value per item, naturally overwritten as re-classified), a prediction log is inherently
+history — many entries can exist per item over time, which a per-item field could never
+represent. State map: ``prediction@1``, ``prediction@2``, ... plus one ``prediction_count``
+index.
 
 Known limitation (not fixed here): unlike :mod:`src.taxonomy`/:mod:`src.policy`, which hold a
 *small, curated* number of versions of one object, this log grows without bound (one entry

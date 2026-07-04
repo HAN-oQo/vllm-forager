@@ -71,10 +71,16 @@ def _write_items(path: Path, items: dict[int, dict]) -> None:
 
 
 def merge_jsonl(path: Path, records: list[dict]) -> int:
-    """Upsert `records` (by ``number``) into the JSONL at `path`; return the total count."""
+    """Upsert `records` (by ``number``) into the JSONL at `path`; return the total count.
+
+    Each record is **merged** onto whatever's already stored for its ``number`` (T1.10) —
+    fields the record doesn't mention are preserved from the existing one, fields it does
+    mention overwrite the old value. Two records for the same ``number`` within one call merge
+    in order (last one's fields win on overlap), same as merging one at a time against disk.
+    """
     existing = _read_items(path)
     for rec in records:
-        existing[rec["number"]] = rec
+        existing[rec["number"]] = {**existing.get(rec["number"], {}), **rec}
     _write_items(path, existing)
     return len(existing)
 
