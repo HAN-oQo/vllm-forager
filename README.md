@@ -10,6 +10,30 @@ tracking criteria**, and uses those signals to run an always-on, self-improving 
 
 > Status: **M0 (bootstrapping)** — collector skeleton stage.
 
+## How it works
+
+```mermaid
+flowchart TB
+  SRC[("5 inference-serving repos<br/>vLLM · ROCm/vllm · SGLang · Dynamo · llm-d")]
+  COL["① Collect + index<br/>issues · PRs · releases"]
+  KB[("Knowledge Base")]
+  INTEL["② Classify · forecast · cited weekly report"]
+  EVO["♻️ Self-evolve<br/>grade own predictions → update taxonomy + policy"]
+  DISC["③ Discover ROCm contribution candidates<br/>parity gaps · reproducible bugs · good-first"]
+  ENG["④ Reproduce → patch → verify on MI250"]
+  HG{"⑤ Human review gate"}
+  PR["⭐ Draft PR → upstream vLLM"]
+
+  SRC --> COL --> KB --> INTEL --> DISC --> ENG --> HG -->|"approved"| PR
+  INTEL <--> EVO
+```
+
+⭐ is the **upstream-vLLM draft-PR agent** — the product's ultimate output — reachable only after a patch is
+verified on real **MI250** hardware and a **human approves**; nothing goes upstream automatically. The ♻️ loop is
+the differentiator: the agent grades its own past predictions to keep improving its taxonomy + policy. Full
+architecture, including the dev-loop / self-build view, is in
+[`docs/PLAN.md`](docs/PLAN.md#architecture-at-a-glance).
+
 ## Why ROCm
 
 Available hardware is 3x MI250 (AMD Instinct, ROCm). vLLM's ROCm path is less mature than CUDA, so it has more
