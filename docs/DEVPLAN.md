@@ -234,7 +234,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_taxonomy.py` — v1 → add category → v2; both retrievable; `active` returns v2.
 - [x] **T1.3 Policy object (versioned)** — `src/policy.py` (scoring weights, prompt templates, active taxonomy ref).
       Test: `tests/test_policy.py` — versions are append-only/immutable; `get_active()` returns latest.
-- [ ] **T1.4 Analyst agent** — classify delta items into taxonomy via `llm.complete`; write labels + evidence to KB.
+- [x] **T1.4 Analyst agent** — classify delta items into taxonomy via `llm.complete`; write labels + evidence to KB.
       Test: `tests/test_analyst.py` — mock `llm.complete` → item updated with category + citation preserved.
 - [ ] **T1.5 Forecaster agent** — emit calibrated predictions `{claim, resolution_rule, prob, due_date, evidence}`.
       Test: `tests/test_forecaster.py` — mock llm → stored prediction validates against schema (prob∈[0,1], due>now).
