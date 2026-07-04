@@ -166,7 +166,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** a token lifts the limit 60→5000/hr, and on exhaustion we wait for reset instead of crashing.
   - **e.g.:** `403` + `X-RateLimit-Remaining: 0` → sleep until reset then retry; `GITHUB_TOKEN` → `Bearer` header.
   - **Test:** `tests/test_collector.py::test_headers_token`, `::test_rate_limit_no_wait_on_ok`, `::test_rate_limit_waits_on_403`.
-- [ ] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`, `get_state`, `set_state`); move JSONL logic into `src/store/jsonl_store.py`; collector writes via the interface.
+- [x] **T0.6 Pluggable store interface** — extract `src/store/base.py` (`upsert_items`, `get_item`, `query`, `get_state`, `set_state`); move JSONL logic into `src/store/jsonl_store.py`; collector writes via the interface.
   - **Why:** swap JSONL → Firestore (M0.6) later without touching the collector/agents — one interface, many backends.
   - **e.g.:** `get_store().upsert_items(recs)` writes JSONL today, Firestore tomorrow, same call.
   - **Test:** `tests/test_store_jsonl.py` — upsert + query(by repo/label/state) + state round-trip on `tmp_path`.

@@ -18,7 +18,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import os
 import sys
 import time
@@ -35,6 +34,7 @@ except Exception:  # works even if python-dotenv isn't installed
     pass
 
 from . import config
+from .store.jsonl_store import JsonlStore, load_state, merge_jsonl, save_state
 
 API = "https://api.github.com"
 
@@ -51,15 +51,15 @@ def _headers() -> dict:
     return h
 
 
+# _load_state / _save_state / _merge_jsonl stay as thin wrappers over the store's format
+# helpers (the single source of truth for the on-disk JSONL/state format) so the T0.3–T0.4
+# named tests keep exercising the collector surface. `main()` now goes through the Store.
 def _load_state() -> dict:
-    if config.STATE_PATH.exists():
-        return json.loads(config.STATE_PATH.read_text())
-    return {}
+    return load_state(config.STATE_PATH)
 
 
 def _save_state(state: dict) -> None:
-    config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    config.STATE_PATH.write_text(json.dumps(state, indent=2))
+    save_state(config.STATE_PATH, state)
 
 
 def _sleep_for_rate_limit(resp: requests.Response) -> bool:
@@ -154,31 +154,10 @@ def _normalize(it: dict, slug: str) -> dict:
 def _merge_jsonl(path, records: list[dict]) -> int:
     """Upsert by `number`, then rewrite atomically. Returns the total record count.
 
-    Tolerates a corrupt/partial line in an existing file (e.g. from an interrupted write):
-    such lines are skipped with a warning instead of aborting the whole run.
+    Thin wrapper over :func:`src.store.jsonl_store.merge_jsonl` (see the note above): it
+    tolerates a corrupt/partial line on read and rewrites atomically.
     """
-    existing: dict[int, dict] = {}
-    if path.exists():
-        # Split on "\n" only — the record delimiter used when writing (below). Do NOT use
-        # str.splitlines(), which also breaks on U+2028/U+2029/U+0085 etc.; because records
-        # are written with ensure_ascii=False, such characters appear literally inside JSON
-        # string bodies and would otherwise shatter one record into unparseable fragments.
-        for lineno, line in enumerate(path.read_text().split("\n"), 1):
-            if not line.strip():
-                continue
-            try:
-                r = json.loads(line)
-            except json.JSONDecodeError as exc:
-                print(f"  !! {path.name}:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
-                continue
-            existing[r["number"]] = r
-    for r in records:
-        existing[r["number"]] = r
-    ordered = sorted(existing.values(), key=lambda r: r.get("updated_at") or "")
-    tmp = path.with_suffix(path.suffix + ".tmp")
-    tmp.write_text("\n".join(json.dumps(r, ensure_ascii=False) for r in ordered) + "\n")
-    tmp.replace(path)  # atomic rename — an interrupted write can't corrupt the file
-    return len(ordered)
+    return merge_jsonl(path, records)
 
 
 def main() -> None:
@@ -189,7 +168,7 @@ def main() -> None:
     args = ap.parse_args()
 
     config.DATA_DIR.mkdir(parents=True, exist_ok=True)
-    state = {} if args.full else _load_state()
+    store = JsonlStore(config.DATA_DIR)  # write via the pluggable Store interface (T0.6)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
     # First run / --full: start from a rolling lookback window, not the beginning of time.
@@ -205,20 +184,20 @@ def main() -> None:
 
     for repo in config.REPOS:
         slug = repo["slug"]
-        since = state.get(slug, default_since)
+        # --full ignores the stored cursor and re-fetches the whole lookback window.
+        since = default_since if args.full else (store.get_state(slug) or default_since)
         print(f"[{slug}] since {since} …")
         try:
             records = fetch_repo(slug, since)
         except Exception as exc:  # isolate: one repo's failure must not abort the rest
             print(f"  !! {slug} failed: {exc} — skipping (cursor preserved)", file=sys.stderr)
             continue
-        out_path = config.DATA_DIR / (slug.replace("/", "__") + ".jsonl")
-        total = _merge_jsonl(out_path, records)
-        state[slug] = now
-        _save_state(state)  # persist progress per repo so a later failure can't lose it
-        print(f"  +{len(records)} updated · {total} total → {out_path.name}")
+        totals = store.upsert_items(records)  # {repo: post-upsert total} — no re-read needed
+        store.set_state(slug, now)  # persist progress per repo so a later failure can't lose it
+        # `slug` is absent from totals only when there were no records to write this cycle.
+        total_str = f" · {totals[slug]} total" if slug in totals else ""
+        print(f"  +{len(records)} updated{total_str} → {slug.replace('/', '__')}.jsonl")
 
-    _save_state(state)
     print("done.")
 
 
