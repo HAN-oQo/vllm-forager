@@ -8,14 +8,16 @@ default) and :class:`~src.store.firestore_store.FirestoreStore` (a live Firestor
         gcloud emulators firestore start --host-port=0.0.0.0:8081 --database-mode=firestore-native
     FIRESTORE_EMULATOR_HOST=localhost:8081 pytest --run-integration tests/test_store_contract.py
 
-The assertions themselves are the ones :mod:`tests.test_store_jsonl` already pins for
-``JsonlStore`` alone; this file generalizes them across the ``Store`` interface so a future
-backend only needs to pass this one suite.
+These assertions used to live in :mod:`tests.test_store_jsonl` as ``JsonlStore``-only tests;
+they're generalized here across the whole ``Store`` interface so a future backend only needs
+to pass this one suite. :mod:`tests.test_store_jsonl` now covers only what's genuinely unique
+to the on-disk JSONL layout (one file per repo, corrupt-line tolerance, etc.).
 """
 
 from __future__ import annotations
 
 import os
+import re
 
 import pytest
 import requests
@@ -25,29 +27,39 @@ from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m0_6
 
-# A fixed test project: each firestore-backed test clears it first (see _make_firestore), so
-# reusing one project across the file is fine — no cross-test pollution.
-_FIRESTORE_PROJECT = "forager-contract-test"
+
+def _project_id_for(test_id: str) -> str:
+    """A Firestore project id unique to this test node (each test gets its own namespace).
+
+    Derived from the pytest node id rather than a fixed shared project — a shared project
+    cleared per-test only works under strictly serial execution; a unique project per test
+    removes the cross-test/parallel-worker collision risk entirely (e.g. under pytest-xdist).
+    """
+    slug = re.sub(r"[^a-z0-9-]+", "-", test_id.lower()).strip("-")
+    return f"forager-ct-{slug}"[:63]  # Firestore project ids are capped at 63 chars
 
 
 def _clear_firestore_emulator(project: str) -> None:
-    """Wipe every document for `project` in the emulator — test isolation, emulator-only.
+    """Wipe every document for `project` in the emulator — belt-and-suspenders isolation.
 
     Uses the emulator's admin REST endpoint (real Firestore has no such call; this only ever
-    runs against ``FIRESTORE_EMULATOR_HOST``, never production).
+    runs against ``FIRESTORE_EMULATOR_HOST``, never production). Each test already gets its
+    own project (see :func:`_project_id_for`), so this guards against leftover data from a
+    previous *interrupted* run of the same test rather than cross-test pollution.
     """
     host = os.environ["FIRESTORE_EMULATOR_HOST"]
     url = f"http://{host}/emulator/v1/projects/{project}/databases/(default)/documents"
     requests.delete(url, timeout=10)
 
 
-def _make_jsonl(tmp_path):
+def _make_jsonl(tmp_path, test_id):
     return JsonlStore(tmp_path)
 
 
-def _make_firestore(tmp_path):
-    _clear_firestore_emulator(_FIRESTORE_PROJECT)
-    return FirestoreStore(project=_FIRESTORE_PROJECT)
+def _make_firestore(tmp_path, test_id):
+    project = _project_id_for(test_id)
+    _clear_firestore_emulator(project)
+    return FirestoreStore(project=project)
 
 
 @pytest.fixture(
@@ -58,7 +70,7 @@ def _make_firestore(tmp_path):
 )
 def store(request, tmp_path):
     """A fresh :class:`Store` instance — parametrized over every backend under contract."""
-    return request.param(tmp_path)
+    return request.param(tmp_path, request.node.name)
 
 
 def _item(repo: str, number: int, **overrides) -> dict:
@@ -93,6 +105,17 @@ def test_upsert_and_get_item(store):
     assert len(store.query(repo="o/r")) == 2
 
     assert store.upsert_items([]) == {}  # empty batch → empty map
+
+
+def test_upsert_dedupes_same_item_within_one_call(store):
+    # Two records for the same (repo, number) in a SINGLE upsert_items call — last one wins,
+    # not an error. (A Firestore backend that writes every record verbatim without deduping
+    # first would reject this: its batch API forbids two writes to the same document in one
+    # commit — see src/store/firestore_store.py's upsert_items docstring.)
+    assert store.upsert_items(
+        [_item("o/r", 1, title="first"), _item("o/r", 1, title="second")]
+    ) == {"o/r": 1}
+    assert store.get_item("o/r", 1)["title"] == "second"
 
 
 def test_upsert_routes_items_by_repo(store):

@@ -18,7 +18,12 @@ docs, then filter/sort client-side in Python — rather than composing Firestore
 ``order_by`` queries. This keeps the two backends' semantics identical by construction (no risk
 of Firestore-only edge cases in ordering/index requirements) and avoids requiring a composite
 index for every filter combination in production Firestore (the local emulator doesn't enforce
-these, but real Firestore does).
+these, but real Firestore does). **This is not free the way it is on JSONL**, though: a
+``query()`` call with no ``repo`` — or any ``label``/``state``/``type``-only filter — reads the
+entire ``items`` collection (billed per document, network-bound), where the JSONL backend's
+"scan every file" is a local, unbilled disk read. Narrowing by ``repo`` keeps a query to that
+one repo's documents; a KB that outgrows this should add server-side indexes for the other
+filters rather than assume this backend is a drop-in performance match for JsonlStore.
 
 Connects to a live Firestore project by default; set ``FIRESTORE_EMULATOR_HOST`` (e.g.
 ``localhost:8081``) to point the client at a local emulator instead — the client library reads
@@ -68,15 +73,23 @@ class FirestoreStore(Store):
     def upsert_items(self, items: list[dict]) -> dict[str, int]:
         """Upsert `items` (batched, ``set`` overwrites) and return post-upsert totals per repo.
 
-        Batched in groups of :data:`_BATCH_LIMIT` (Firestore's per-batch write cap). Returns
-        ``{repo: post_upsert_total}`` for each repo touched, matching :class:`JsonlStore`'s
-        contract — computed with a follow-up count query per repo (a full read of that repo's
-        docs), same cost profile as the JSONL backend's own re-materializing rewrite.
+        Deduplicated by ``(repo, number)`` first, last occurrence wins — matching
+        :class:`JsonlStore`'s dict-merge semantics (``existing[rec["number"]] = rec``).
+        Without this, two records for the same item in one call could land in the same
+        Firestore batch, and Firestore's batch API rejects more than one write to the same
+        document in a single commit (``InvalidArgument``), unlike the JSONL backend's silent
+        last-write-wins. Batched in groups of :data:`_BATCH_LIMIT` (the per-batch write cap).
+        Returns ``{repo: post_upsert_total}`` for each repo touched, via a ``count()``
+        aggregation query per repo (one read regardless of that repo's size).
         """
         if not items:
             return {}
-        repos = {it["repo"] for it in items}
-        for batch_items in _chunks(items, _BATCH_LIMIT):
+        deduped: dict[tuple[str, int], dict] = {}
+        for it in items:
+            deduped[(it["repo"], it["number"])] = it
+        deduped_items = list(deduped.values())
+        repos = {repo for repo, _ in deduped}
+        for batch_items in _chunks(deduped_items, _BATCH_LIMIT):
             batch = self._client.batch()
             for it in batch_items:
                 batch.set(self._items.document(_item_doc_id(it["repo"], it["number"])), it)
@@ -84,7 +97,13 @@ class FirestoreStore(Store):
         return {repo: self._count_for_repo(repo) for repo in repos}
 
     def _count_for_repo(self, repo: str) -> int:
-        return sum(1 for _ in self._items.where(filter=FieldFilter("repo", "==", repo)).stream())
+        # google-cloud-firestore's type stubs mistype AggregationQuery.count() as returning
+        # the *class* rather than an instance, so mypy sees a missing `self` on `.get()` and
+        # an unindexable result. Verified correct at runtime against a live emulator — this
+        # is a stub bug, not a real type error.
+        query = self._items.where(filter=FieldFilter("repo", "==", repo)).count()
+        agg = query.get()  # type: ignore[call-arg]
+        return int(agg[0][0].value)  # type: ignore[index]
 
     def get_item(self, repo: str, number: int) -> dict | None:
         doc = self._items.document(_item_doc_id(repo, number)).get()
