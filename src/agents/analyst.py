@@ -26,6 +26,12 @@ simply doesn't mention ``category``, and the store-level merge leaves the existi
 — which also means the "delta" check above (``"category" not in item``) no longer treats a
 re-clobbered item as unclassified again, so a re-collected item doesn't get repeatedly and
 wastefully re-sent through ``llm.complete``.
+
+T1.5.1 made a taxonomy category a **path** (e.g. ``("ROCm/AMD", "DeepSeek-V4")``), not a flat
+name — this module still classifies into one flat label per item (via
+:attr:`~src.taxonomy.Taxonomy.labels`, each path's levels joined with `` > ``), unchanged from
+before T1.5.1. Teaching this module to classify into a *path* (writing each level from a
+controlled per-level label set) is T1.5.2's job, not this one's.
 """
 
 from __future__ import annotations
@@ -34,7 +40,7 @@ import sys
 
 from .. import llm
 from ..store.base import Store
-from ..taxonomy import Taxonomy
+from ..taxonomy import Taxonomy, casefold_label
 from ..taxonomy import get_active as get_active_taxonomy
 from .reporter import OTHER
 
@@ -63,17 +69,17 @@ def _prompt(item: dict, categories: tuple[str, ...]) -> str:
 def _canonical_category(raw: object, categories: tuple[str, ...]) -> str:
     """Match `raw` against `categories` case/whitespace-insensitively; else :data:`OTHER`.
 
-    Mirrors :func:`~src.taxonomy.add_category`'s own ``.strip().casefold()`` normalization,
-    so a reply of ``"ROCm-Build"`` against a taxonomy category ``"rocm-build"`` is recognized
-    as the same category instead of silently becoming :data:`OTHER` for what the model
-    actually got right. Returns the taxonomy's own canonical spelling on a match, not the
-    model's raw casing.
+    Uses :func:`~src.taxonomy.casefold_label` — the same normalization
+    :func:`~src.taxonomy.add_category` uses to dedup categories — so a reply of
+    ``"ROCm-Build"`` against a taxonomy category ``"rocm-build"`` is recognized as the same
+    category instead of silently becoming :data:`OTHER` for what the model actually got right.
+    Returns the taxonomy's own canonical spelling on a match, not the model's raw casing.
     """
     if not isinstance(raw, str):
         return OTHER
-    normalized = raw.strip().casefold()
+    normalized = casefold_label(raw)
     for category in categories:
-        if category.strip().casefold() == normalized:
+        if casefold_label(category) == normalized:
             return category
     return OTHER
 
@@ -87,9 +93,9 @@ def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     Raises:
         llm.LLMError: the completion call failed (transport error, timeout, non-JSON reply).
     """
-    reply = llm.complete(_prompt(item, taxonomy.categories), json_schema=_CATEGORY_SCHEMA)
+    reply = llm.complete(_prompt(item, taxonomy.labels), json_schema=_CATEGORY_SCHEMA)
     raw_category = reply.get("category") if isinstance(reply, dict) else None
-    category = _canonical_category(raw_category, taxonomy.categories)
+    category = _canonical_category(raw_category, taxonomy.labels)
     return {**item, "category": category, "taxonomy_version": taxonomy.version}
 
 

@@ -44,7 +44,7 @@ def test_classify_item_sets_category_and_preserves_citation(
         return {"category": "rocm-build"}
 
     monkeypatch.setattr(llm, "complete", fake_complete)
-    taxonomy = Taxonomy(version=1, categories=("rocm-build", "performance"))
+    taxonomy = Taxonomy(version=1, categories=(("rocm-build",), ("performance",)))
     item = _item("o/r", 1, "hipBLAS build fails on gfx90a")
 
     result = analyst.classify_item(item, taxonomy)
@@ -59,6 +59,26 @@ def test_classify_item_sets_category_and_preserves_citation(
     assert "rocm-build, performance" in captured["prompt"]
 
 
+def test_classify_item_flattens_a_multi_level_taxonomy_path_to_one_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T1.5.1: a taxonomy category is now a path; classify_item still classifies into one
+    flat label per item (via Taxonomy.labels) until T1.5.2 teaches it to classify per-level."""
+    captured = {}
+
+    def fake_complete(prompt: str, *, json_schema: dict) -> dict:
+        captured["prompt"] = prompt
+        return {"category": "ROCm/AMD > DeepSeek-V4 > performance"}
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+    taxonomy = Taxonomy(version=1, categories=(("ROCm/AMD", "DeepSeek-V4", "performance"),))
+
+    result = analyst.classify_item(_item("o/r", 1, "MLA decode regression"), taxonomy)
+
+    assert result["category"] == "ROCm/AMD > DeepSeek-V4 > performance"
+    assert "ROCm/AMD > DeepSeek-V4 > performance" in captured["prompt"]
+
+
 def test_prompt_truncates_long_body() -> None:
     long_body = "x" * (analyst._BODY_CHARS + 500)
     prompt = analyst._prompt(_item("o/r", 1, "t", body=long_body), ("a",))
@@ -70,7 +90,7 @@ def test_classify_item_unknown_category_falls_back_to_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(llm, "complete", lambda *a, **k: {"category": "not-a-real-category"})
-    taxonomy = Taxonomy(version=1, categories=("rocm-build",))
+    taxonomy = Taxonomy(version=1, categories=(("rocm-build",),))
     result = analyst.classify_item(_item("o/r", 1, "x"), taxonomy)
     assert result["category"] == analyst.OTHER
 
@@ -81,7 +101,7 @@ def test_classify_item_category_match_is_case_and_whitespace_insensitive(
 ) -> None:
     """Mirrors taxonomy.add_category's own casefold+strip normalization."""
     monkeypatch.setattr(llm, "complete", lambda *a, **k: {"category": variant})
-    taxonomy = Taxonomy(version=1, categories=("rocm-build",))
+    taxonomy = Taxonomy(version=1, categories=(("rocm-build",),))
     result = analyst.classify_item(_item("o/r", 1, "x"), taxonomy)
     # the taxonomy's own canonical spelling is used, not the model's raw casing
     assert result["category"] == "rocm-build"
@@ -91,7 +111,7 @@ def test_classify_item_non_dict_reply_falls_back_to_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(llm, "complete", lambda *a, **k: "not json")
-    taxonomy = Taxonomy(version=1, categories=("rocm-build",))
+    taxonomy = Taxonomy(version=1, categories=(("rocm-build",),))
     result = analyst.classify_item(_item("o/r", 1, "x"), taxonomy)
     assert result["category"] == analyst.OTHER
 

@@ -285,7 +285,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Acceptance:** `pytest -m m1` green · the dashboard shows the `AMD → DeepSeek → performance → attention → PRs`
 > tree with per-node summaries · every leaf carries an evidence URL.
 
-- [ ] **T1.5.1 Hierarchical taxonomy (path)** — evolve `src/taxonomy.py` so a category is a **path** `[level0, level1, …]` (engine/vendor → area → topic), still versioned; keep back-compat so an existing flat label reads as a depth-1 path.
+- [x] **T1.5.1 Hierarchical taxonomy (path)** — evolve `src/taxonomy.py` so a category is a **path** `[level0, level1, …]` (engine/vendor → area → topic), still versioned; keep back-compat so an existing flat label reads as a depth-1 path.
   - **Why:** a single flat label can't express `AMD → DeepSeek-V4 → performance → attention`; a path is what lets the report nest into a tree.
   - **e.g.:** an item carries `path=["ROCm/AMD","DeepSeek-V4","performance","attention"]` instead of `category="rocm"`.
   - **Test:** `tests/test_taxonomy.py` — a path round-trips through the store; versioning still holds; a legacy flat label still reads as a depth-1 path.
