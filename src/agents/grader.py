@@ -4,11 +4,15 @@ Brier — the self-evolution signal T2.2's policy update reads from.
 A prediction (T1.5, :mod:`~src.agents.forecaster`) is only useful once its ``due_date`` has
 passed and someone checks whether it actually came true. This module is that check: for every
 *matured* (due_date ≤ now), *not-yet-graded* prediction, it looks up the cited evidence
-item(s) by parsing their GitHub URL back into ``(repo, number)`` (O(1) :meth:`Store.get_item`
-lookups, not a full :meth:`Store.query` scan — the KB can be tens of thousands of items, per
-the production dataset behind this project), then asks ``llm.complete`` to judge true/false
-against that item's *current* state, since a free-text ``resolution_rule`` ("will merge by Q3")
-isn't reducible to a fixed field comparison the way item state alone would be.
+item(s) by parsing their GitHub URL back into ``(repo, number)`` and calling
+:meth:`Store.get_item` — a real O(1) doc-id ``GET`` on :class:`~src.store.firestore_store.
+FirestoreStore`; on the default :class:`~src.store.jsonl_store.JsonlStore` it's still a
+full read+parse of *one repo's* file rather than an O(1) lookup, but that's meaningfully
+cheaper than a :meth:`Store.query` scan of *every* repo — the KB can be tens of thousands of
+items across 5 repos, per the production dataset behind this project. Once an item is found,
+``llm.complete`` judges true/false against its *current* state, since a free-text
+``resolution_rule`` ("will merge by Q3") isn't reducible to a fixed field comparison the way
+item state alone would be.
 
 Grades are stored keyed by the **prediction's own log index** (``grade@<same index>``), a 1:1
 correspondence rather than a separate incrementing counter — a grade only ever resolves one
@@ -22,9 +26,28 @@ the resolved outcome, plus the Brier score (mean squared error between ``prob`` 
 outcome) — the calibration half precision/recall can't see (a run that's always confidently
 wrong scores 0 precision either way, but only Brier penalizes overconfidence specifically).
 
-Known limitation, not fixed here: like :mod:`~src.agents.forecaster`'s own prediction log,
-grades add a second unbounded key range to the state map, with the same "no server-side
-filtering, whole-map read/write" cost profile documented there — see that module's docstring.
+Known limitations, not fixed here:
+- Like :mod:`~src.agents.forecaster`'s own prediction log, grades add a second unbounded key
+  range to the state map, with the same "no server-side filtering, whole-map read/write" cost
+  profile documented there. ``python -m src.grade`` compounds this further: it calls
+  :func:`grade_store` then :func:`list_grades` back to back, each independently re-walking
+  the full prediction log — twice the state-map I/O of a hypothetical single-pass CLI, on top
+  of the cost already inherited from :mod:`~src.agents.forecaster`.
+- ``_GITHUB_URL_RE`` requires an exact ``.../issues/N`` or ``.../pull/N`` match — a URL with a
+  trailing slash, query string, or fragment fails to parse and that evidence item is silently
+  dropped from the resolution prompt (degrading judgment quality, not crashing). Every URL
+  this codebase actually produces (:func:`~src.agents.reporter.evidence_url`) is already in
+  exactly this canonical form, so this only bites a hand-built or externally-sourced record —
+  mirrors :func:`~src.agents.reporter.evidence_url`'s own documented "malformed record" caveat.
+- The resolution judge sees only the cited item's ``state`` and ``title`` — no body, no
+  comments, and (per :mod:`dashboard.render`'s own documented gap) no real GitHub ``merged``
+  flag, since the collector never captures one. A closed-but-not-merged PR is indistinguishable
+  from a merged one on the fields available here; fixing this needs the same collector change
+  :mod:`dashboard.render` already flags, not a grader-side one.
+- ``grade_store``'s per-prediction ``try/except (llm.LLMError, GradeError)`` mirrors
+  :func:`~src.agents.forecaster.forecast_store`'s and :func:`~src.agents.analyst.analyze_store`'s
+  own narrow-catch-and-skip shape — an established pattern across all three sibling agents, not
+  something unique to this module.
 """
 
 from __future__ import annotations
@@ -39,6 +62,7 @@ from .. import llm
 from ..store.base import Store
 from . import forecaster
 from .forecaster import TS_FORMAT, Prediction, parse_ts
+from .reporter import repo_number_label
 
 _GRADE_KEY_PREFIX = "grade@"
 
@@ -50,8 +74,8 @@ _RESOLUTION_SCHEMA = {
 
 # Matches both the `.../issues/N` and `.../pull/N` forms reporter.evidence_url ever produces
 # (GitHub itself redirects between them) — this is the inverse of that function: URL back to
-# (repo, number), so a grade can look its cited item up in O(1) via Store.get_item rather than
-# scanning the whole store for a URL match.
+# (repo, number), so a grade can look its cited item up via Store.get_item (one repo's worth
+# of work, real O(1) on Firestore) rather than scanning the whole multi-repo store for a match.
 _GITHUB_URL_RE = re.compile(r"^https://github\.com/([^/]+/[^/]+)/(?:issues|pull)/(\d+)$")
 
 
@@ -99,40 +123,44 @@ class Grade:
         return (self.prediction.prob - (1.0 if self.outcome else 0.0)) ** 2
 
     def to_json(self) -> str:
-        """Serialize for storage in the KB's state map."""
-        return json.dumps(
-            {
-                "prediction": json.loads(self.prediction.to_json()),
-                "outcome": self.outcome,
-                "graded_at": self.graded_at,
-            }
-        )
+        """Serialize for storage in the KB's state map.
+
+        Only `outcome`/`graded_at` — the associated `Prediction` is **not** re-embedded, since
+        it's already stored under `prediction@<same index>` (see module docstring); a caller
+        reconstructing a `Grade` supplies that prediction back via :meth:`from_json`, avoiding
+        a second full copy of every prediction's fields for every grade recorded.
+        """
+        return json.dumps({"outcome": self.outcome, "graded_at": self.graded_at})
 
     @staticmethod
-    def from_json(raw: str) -> Grade:
-        """Deserialize a value previously produced by :meth:`to_json`.
+    def from_json(raw: str, prediction: Prediction) -> Grade:
+        """Deserialize a value previously produced by :meth:`to_json`, joined with its
+        corresponding `prediction` (the same index in `forecaster.iter_predictions`).
 
         Raises:
-            GradeError: `raw` isn't valid JSON, isn't shaped like a grade record, or its
-                embedded prediction/timestamp fails its own validation.
+            GradeError: `raw` isn't valid JSON, isn't shaped like a grade record, or
+                `graded_at` fails its own validation.
         """
         try:
             data = json.loads(raw)
             return Grade(
-                prediction=Prediction.from_json(json.dumps(data["prediction"])),
-                outcome=bool(data["outcome"]),
-                graded_at=data["graded_at"],
+                prediction=prediction, outcome=bool(data["outcome"]), graded_at=data["graded_at"]
             )
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError, AttributeError) as exc:
-            raise GradeError(f"corrupt grade record: {exc}") from exc
-        except forecaster.ForecastError as exc:
+        except (
+            json.JSONDecodeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            AttributeError,
+            forecaster.ForecastError,
+        ) as exc:
             raise GradeError(f"corrupt grade record: {exc}") from exc
 
 
 def _resolution_line(item: dict) -> str:
-    return (
-        f"{item.get('repo')}#{item.get('number')} [{item.get('state')}]: {item.get('title') or ''}"
-    )
+    # repo_number_label's "?" fallback (not `.get(key, "?")`) matters here too — an item
+    # missing repo/number would otherwise render the literal string "None" in the prompt.
+    return f"{repo_number_label(item)} [{item.get('state') or '?'}]: {item.get('title') or ''}"
 
 
 def _resolution_prompt(prediction: Prediction, items: list[dict]) -> str:
@@ -190,6 +218,10 @@ def grade_store(store: Store, *, now: datetime | None = None) -> list[Grade]:
     when = now or datetime.now(timezone.utc)
     graded = []
     for index, prediction in forecaster.iter_predictions(store):
+        # Cheap in-memory check first — most predictions in a large log aren't due yet, so
+        # this skips them for free before the (comparatively expensive) get_state I/O below.
+        if not is_matured(prediction, now=when):
+            continue
         key = f"{_GRADE_KEY_PREFIX}{index}"
         if store.get_state(key) is not None:
             continue
@@ -208,10 +240,10 @@ def grade_store(store: Store, *, now: datetime | None = None) -> list[Grade]:
 def list_grades(store: Store) -> list[Grade]:
     """Every recorded grade, in prediction order (oldest first)."""
     grades = []
-    for index, _ in forecaster.iter_predictions(store):
+    for index, prediction in forecaster.iter_predictions(store):
         stored = store.get_state(f"{_GRADE_KEY_PREFIX}{index}")
         if stored is not None:
-            grades.append(Grade.from_json(stored))
+            grades.append(Grade.from_json(stored, prediction))
     return grades
 
 

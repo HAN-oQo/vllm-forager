@@ -5,6 +5,7 @@ maturity gating, the evidence-URL-to-item lookup, per-prediction failure isolati
 grade/prediction 1:1 index correspondence, and the KB round-trip.
 """
 
+import json
 from datetime import datetime, timezone
 
 import pytest
@@ -137,18 +138,26 @@ def test_resolve_prediction_missing_outcome_raises(
 
 
 def test_grade_json_roundtrip() -> None:
+    prediction = _prediction()
+    grade = grader.Grade(prediction=prediction, outcome=True, graded_at="2026-03-01T00:00:00Z")
+    assert grader.Grade.from_json(grade.to_json(), prediction) == grade
+
+
+def test_grade_to_json_does_not_reembed_the_prediction() -> None:
+    """Regression: to_json used to nest a full copy of the prediction's own fields — a second
+    copy of every prediction's data in the state map, on top of prediction@<index>."""
     grade = grader.Grade(prediction=_prediction(), outcome=True, graded_at="2026-03-01T00:00:00Z")
-    assert grader.Grade.from_json(grade.to_json()) == grade
+    assert set(json.loads(grade.to_json())) == {"outcome", "graded_at"}
 
 
 def test_grade_from_json_malformed_raises() -> None:
     with pytest.raises(grader.GradeError, match="corrupt grade record"):
-        grader.Grade.from_json("not valid json")
+        grader.Grade.from_json("not valid json", _prediction())
 
 
 def test_grade_from_json_missing_field_raises() -> None:
     with pytest.raises(grader.GradeError, match="corrupt grade record"):
-        grader.Grade.from_json('{"outcome": true}')
+        grader.Grade.from_json('{"foo": true}', _prediction())
 
 
 def test_grade_construction_rejects_malformed_graded_at() -> None:
