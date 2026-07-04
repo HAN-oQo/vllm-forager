@@ -97,12 +97,43 @@ _PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
 
 
 def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
-    """Estimate USD cost from the price table; unknown model → 0.0."""
+    """Estimate USD cost from the price table; unknown model → 0.0.
+
+    The API echoes a *resolved* model id (e.g. ``claude-sonnet-5-20260514``) that won't match
+    the bare-alias table keys, so on an exact miss fall back to the longest table key that is
+    a prefix of ``model``. Without this the estimate is silently 0 for every real API call.
+    """
     rate = _PRICES_PER_MTOK.get(model)
+    if rate is None:
+        prefixes = [key for key in _PRICES_PER_MTOK if model.startswith(key)]
+        if prefixes:
+            rate = _PRICES_PER_MTOK[max(prefixes, key=len)]
     if rate is None:
         return 0.0
     price_in, price_out = rate
     return prompt_tokens / 1e6 * price_in + completion_tokens / 1e6 * price_out
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read an int env var; raise :class:`LLMError` (not a bare ValueError) if malformed."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError as exc:
+        raise LLMError(f"{name}={raw!r} is not a valid integer") from exc
+
+
+def _env_float(name: str, default: float) -> float:
+    """Read a float env var; raise :class:`LLMError` (not a bare ValueError) if malformed."""
+    raw = os.getenv(name)
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError as exc:
+        raise LLMError(f"{name}={raw!r} is not a valid number") from exc
 
 
 def _model_for(provider: str) -> str | None:
@@ -133,11 +164,11 @@ def _parse_json_object(text: str) -> dict:
     """Parse a model reply into a dict, tolerating a ```json fenced block. Raise on failure."""
     stripped = text.strip()
     if stripped.startswith("```"):
-        lines = stripped.splitlines()
-        lines = lines[1:]  # drop opening fence (``` or ```json)
-        if lines and lines[-1].strip().startswith("```"):
-            lines = lines[:-1]  # drop closing fence
-        stripped = "\n".join(lines).strip()
+        # Drop the opening fence line (``` or ```json), then a trailing fence wherever it
+        # sits — on its own line OR glued to the JSON (…}```), which a line-based strip misses.
+        stripped = stripped.split("\n", 1)[1].strip() if "\n" in stripped else ""
+        if stripped.endswith("```"):
+            stripped = stripped[:-3].strip()
     try:
         parsed = json.loads(stripped)
     except json.JSONDecodeError as exc:
@@ -172,6 +203,7 @@ def _run_claude_cli(
         cmd += ["--model", model]
     if system:
         cmd += ["--append-system-prompt", system]
+    cmd.append("--")  # end-of-options: a prompt starting with '-' must not be read as a flag
     cmd.append(prompt)
 
     start = time.monotonic()
@@ -195,8 +227,9 @@ def _run_claude_cli(
         raise LLMError(f"claude CLI reported an error: {data.get('result')!r}")
 
     usage = data.get("usage") or {}
-    prompt_tokens = int(usage.get("input_tokens", 0))
-    completion_tokens = int(usage.get("output_tokens", 0))
+    # `... or 0`, not `.get(k, 0)`: a default only applies to a MISSING key, not a present null.
+    prompt_tokens = int(usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("output_tokens") or 0)
     meta = CallMeta(
         provider="claude_cli",
         model=str(data.get("model") or model or ""),
@@ -204,7 +237,7 @@ def _run_claude_cli(
         completion_tokens=completion_tokens,
         total_tokens=prompt_tokens + completion_tokens,
         latency_s=latency,
-        cost_usd=float(data.get("total_cost_usd", 0.0)),
+        cost_usd=float(data.get("total_cost_usd") or 0.0),
     )
     return str(data.get("result", "")), meta
 
@@ -225,7 +258,7 @@ def _run_claude_api(
     }
     body: dict[str, Any] = {
         "model": model,
-        "max_tokens": int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+        "max_tokens": _env_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
         "messages": [{"role": "user", "content": prompt}],
     }
     if system:
@@ -238,8 +271,8 @@ def _run_claude_api(
     blocks = data.get("content") or []
     text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
     usage = data.get("usage") or {}
-    prompt_tokens = int(usage.get("input_tokens", 0))
-    completion_tokens = int(usage.get("output_tokens", 0))
+    prompt_tokens = int(usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("output_tokens") or 0)
     model_used = str(data.get("model") or model)
     meta = CallMeta(
         provider="claude_api",
@@ -268,7 +301,7 @@ def _run_local(
     body: dict[str, Any] = {
         "model": model,
         "messages": messages,
-        "max_tokens": int(os.getenv("LLM_MAX_TOKENS", str(DEFAULT_MAX_TOKENS))),
+        "max_tokens": _env_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
     }
     headers = {"content-type": "application/json"}
     key = os.getenv("LLM_API_KEY")  # optional — vLLM can be run with an --api-key
@@ -283,15 +316,19 @@ def _run_local(
         text = data["choices"][0]["message"]["content"]
     except (KeyError, IndexError, TypeError) as exc:
         raise LLMError(f"local endpoint returned an unexpected shape: {str(data)[:200]}") from exc
+    if text is None:
+        # A present-but-null content (e.g. a filtered / tool-call / empty completion) would
+        # otherwise become the literal string "None"; surface it as an error instead.
+        raise LLMError("local endpoint returned null message content (empty completion)")
     usage = data.get("usage") or {}
-    prompt_tokens = int(usage.get("prompt_tokens", 0))
-    completion_tokens = int(usage.get("completion_tokens", 0))
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
     meta = CallMeta(
         provider="local",
         model=str(data.get("model") or model),
         prompt_tokens=prompt_tokens,
         completion_tokens=completion_tokens,
-        total_tokens=int(usage.get("total_tokens", prompt_tokens + completion_tokens)),
+        total_tokens=int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)),
         latency_s=latency,
         cost_usd=0.0,  # self-hosted: no per-token charge
     )
@@ -335,8 +372,8 @@ def complete_detailed(
     """
     # `or ... or DEFAULT_PROVIDER` (ending in a str literal) also narrows the type to str.
     resolved_provider = provider or os.getenv("LLM_PROVIDER") or DEFAULT_PROVIDER
-    resolved_timeout = float(
-        timeout if timeout is not None else os.getenv("LLM_TIMEOUT", DEFAULT_TIMEOUT_S)
+    resolved_timeout = (
+        float(timeout) if timeout is not None else _env_float("LLM_TIMEOUT", DEFAULT_TIMEOUT_S)
     )
     runner = _RUNNERS.get(resolved_provider)
     if runner is None:

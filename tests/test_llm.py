@@ -5,7 +5,7 @@ Each provider is mocked at its transport boundary (``subprocess.run`` for claude
 the prompt/system reach the backend, the reply is parsed, ``json_schema`` yields a dict,
 :class:`~src.llm.CallMeta` is populated, and every error path raises :class:`~src.llm.LLMError`.
 
-A live per-provider smoke test is ``@pytest.mark.integration`` (skipped in the default run).
+A live claude_cli smoke test is ``@pytest.mark.integration`` (skipped in the default run).
 """
 
 import json
@@ -71,6 +71,39 @@ def test_claude_cli_parses_result_and_metadata(monkeypatch):
     assert res.meta.latency_s >= 0.0
 
 
+def test_claude_cli_passes_end_of_options_separator(monkeypatch):
+    # A prompt starting with '-' must reach the CLI as a prompt, not be parsed as a flag:
+    # the '--' separator must come immediately before the prompt.
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"result": "y"}), stderr="")
+
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    llm.complete("--verbose please", provider="claude_cli")
+    cmd = captured["cmd"]
+    assert cmd[-2:] == ["--", "--verbose please"]
+
+
+def test_claude_cli_null_usage_fields_do_not_crash(monkeypatch):
+    # Present-but-null token/cost fields must coerce to 0, not raise TypeError.
+    def fake_run(cmd, **kwargs):
+        out = json.dumps(
+            {
+                "result": "ok",
+                "usage": {"input_tokens": None, "output_tokens": None},
+                "total_cost_usd": None,
+            }
+        )
+        return subprocess.CompletedProcess(cmd, 0, stdout=out, stderr="")
+
+    monkeypatch.setattr(llm.subprocess, "run", fake_run)
+    res = llm.complete_detailed("x", provider="claude_cli")
+    assert res.meta.total_tokens == 0
+    assert res.meta.cost_usd == 0.0
+
+
 def test_claude_cli_nonzero_exit_raises(monkeypatch):
     def fake_run(cmd, **kwargs):
         return subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom")
@@ -131,6 +164,26 @@ def test_claude_api_requires_key(monkeypatch):
         llm.complete("x", provider="claude_api")
 
 
+def test_claude_api_cost_matches_resolved_dated_model(monkeypatch):
+    # The API echoes a dated id (claude-sonnet-5-20260514); cost must still resolve via the
+    # prefix fallback rather than silently reporting 0.0.
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-test")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _FakeResp(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 1000, "output_tokens": 1000},
+                "model": "claude-sonnet-5-20260514",
+            }
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    res = llm.complete_detailed("hi", provider="claude_api")
+    assert res.meta.model == "claude-sonnet-5-20260514"
+    assert res.meta.cost_usd > 0.0  # prefix-matched "claude-sonnet-5" in the price table
+
+
 # --------------------------------------------------------------------- local (vLLM)
 
 
@@ -162,6 +215,19 @@ def test_local_openai_shape(monkeypatch):
 
 def test_local_requires_base_url(monkeypatch):
     monkeypatch.delenv("LLM_BASE_URL", raising=False)
+    with pytest.raises(llm.LLMError):
+        llm.complete("x", provider="local")
+
+
+def test_local_null_content_raises(monkeypatch):
+    # content: null (filtered / tool-call / empty) must raise, not return the string "None".
+    monkeypatch.setenv("LLM_BASE_URL", "http://x/v1")
+    monkeypatch.setenv("LLM_MODEL", "m")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _FakeResp({"choices": [{"message": {"content": None}}], "usage": {}})
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
     with pytest.raises(llm.LLMError):
         llm.complete("x", provider="local")
 
@@ -203,6 +269,24 @@ def test_json_schema_returns_dict_and_injects_directive(monkeypatch):
     assert out == {"category": "rocm-build"}
 
 
+def test_json_mode_strips_glued_closing_fence(monkeypatch):
+    # Closing fence on the SAME line as the JSON must still be stripped and parsed.
+    monkeypatch.setenv("LLM_BASE_URL", "http://x/v1")
+    monkeypatch.setenv("LLM_MODEL", "m")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        return _FakeResp(
+            {
+                "choices": [{"message": {"content": '```json\n{"category": "rocm-build"}```'}}],
+                "usage": {},
+            }
+        )
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+    out = llm.complete("x", json_schema={"type": "object"}, provider="local")
+    assert out == {"category": "rocm-build"}
+
+
 def test_json_mode_non_json_reply_raises(monkeypatch):
     monkeypatch.setenv("LLM_BASE_URL", "http://x/v1")
     monkeypatch.setenv("LLM_MODEL", "m")
@@ -226,6 +310,21 @@ def test_json_mode_non_json_reply_raises(monkeypatch):
 def test_unknown_provider_raises():
     with pytest.raises(llm.LLMError):
         llm.complete("x", provider="does-not-exist")
+
+
+def test_malformed_timeout_env_raises_llmerror(monkeypatch):
+    # A human-friendly-but-invalid value must surface as LLMError, not a bare ValueError.
+    monkeypatch.setenv("LLM_TIMEOUT", "30s")
+    with pytest.raises(llm.LLMError):
+        llm.complete("x", provider="claude_cli")
+
+
+def test_malformed_max_tokens_env_raises_llmerror(monkeypatch):
+    monkeypatch.setenv("LLM_BASE_URL", "http://x/v1")
+    monkeypatch.setenv("LLM_MODEL", "m")
+    monkeypatch.setenv("LLM_MAX_TOKENS", "4k")
+    with pytest.raises(llm.LLMError):
+        llm.complete("x", provider="local")
 
 
 # --------------------------------------------------------------------- live smoke
