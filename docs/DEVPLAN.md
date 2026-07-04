@@ -214,7 +214,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       `items` keyed `repo#number`; collection `state`).
       Test: `tests/test_store_contract.py` — **one contract test parametrized over jsonl + firestore** so both
       satisfy identical assertions; firestore param uses the **Firestore emulator**, marked `integration`.
-- [ ] **T0.6.2 Store factory** — `src/store/__init__.py::get_store()` selects impl via env `STORE=jsonl|firestore`.
+- [x] **T0.6.2 Store factory** — `src/store/__init__.py::get_store()` selects impl via env `STORE=jsonl|firestore`.
       Test: `tests/test_store_factory.py` — env selects the right class (firestore import mocked).
 - [ ] **T0.6.3 Migration** — `python -m src.store.migrate` (jsonl → firestore).
       Test: `tests/test_store_migrate.py` (`integration`) — sample jsonl → docs present in emulator.

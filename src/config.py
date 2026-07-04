@@ -63,3 +63,10 @@ MAX_RATE_LIMIT_RETRIES = 10
 # issue/PR numbers in the collected range exceeds this. Deleted/transferred items make small
 # gaps normal, so this is a ratio (5%), not a zero-tolerance check.
 DATA_QUALITY_GAP_RATIO_THRESHOLD = 0.05
+
+# Storage backend (T0.6.2): src.store.get_store() reads env STORE=jsonl|firestore (default
+# jsonl). FIRESTORE_PROJECT is only used by the firestore backend — None lets the client
+# library fall back to ambient credentials' default project (GOOGLE_CLOUD_PROJECT, gcloud
+# config, or the GCE/Cloud Run metadata server); set it to override, or to point at a local
+# emulator project alongside FIRESTORE_EMULATOR_HOST.
+FIRESTORE_PROJECT = os.getenv("FIRESTORE_PROJECT") or None
