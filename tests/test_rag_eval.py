@@ -133,13 +133,34 @@ def test_judge_faithfulness(monkeypatch: pytest.MonkeyPatch) -> None:
     assert rag_eval.judge_faithfulness("answer", ["evidence"]) is False
 
 
+def test_judge_faithfulness_rejects_non_bool_truthy_value(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A malformed reply (e.g. the JSON string "false") must never coerce to faithful=True."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"faithful": "false"})
+    assert rag_eval.judge_faithfulness("answer", ["evidence"]) is False
+
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"unexpected": "shape"})
+    assert rag_eval.judge_faithfulness("answer", ["evidence"]) is False
+
+
 # --------------------------------------------------------------------- golden-set evaluation
+
+
+def _fake_complete_factory(answer: str, faithful: bool):
+    """Build a fake `llm.complete` that answers both the answer-generation prompt and the
+    faithfulness-judge prompt correctly, distinguishing them by their distinctive wording."""
+
+    def fake(prompt: str, **kwargs) -> dict:
+        if "FULLY supported" in prompt:
+            return {"faithful": faithful}
+        return {"answer": answer}
+
+    return fake
 
 
 def test_evaluate_golden_set_scores_retrieval_and_hallucination(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"answer": "a grounded answer"})
+    monkeypatch.setattr(llm, "complete", _fake_complete_factory("a grounded answer", True))
     index = _corpus_index()
     golden = _load_golden()
 
@@ -153,6 +174,7 @@ def test_evaluate_golden_set_scores_retrieval_and_hallucination(
     # the absent-topic probe found nothing relevant -> answer_query refused -> no hallucination
     assert score.hallucination_rate == 0.0
     assert score.citation_accuracy == pytest.approx(1.0)
+    assert score.faithfulness == pytest.approx(1.0)
     assert score.passed is True
     assert score.created_at == "2026-01-01T00:00:00Z"
 
@@ -162,7 +184,7 @@ def test_evaluate_golden_set_flags_hallucination_when_guard_bypassed(
 ) -> None:
     """If retrieval ever DID surface evidence for an absent-topic query, that's a
     hallucination — verified by lowering the threshold so the guard doesn't kick in."""
-    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"answer": "a fabricated answer"})
+    monkeypatch.setattr(llm, "complete", _fake_complete_factory("a fabricated answer", True))
     index = _corpus_index()
     golden = _load_golden()
 
@@ -172,12 +194,28 @@ def test_evaluate_golden_set_flags_hallucination_when_guard_bypassed(
     assert score.passed is False  # hallucination_rate > HALLUCINATION_THRESHOLD
 
 
+def test_evaluate_golden_set_unfaithful_answer_fails_passed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An answer judged unfaithful must fail `passed` even when retrieval is perfect."""
+    monkeypatch.setattr(llm, "complete", _fake_complete_factory("a grounded answer", False))
+    index = _corpus_index()
+    golden = _load_golden()
+
+    score = rag_eval.evaluate_golden_set(index, golden, k=5, now=_NOW)
+
+    assert score.faithfulness == pytest.approx(0.0)
+    assert score.passed is False
+
+
 def test_evaluate_golden_set_skips_failing_query_and_keeps_going(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     def flaky(prompt: str, **kwargs) -> dict:
         if "FP8" in prompt:
             raise llm.LLMError("simulated failure")
+        if "FULLY supported" in prompt:
+            return {"faithful": True}
         return {"answer": "a grounded answer"}
 
     monkeypatch.setattr(llm, "complete", flaky)
@@ -186,13 +224,39 @@ def test_evaluate_golden_set_skips_failing_query_and_keeps_going(
 
     score = rag_eval.evaluate_golden_set(index, golden, k=5, now=_NOW)
 
-    # retrieval metrics are unaffected by a generation-side failure
+    # retrieval metrics are unaffected by a generation-side failure — the failing record's
+    # retrieval score was already accumulated before its generation step raised
+    assert score.recall_at_k == pytest.approx(1.0)
+
+
+def test_evaluate_golden_set_skips_malformed_record_and_keeps_going(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llm, "complete", _fake_complete_factory("a grounded answer", True))
+    index = _corpus_index()
+    golden = [{"relevant_ids": ["o/r#1"]}, *_load_golden()]  # missing "query" key
+
+    score = rag_eval.evaluate_golden_set(index, golden, k=5, now=_NOW)
+
     assert score.recall_at_k == pytest.approx(1.0)
 
 
 def test_evaluate_golden_set_empty_raises() -> None:
     with pytest.raises(rag_eval.RagEvalError, match="golden set is empty"):
         rag_eval.evaluate_golden_set(_corpus_index(), [])
+
+
+def test_evaluate_golden_set_no_absent_topic_probes_logs_and_defaults_hallucination(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(llm, "complete", _fake_complete_factory("a grounded answer", True))
+    index = _corpus_index()
+    golden = [rec for rec in _load_golden() if rec.get("relevant_ids")]
+
+    score = rag_eval.evaluate_golden_set(index, golden, k=5, now=_NOW)
+
+    assert score.hallucination_rate == 0.0
+    assert "hallucination_rate is unmeasured" in capsys.readouterr().err
 
 
 # --------------------------------------------------------------------- RagEvalScore + KB log
@@ -205,6 +269,7 @@ def _score(**overrides) -> rag_eval.RagEvalScore:
         "ndcg_at_k": 0.85,
         "citation_accuracy": 1.0,
         "hallucination_rate": 0.0,
+        "faithfulness": 1.0,
         "created_at": "2026-01-01T00:00:00Z",
     }
     base.update(overrides)
@@ -212,12 +277,16 @@ def _score(**overrides) -> rag_eval.RagEvalScore:
 
 
 def test_rag_eval_score_passed_thresholds() -> None:
-    assert _score(recall_at_k=0.8, hallucination_rate=0.0).passed is True
+    assert _score(recall_at_k=0.8, hallucination_rate=0.0, faithfulness=1.0).passed is True
     assert _score(recall_at_k=0.79).passed is False
     assert _score(hallucination_rate=0.01).passed is False
+    assert _score(faithfulness=0.99).passed is False
 
 
-@pytest.mark.parametrize("bad_field", ["recall_at_k", "mrr", "ndcg_at_k", "citation_accuracy"])
+@pytest.mark.parametrize(
+    "bad_field",
+    ["recall_at_k", "mrr", "ndcg_at_k", "citation_accuracy", "hallucination_rate", "faithfulness"],
+)
 def test_rag_eval_score_out_of_range_raises(bad_field: str) -> None:
     with pytest.raises(rag_eval.RagEvalError, match="must be in \\[0, 1\\]"):
         _score(**{bad_field: 1.5})
@@ -226,6 +295,14 @@ def test_rag_eval_score_out_of_range_raises(bad_field: str) -> None:
 def test_rag_eval_score_json_roundtrip() -> None:
     original = _score()
     assert rag_eval.RagEvalScore.from_json(original.to_json()) == original
+
+
+def test_rag_eval_score_from_json_corrupt_raises() -> None:
+    with pytest.raises(rag_eval.RagEvalError, match="corrupt rag_eval record"):
+        rag_eval.RagEvalScore.from_json("not json")
+
+    with pytest.raises(rag_eval.RagEvalError, match="corrupt rag_eval record"):
+        rag_eval.RagEvalScore.from_json(json.dumps({"recall_at_k": 0.9}))  # missing fields
 
 
 def test_record_and_list_scores_roundtrip(tmp_path: Path) -> None:
