@@ -36,6 +36,52 @@
 ## 🔨 Shaping
 *(ideas being fleshed out — add the template fields)*
 
+> **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
+> agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
+> generalize → scale into teams.
+
+### Continuous maintenance + active bug-finding + security auditing
+- **What:** once the full pipeline runs, the dev loop doesn't just maintain — it **proactively hunts bugs**
+  (adversarial/fuzz-style discovery, not only tracking others' reported issues) and runs **security checks** on the
+  target code paths.
+- **Why / value:** shifts the agent from *reactive* (track → fix reported issues) to *proactive* (surface
+  unreported bugs + vulnerabilities) — higher-value, more novel contributions, and long-term system health.
+- **Scope / effort:** L — new finder/fuzz + security-audit agents layered on the contribution plane.
+- **Depends on / risk:** full pipeline live; security work stays **defensive + human-gated** (no offensive or
+  mass-scanning use); needs false-positive/noise control so findings stay trustworthy.
+- **Status:** shaping
+
+### Generalize: vLLM-specific → repo-agnostic contribution framework
+- **What:** after a **track record of merged vLLM PRs**, extract the vLLM-specific parts into a **general agent
+  framework for advancing any target repo** — point it at repo X and it tracks / finds / patches / PRs there.
+- **Why / value:** the real asset is the *loop*, not the vLLM specialization; generalizing multiplies impact and is
+  a product in its own right.
+- **Scope / effort:** L — config-drive sources/taxonomy; abstract the ROCm/MI250 check into a pluggable
+  **"verification oracle"** per target repo.
+- **Depends on / risk:** proven merges first (credibility gate — DGM-style: earn the track record *before*
+  generalizing); over-abstraction risk — generalize only what merged PRs actually proved.
+- **Status:** shaping
+
+### Scale the maintenance / dev loop into a team
+- **What:** the maintenance dev-loop becomes a **team** (not a single session) — parallel maintainers across
+  subsystems with a validation/merge gate.
+- **Why / value:** throughput + coverage once the work exceeds one context; extends DEVPLAN's "graduate to an agent
+  team at M3/M5" note to standing operation.
+- **Scope / effort:** M–L — git worktrees, tight per-agent scope, a lead/validator, human still merges.
+- **Depends on / risk:** work must split into cleanly separable dirs; coordination + token overhead (Cognition's
+  "don't build multi-agents" caveat) — only when the split is genuinely real.
+- **Status:** shaping
+
+### Scale the vLLM contribution agent into a team
+- **What:** the PR-developing (contribution-plane) agent becomes a **team** — reproducer / patcher / verifier /
+  reviewer as specialized roles working candidates in parallel.
+- **Why / value:** more candidates advanced concurrently; role specialization (repro vs patch vs adversarial
+  review) raises quality — a natural extension of the M3 ensemble self-review.
+- **Scope / effort:** L — orchestration across the 3 MI250 nodes, per-role prompts, one shared human gate.
+- **Depends on / risk:** MI250 capacity; the **human review gate stays mandatory**; guard against PR-spam /
+  reputation risk.
+- **Status:** shaping
+
 ## 🗺️ vNext roadmap (committed for the next version)
 *(the shortlist that will become DEVPLAN milestones/todos next)*
 
