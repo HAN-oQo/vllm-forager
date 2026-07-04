@@ -309,10 +309,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 ## M2 — Outer loop: grading + candidate discovery
 
 > **Expected output:** grading metrics (precision/recall/Brier) on matured forecasts → `policy@v+1`; taxonomy
-> evolution; an engine×capability parity matrix; a **risk-ranked candidate queue**; cost-aware provider bandit;
-> novelty filter.
-> **Demo:** `python -m src.grade` (score past predictions) · `python -m src.candidates` (ranked queue with risk).
-> **Acceptance:** `pytest -m m2` green · candidates come out ranked with risk tiers + evidence links.
+> evolution; an engine×capability parity matrix; a candidate queue ranked on **risk, implementation effort, and
+> impact** (all three, not risk alone); cost-aware provider bandit; novelty filter.
+> **Demo:** `python -m src.grade` (score past predictions) · `python -m src.candidates` (ranked queue with
+> risk/effort/impact).
+> **Acceptance:** `pytest -m m2` green · every candidate carries risk, effort, and impact scores + evidence links.
 
 - [ ] **T2.1 Grader** — `src/agents/grader.py`: resolve matured predictions vs reality (merged / in release / adopted); compute precision/recall + Brier.
   - **Why:** grading its own past predictions is *the* self-evolution signal — without it the agent can't tell if its judgment is any good.
@@ -330,10 +331,10 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the contribution strategy is "find what exists elsewhere but is missing upstream" — the matrix makes those gaps explicit.
   - **e.g.:** (ROCm/vllm fork, "fp8 kv-cache") = present, (upstream vllm, same) = missing → gap flagged as a port candidate.
   - **Test:** `tests/test_parity.py` — synthetic capability signals → matrix cell populated + "present in fork, missing upstream" gap flagged.
-- [ ] **T2.5 Candidate discovery + risk ranking** — `src/agents/scout.py`: candidates (ROCm-reproducible / good-first-issue / parity gap), risk-tiered.
-  - **Why:** this is the "*where can I contribute?*" output — turns signal into a prioritized, actionable queue for the M3 engineer.
-  - **e.g.:** ranked queue `[#c low-risk docs, #d med ROCm build bug, #e high parity port]`, each with evidence links.
-  - **Test:** `tests/test_scout.py` — fixture items → ranked candidates with risk tier + evidence present.
+- [ ] **T2.5 Candidate discovery + risk/effort/impact ranking** — `src/agents/scout.py`: candidates (ROCm-reproducible / good-first-issue / parity gap), each scored on **risk, implementation effort, and impact** — three independent dimensions, not one collapsed "risk" tier — ranked from that combined read.
+  - **Why:** this is the "*where can I contribute?*" output — a human (or M3's engineer) picking what to work on needs more than "how risky": a low-risk/low-impact candidate isn't obviously worth doing before a medium-risk/high-impact one, and an effort estimate is what makes a candidate actually schedulable soon vs. someday.
+  - **e.g.:** ranked queue `[#c risk=low effort=low impact=low (docs), #d risk=med effort=med impact=high (ROCm build fix blocking several downstream issues), #e risk=high effort=high impact=high (parity port)]`, each with evidence links and all three scores shown, not a single tier.
+  - **Test:** `tests/test_scout.py` — fixture items → every ranked candidate carries risk, effort, and impact scores + evidence present; ranking reflects the combination of all three, not risk alone (e.g. a low-risk/low-impact item doesn't outrank a medium-risk/high-impact one).
 - [ ] **T2.6 Cost-aware LLM provider selection (bandit)** — `src/llm_bandit.py`: a UCB-style bandit over `LLM_PROVIDER` (claude_cli / claude_api / local-vLLM) using per-call reward (task success) vs cost/latency from T0.7's metadata; agents ask the policy which provider to use. *(Borrowed from ShinkaEvolve.)*
   - **Why:** different tasks warrant different models — spend big-model budget only where it pays off, cheap/local elsewhere — automatically, from measured reward-per-cost.
   - **e.g.:** classification runs fine on local vLLM (cheap) while patch-writing routes to a stronger provider — the bandit learns this from outcomes.
