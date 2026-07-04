@@ -58,3 +58,8 @@ BACKOFF_BASE_S = 2.0
 # limiter — a persistent Retry-After, or a past/stale X-RateLimit-Reset — so it can't spin
 # forever; per-repo isolation in main() then skips just that repo instead of hanging the run.
 MAX_RATE_LIMIT_RETRIES = 10
+
+# Data-quality guardrail (T0.11): flag a repo's collection when the fraction of missing
+# issue/PR numbers in the collected range exceeds this. Deleted/transferred items make small
+# gaps normal, so this is a ratio (5%), not a zero-tolerance check.
+DATA_QUALITY_GAP_RATIO_THRESHOLD = 0.05
