@@ -12,6 +12,7 @@ venv/
 data/
 !data/.gitkeep
 *.jsonl
+!tests/rag_eval/golden.jsonl
 state.json
 
 # OS / editor
