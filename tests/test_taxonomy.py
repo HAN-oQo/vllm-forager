@@ -22,7 +22,7 @@ def store(tmp_path: Path) -> JsonlStore:
 def test_create_taxonomy_is_v1_and_active(store: JsonlStore) -> None:
     v1 = taxonomy.create_taxonomy(store, ["rocm-build", "performance"])
     assert v1.version == 1
-    assert v1.categories == ["rocm-build", "performance"]
+    assert v1.categories == ("rocm-build", "performance")
     assert taxonomy.get_active(store) == v1
 
 
@@ -51,7 +51,7 @@ def test_add_category_bumps_version_both_retrievable_active_is_latest(
     v2 = taxonomy.add_category(store, "quantization")
 
     assert v2.version == 2
-    assert v2.categories == ["rocm-build", "quantization"]
+    assert v2.categories == ("rocm-build", "quantization")
 
     # both versions still retrievable by number...
     assert taxonomy.get_taxonomy(store, 1) == v1
@@ -66,11 +66,57 @@ def test_add_category_duplicate_raises(store: JsonlStore) -> None:
         taxonomy.add_category(store, "rocm-build")
 
 
+@pytest.mark.parametrize("variant", ["ROCm-Build", "rocm-build ", " ROCM-BUILD"])
+def test_add_category_duplicate_case_and_whitespace_insensitive_raises(
+    store: JsonlStore, variant: str
+) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    with pytest.raises(taxonomy.TaxonomyError, match="already a category"):
+        taxonomy.add_category(store, variant)
+
+
 def test_add_category_before_create_raises(store: JsonlStore) -> None:
     with pytest.raises(taxonomy.TaxonomyError, match="no taxonomy exists"):
         taxonomy.add_category(store, "rocm-build")
 
 
 def test_taxonomy_json_roundtrip() -> None:
-    original = taxonomy.Taxonomy(version=3, categories=["a", "b"])
+    original = taxonomy.Taxonomy(version=3, categories=("a", "b"))
     assert taxonomy.Taxonomy.from_json(original.to_json()) == original
+
+
+def test_categories_field_is_a_real_immutable_tuple() -> None:
+    """frozen=True alone doesn't stop a caller mutating a list field in place — tuple does."""
+    t = taxonomy.Taxonomy(version=1, categories=("a",))
+    assert isinstance(t.categories, tuple)
+    with pytest.raises(AttributeError):
+        t.categories.append("b")  # type: ignore[attr-defined]
+    hash(t)  # must not raise — a frozen dataclass should be hashable
+
+
+def test_get_active_corrupt_pointer_raises_taxonomyerror(store: JsonlStore) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    store.set_state("taxonomy_active_version", "not-a-number")
+    with pytest.raises(taxonomy.TaxonomyError, match="corrupt active-version pointer"):
+        taxonomy.get_active(store)
+
+
+def test_get_taxonomy_corrupt_json_raises_taxonomyerror(store: JsonlStore) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    store.set_state("taxonomy@1", "not valid json")
+    with pytest.raises(taxonomy.TaxonomyError, match="corrupt taxonomy record"):
+        taxonomy.get_taxonomy(store, 1)
+
+
+def test_get_taxonomy_missing_field_raises_taxonomyerror(store: JsonlStore) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    store.set_state("taxonomy@1", '{"version": 1}')  # missing "categories"
+    with pytest.raises(taxonomy.TaxonomyError, match="corrupt taxonomy record"):
+        taxonomy.get_taxonomy(store, 1)
+
+
+def test_get_taxonomy_version_mismatch_raises_taxonomyerror(store: JsonlStore) -> None:
+    taxonomy.create_taxonomy(store, ["rocm-build"])
+    store.set_state("taxonomy@1", '{"version": 99, "categories": ["x"]}')
+    with pytest.raises(taxonomy.TaxonomyError, match="KB corruption"):
+        taxonomy.get_taxonomy(store, 1)
