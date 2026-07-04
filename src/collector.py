@@ -119,16 +119,19 @@ def _request(url: str, params: dict) -> requests.Response:
     - ``5xx`` and connection/timeout errors → exponential backoff, up to :data:`config.MAX_RETRIES`.
     - Anything else (``2xx`` / ``4xx`` incl. ``404``) is returned for the caller to interpret.
 
-    Rate-limit waits do **not** consume a retry (they aren't failures); only transient errors do.
-    Raises the underlying error (``HTTPError`` for a stuck ``5xx``, or the connection exception)
-    once :data:`config.MAX_RETRIES` transient retries are exhausted — the per-repo isolation in
-    :func:`main` then skips just that repo.
+    Rate-limit waits do **not** consume a transient-retry (they aren't failures), but they are
+    themselves bounded by :data:`config.MAX_RATE_LIMIT_RETRIES` so a stuck limiter (a persistent
+    ``Retry-After`` or a past/stale reset) can't spin forever. Raises the underlying error
+    (``HTTPError`` for a stuck ``5xx`` / exhausted rate limit, or the connection exception) once
+    the relevant cap is reached — the per-repo isolation in :func:`main` then skips just that repo.
     """
+    headers = _headers()  # static per run — build once, not on every retry
     attempt = 0
+    rate_limit_waits = 0
     while True:
         try:
             resp = requests.get(
-                url, headers=_headers(), params=params, timeout=config.REQUEST_TIMEOUT_S
+                url, headers=headers, params=params, timeout=config.REQUEST_TIMEOUT_S
             )
         except requests.RequestException as exc:  # timeout, connection reset, DNS — transient
             if attempt >= config.MAX_RETRIES:
@@ -137,10 +140,16 @@ def _request(url: str, params: dict) -> requests.Response:
             attempt += 1
             continue
 
-        if _sleep_for_rate_limit(resp):
-            continue  # primary limit — waited; retry the same request
+        if _sleep_for_rate_limit(resp):  # primary limit — the helper already waited for reset
+            rate_limit_waits += 1
+            if rate_limit_waits > config.MAX_RATE_LIMIT_RETRIES:
+                resp.raise_for_status()  # give up: a stuck limiter must not hang the run
+            continue
         wait = _retry_after_wait(resp)
-        if wait is not None:
+        if wait is not None:  # secondary limit
+            rate_limit_waits += 1
+            if rate_limit_waits > config.MAX_RATE_LIMIT_RETRIES:
+                resp.raise_for_status()
             print(f"  secondary rate limit — waiting {wait:.0f}s", file=sys.stderr)
             time.sleep(wait)
             continue

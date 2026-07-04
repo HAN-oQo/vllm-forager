@@ -214,6 +214,18 @@ def test_request_403_without_retry_after_is_returned_not_retried(monkeypatch, no
     assert no_sleep == []
 
 
+def test_request_gives_up_on_persistent_rate_limit(monkeypatch, no_sleep):
+    # A limiter that never clears (Retry-After on every response) must not spin forever: after
+    # MAX_RATE_LIMIT_RETRIES waits, _request raises so main()'s per-repo isolation can skip it.
+    monkeypatch.setattr(config, "MAX_RATE_LIMIT_RETRIES", 3)
+    monkeypatch.setattr(
+        collector.requests, "get", lambda *a, **k: FakeResp(429, headers={"Retry-After": "1"})
+    )
+    with pytest.raises(requests.HTTPError):
+        collector._request("http://x", {})
+    assert len(no_sleep) == 3  # waited the cap, then raised instead of looping forever
+
+
 # ------------------------------------------------- schema validation / body cap
 
 
@@ -249,12 +261,11 @@ def test_state_cursor_is_monotonic(tmp_path, monkeypatch):
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
     monkeypatch.setattr(config, "REPOS", [{"slug": "o/r", "role": "x"}])
-    monkeypatch.setattr(sys, "argv", ["collector"])
 
     old_cursor = "2000-01-01T00:00:00Z"
     collector._save_state({"o/r": old_cursor})
     monkeypatch.setattr(collector, "fetch_repo", lambda slug, since: [])
-    collector.main()
+    collector.main([])  # exercise the argv seam (no sys.argv monkeypatch needed)
 
     new_cursor = json.loads((tmp_path / "state.json").read_text())["o/r"]
     assert new_cursor > old_cursor  # advanced forward — never rewound

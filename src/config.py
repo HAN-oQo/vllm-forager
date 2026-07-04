@@ -54,3 +54,7 @@ REQUEST_TIMEOUT_S = 30
 MAX_RETRIES = 4
 # Exponential backoff base (seconds): wait before retry N = BACKOFF_BASE_S * 2**N.
 BACKOFF_BASE_S = 2.0
+# Max rate-limit waits (primary or secondary) before giving up on a request. Bounds a stuck
+# limiter — a persistent Retry-After, or a past/stale X-RateLimit-Reset — so it can't spin
+# forever; per-repo isolation in main() then skips just that repo instead of hanging the run.
+MAX_RATE_LIMIT_RETRIES = 10
