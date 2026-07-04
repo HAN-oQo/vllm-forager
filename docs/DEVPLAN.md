@@ -230,7 +230,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 - [x] **T1.1 Embeddings + vector index** — `src/embed.py` (embed text/labels; NN search; backend TBD).
       Test: `tests/test_embed.py` — with a deterministic fixture/mock model, NN of a query returns the
       semantically closer of two docs.
-- [ ] **T1.2 Taxonomy schema + versioning** — `src/taxonomy.py` (`taxonomy@vN` in KB, active pointer).
+- [x] **T1.2 Taxonomy schema + versioning** — `src/taxonomy.py` (`taxonomy@vN` in KB, active pointer).
       Test: `tests/test_taxonomy.py` — v1 → add category → v2; both retrievable; `active` returns v2.
 - [ ] **T1.3 Policy object (versioned)** — `src/policy.py` (scoring weights, prompt templates, active taxonomy ref).
       Test: `tests/test_policy.py` — versions are append-only/immutable; `get_active()` returns latest.
