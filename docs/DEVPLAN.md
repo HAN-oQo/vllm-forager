@@ -238,7 +238,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       Test: `tests/test_analyst.py` — mock `llm.complete` → item updated with category + citation preserved.
 - [x] **T1.5 Forecaster agent** — emit calibrated predictions `{claim, resolution_rule, prob, due_date, evidence}`.
       Test: `tests/test_forecaster.py` — mock llm → stored prediction validates against schema (prob∈[0,1], due>now).
-- [ ] **T1.6 Reporter v1 (LLM, cited)** — weekly report written from classified items.
+- [x] **T1.6 Reporter v1 (LLM, cited)** — weekly report written from classified items.
       Test: `tests/test_reporter_v1.py` — mock llm → **every claim line has ≥1 evidence URL** (evidence principle).
 - [ ] **T1.7 Trend series** — `src/trends.py`: per-category activity time series from KB.
       Test: `tests/test_trends.py` — synthetic items across weeks → correct bucketed counts per category.

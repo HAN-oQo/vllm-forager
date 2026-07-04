@@ -1,10 +1,15 @@
-"""Report CLI (T0.9) — ``python -m src.report`` writes the weekly Markdown digest.
+"""Report CLI (T0.9, upgraded to v1 in T1.6) — ``python -m src.report`` writes the weekly
+Markdown digest.
 
 One command turns the collected KB into a dated report on disk: it reads every item from
-the store, renders the baseline digest (:mod:`src.agents.reporter`, T0.8), and writes it to
-``data/reports/YYYY-Www.md`` (ISO-year + ISO-week, e.g. ``2026-W27.md``), then prints the
-path. This is the on-demand / scheduled entry point for the report — the rendering itself
-lives in the reporter so it stays pure and testable.
+the store, renders the LLM-written, cited digest (:mod:`src.agents.reporter_v1`, T1.6), and
+writes it to ``data/reports/YYYY-Www.md`` (ISO-year + ISO-week, e.g. ``2026-W27.md``), then
+prints the path. This is the on-demand / scheduled entry point for the report — the
+rendering itself lives in the reporter module so it stays pure and testable.
+
+(The fixed-keyword, LLM-free v0 renderer, :mod:`src.agents.reporter`, T0.8, still exists — v1
+builds on its citation helpers and its own tests still pin its standalone behavior — but this
+CLI's default output is v1's.)
 
 Design:
 - :func:`generate` is the injectable core (store + output dir + clock in, path out) so tests
@@ -23,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from . import config
-from .agents import reporter
+from .agents import reporter_v1
 from .store import get_store
 from .store.base import Store
 from .store.jsonl_store import JsonlStore
@@ -55,7 +60,7 @@ def generate(
     """
     stamp = week_stamp(when)
     resolved_title = title or f"vLLM (ROCm) weekly digest — {stamp}"
-    md = reporter.report_from_store(store, title=resolved_title)
+    md = reporter_v1.report_from_store(store, title=resolved_title)
     reports_dir.mkdir(parents=True, exist_ok=True)
     path = reports_dir / f"{stamp}.md"
     path.write_text(md, encoding="utf-8")
