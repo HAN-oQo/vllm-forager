@@ -104,6 +104,115 @@ In short, the direction is not "write new kernels" but **reproduce · debug · e
             prediction scoreboard · candidate queue) — cross-cuts the whole pipeline, evolution loop first
 ```
 
+### Rendered views (GitHub renders these; the ASCII above is the quick reference)
+
+**Agent pipeline — 3 planes over one KB + the self-evolution loop + human gate.** ✅ = built (M0),
+🔲 = planned. The ⭐ node is the upstream-vLLM draft-PR agent (the product's ultimate output), reachable
+only through the Engineer → MI250 verify → ensemble self-review → **human gate**:
+
+```mermaid
+flowchart TB
+  SRC[("Sources — 5 repos<br/>vLLM · ROCm/vllm · SGLang · Dynamo · llm-d")]
+
+  subgraph DATA["🟢 Data plane · M0 ✅ — no LLM"]
+    COL["Collector ✅<br/>GitHub API → normalize"]
+    EMB["Embed / RAG index 🔲"]
+    AUD["Audit ✅<br/>data-quality guardrail"]
+    REP0["Reporter v0 ✅<br/>fixed-taxonomy baseline"]
+  end
+
+  KB[("Knowledge Base<br/>store/ ✅ → Firestore · M0.6<br/>versioned taxonomy@v / policy@v = learning state")]
+
+  subgraph INNER["🔵 Intelligence plane · M1 — scheduled LLM"]
+    ANA["Analyst<br/>classify → taxonomy + evidence"]
+    FC["Forecaster<br/>calibrated predictions (timestamped)"]
+    REP1["Reporter v1<br/>cited weekly report"]
+  end
+
+  subgraph OUTER["🟣 Outer loop · M2 — grade + discover"]
+    GRA["Grader<br/>predictions vs reality → P/R/Brier"]
+    CUR["Curator<br/>propose / retire categories"]
+    SCO["Scout<br/>candidate discovery + risk rank<br/>parity gaps · ROCm-repro · good-first"]
+  end
+
+  subgraph CONTRIB["🟠 Contribution plane · M3 — human-gated"]
+    ENG["Engineer<br/>reproduce → patch → verify"]
+    SELF["Ensemble self-review<br/>N adversarial votes"]
+    HG{"Human gate<br/>approve / hold"}
+    PR["Draft-PR agent ⭐<br/>→ upstream vLLM"]
+  end
+
+  MI250[("MI250 oracle<br/>build · repro · verify · gfx90a")]
+  UP[("Upstream vLLM<br/>maintainers merge")]
+
+  LLM["llm.py — pluggable ✅<br/>claude_cli · claude_api · local vLLM"]
+  ORC["Orchestrator · M4<br/>cadence · routing · liveness"]
+  DASH["Dashboard · M5<br/>monitors · trend + parity heatmap · live health"]
+
+  SRC --> COL --> KB
+  COL -.-> EMB -.-> KB
+  KB --> AUD
+  KB --> REP0
+  KB --> ANA --> KB
+  ANA --> FC --> KB
+  KB --> REP1
+  KB --> SCO --> ENG
+  ENG <--> MI250
+  ENG --> SELF --> HG
+  HG -->|"approved"| PR --> UP
+
+  FC -. matures .-> GRA -->|"policy@v+1"| KB
+  KB --> CUR -->|"taxonomy@v+1"| KB
+  KB -. governs .-> ANA & FC & SCO
+
+  LLM -.-> ANA & FC & REP1 & GRA & CUR & SCO & ENG & SELF
+  ORC -. schedule .-> COL & ANA & GRA & SCO & ENG
+  DASH -. reads .-> KB
+```
+
+**Meta / self-build layer — how the system builds and runs *itself*, human-gated.** The DEVPLAN is the
+"manager", the gates (pytest · pre-commit · CI · `/code-review`) are the "QA", each Claude loop is the
+"developer", and a human is the only approver (agents never self-merge). Two loops in separate clones sharing
+one `FORAGER_DATA_DIR`:
+
+```mermaid
+flowchart TB
+  DEVPLAN[("docs/DEVPLAN.md<br/>Milestone → todo checklist<br/>the plan = 'manager'")]
+  GATES["Gates = 'QA'<br/>pytest · pre-commit · CI · /code-review"]
+  HUMAN{"👤 Human = 'approver'<br/>merges internal PRs · approves upstream<br/>agents never self-merge (gh pr merge denied)"}
+  MAIN[("GitHub · main")]
+  DATA[("shared FORAGER_DATA_DIR")]
+  PROD["📦 Product pipeline<br/>3 planes + evolution loop (diagram above)"]
+
+  subgraph DEV["🛠️ dev-loop · Claude session (dev clone, ce-master tmux) — BUILDS product"]
+    direction TB
+    D1["pick first unchecked todo"] --> D2["branch off fresh main"] --> D3["implement + named test"] --> D4["pytest + pre-commit green"] --> D5["open PR + /code-review --comment"] --> D6["wait-merge.sh — poll + ntfy push"]
+    D7{"milestone done?"}
+  end
+
+  subgraph COL["🔄 collect-loop · Claude session (collect clone) — RUNS product"]
+    direction TB
+    C1["schedule tick (every N h)"] --> C2["python -m src.collector"] --> C3{"ok?"}
+    C3 -->|yes| C4["report counts"]
+    C3 -->|no| C5{"transient / real bug?"}
+    C5 -->|transient| C6["wait · retry"] --> C1
+    C5 -->|real bug| C7["self-heal → fix PR"]
+  end
+
+  DEVPLAN --> D1
+  D4 -. must pass .-> GATES
+  D5 -. must pass .-> GATES
+  D6 --> HUMAN
+  HUMAN -->|merge| MAIN --> D7
+  D7 -->|"no → next todo"| D1
+  D7 -->|"yes → STOP for go"| HUMAN
+  D3 -. builds .-> PROD
+  C7 --> HUMAN
+  C4 --> DATA
+  C2 -. runs .-> PROD
+  PROD -. reads/writes .-> DATA
+```
+
 **Recommended stack:** Python, GitHub REST/GraphQL API, a document DB (Firebase/Firestore) for the knowledge
 base, embeddings + a lightweight vector store (pgvector or LanceDB). LLM backend is **pluggable** (`LLM_PROVIDER`
 = `claude_cli` via `claude -p` (default) · `claude_api` · `local` = OpenAI-compatible **vLLM** server); the
