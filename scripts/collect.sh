@@ -23,16 +23,17 @@ code=${PIPESTATUS[0]}
 finished="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 status=$([ "$code" -eq 0 ] && echo ok || echo error)
 
-# Count records currently on disk (per file + total) for the health record.
+# Count records currently on disk (per file + total) for the health record. Delegates to
+# src.stats.summarize(), which resolves config.DATA_DIR (respects FORAGER_DATA_DIR — a
+# hardcoded "data/*.jsonl" glob here would silently count 0 records whenever the shared
+# data dir is configured, since the actual files live outside ./data).
 counts=$(python - <<'PY'
-import glob, json, os
-out = {}
-tot = 0
-for f in sorted(glob.glob("data/*.jsonl")):
-    n = sum(1 for line in open(f) if line.strip())
-    out[os.path.basename(f)] = n
-    tot += n
-out["_total"] = tot
+import json
+from src.stats import summarize
+
+s = summarize()
+out = {name: r["total"] for name, r in s["repos"].items()}
+out["_total"] = s["total"]
 print(json.dumps(out))
 PY
 )
