@@ -67,6 +67,35 @@ def test_categorize_multi_match_takes_earliest_category():
     assert reporter.categorize(item) == "ROCm / AMD"
 
 
+def test_categorize_matches_suffixed_hardware_and_dtype_tokens():
+    # Prefix-of-token matching: the suffixed forms that dominate real text must still bucket.
+    assert reporter.categorize(_item("o/r", 1, "crash on gfx90a")) == "ROCm / AMD"
+    assert reporter.categorize(_item("o/r", 2, "OOM on MI300X")) == "ROCm / AMD"
+    assert reporter.categorize(_item("o/r", 3, "add fp8e4m3fn support")) == "Quantization"
+    # leading boundary still prevents mid-word hits
+    assert reporter.categorize(_item("o/r", 4, "fix the microchip driver")) == "Other"
+
+
+def test_cite_collapses_title_and_synthesizes_missing_url():
+    bullet = reporter._cite(_item("o/r", 5, "line1\nline2   spaced", url=""))
+    # newline/extra whitespace collapsed so it can't inject Markdown structure
+    assert bullet == "- [o/r#5] line1 line2 spaced — https://github.com/o/r/issues/5"
+    assert "\n" not in bullet
+
+
+def test_build_report_orders_newest_first_then_repo_number_ascending():
+    md = reporter.build_report(
+        [
+            _item("o/z", 1, "rocm A", updated_at="2025-01-02T00:00:00Z"),
+            _item("o/a", 2, "rocm B", updated_at="2025-01-01T00:00:00Z"),
+            _item("o/a", 1, "rocm C", updated_at="2025-01-01T00:00:00Z"),
+        ]
+    )
+    # newest (o/z#1) first; then the 01-01 tie by repo then number ascending: o/a#1, o/a#2
+    order = [md.index(u) for u in ("http://x/o/z/1", "http://x/o/a/1", "http://x/o/a/2")]
+    assert order == sorted(order)
+
+
 def test_build_report_has_every_url_and_correct_counts():
     items = _sample()
     md = reporter.build_report(items)

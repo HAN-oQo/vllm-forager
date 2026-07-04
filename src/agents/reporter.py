@@ -90,9 +90,15 @@ _TAXONOMY_KEYWORDS: list[tuple[str, list[str]]] = [
 
 
 def _compile(keywords: list[str]) -> re.Pattern[str]:
-    """Word-boundary, case-insensitive alternation over the keywords (reduces false hits)."""
+    r"""Case-insensitive alternation matching a keyword as a **token prefix**.
+
+    Only a boundary *before* the keyword is required (``\b``); the keyword may be followed by
+    more word chars. This is deliberate: a trailing ``\b`` would exclude the suffixed forms that
+    dominate real text — ``gfx`` → ``gfx90a``/``gfx942``, ``mi300`` → ``MI300X``, ``fp8`` →
+    ``fp8e4m3`` — while the leading boundary still blocks mid-word hits (``hip`` ∌ ``chip``).
+    """
     alternation = "|".join(re.escape(kw) for kw in keywords)
-    return re.compile(rf"\b(?:{alternation})\b", re.IGNORECASE)
+    return re.compile(rf"\b(?:{alternation})", re.IGNORECASE)
 
 
 # Precompiled once at import — the report may scan thousands of items.
@@ -116,26 +122,29 @@ def categorize(item: dict) -> str:
     return OTHER
 
 
+def _num(item: dict) -> int:
+    """The item's issue/PR number as an int (0 if missing/non-int) — for stable sorting."""
+    number = item.get("number")
+    return number if isinstance(number, int) else 0
+
+
 def _cite(item: dict) -> str:
     """One Markdown bullet for an item, always carrying its source link.
 
     e.g. ``- [vllm-project/vllm#123] hipBLAS build fails on gfx90a — https://github.com/…``
+
+    Internal whitespace in the title is collapsed so a stray newline can't inject report
+    structure (which would also desync the per-section count from the visible bullets). If the
+    item has no ``url``, synthesize the canonical GitHub link (GitHub redirects
+    ``/issues/N`` ↔ ``/pull/N``) so every bullet still cites a source (evidence principle).
     """
     repo = item.get("repo", "?")
     number = item.get("number", "?")
-    title = (item.get("title") or "").strip() or "(no title)"
+    title = " ".join((item.get("title") or "").split()) or "(no title)"
     url = item.get("url") or ""
+    if not url and item.get("repo") and item.get("number") is not None:
+        url = f"https://github.com/{item['repo']}/issues/{item['number']}"
     return f"- [{repo}#{number}] {title} — {url}"
-
-
-def _sort_key(item: dict) -> tuple[str, str, int]:
-    """Newest first, then by repo/number for a stable, deterministic order."""
-    number = item.get("number")
-    return (
-        item.get("updated_at") or "",
-        item.get("repo") or "",
-        number if isinstance(number, int) else 0,
-    )
 
 
 def build_report(items: list[dict], *, title: str = "vLLM (ROCm) weekly digest") -> str:
@@ -155,13 +164,15 @@ def build_report(items: list[dict], *, title: str = "vLLM (ROCm) weekly digest")
     repos = {item.get("repo") for item in items if item.get("repo")}
     lines = [f"# {title}", "", f"{len(items)} items across {len(repos)} repos.", ""]
 
-    for name in [n for n, _ in TAXONOMY] + [OTHER]:
-        bucket = buckets[name]
+    # `buckets` is already in TAXONOMY-then-OTHER order (dicts keep insertion order).
+    for name, bucket in buckets.items():
         if not bucket:
             continue
+        # Newest first; ties broken by repo then number, both ascending (stable two-pass).
+        ordered = sorted(bucket, key=lambda item: (item.get("repo") or "", _num(item)))
+        ordered.sort(key=lambda item: item.get("updated_at") or "", reverse=True)
         lines.append(f"## {name} ({len(bucket)})")
-        for item in sorted(bucket, key=_sort_key, reverse=True):
-            lines.append(_cite(item))
+        lines.extend(_cite(item) for item in ordered)
         lines.append("")
 
     return "\n".join(lines).rstrip() + "\n"
