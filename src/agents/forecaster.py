@@ -5,11 +5,15 @@ a falsifiable prediction now ("this will become important"), timestamped and wit
 resolution rule, so a later grading pass (T2.1) can compare it against what actually happened
 and score how well-calibrated this pipeline's judgment is.
 
-Storage: predictions are NOT bolted onto item records — T1.4's own review found that writing
-extra fields onto collector-owned item records gets silently clobbered the next time the
-collector re-fetches that item (``Store.upsert_items`` is a full replace, not a merge, on
-every backend). Predictions instead live in their own append-only log in the KB's generic
-state map: ``prediction@1``, ``prediction@2``, ... plus one ``prediction_count`` index.
+Storage: predictions are NOT bolted onto item records — at the time this module was written,
+T1.4's own review had found that writing extra fields onto collector-owned item records gets
+silently clobbered the next time the collector re-fetches that item (``Store.upsert_items``
+was a full replace, not a merge, on every backend — since fixed in T1.10). Predictions still
+belong in their own append-only log rather than on item records: unlike a classification (one
+value per item, naturally overwritten as re-classified), a prediction log is inherently
+history — many entries can exist per item over time, which a per-item field could never
+represent. State map: ``prediction@1``, ``prediction@2``, ... plus one ``prediction_count``
+index.
 
 Known limitation (not fixed here): unlike :mod:`src.taxonomy`/:mod:`src.policy`, which hold a
 *small, curated* number of versions of one object, this log grows without bound (one entry
@@ -20,9 +24,12 @@ state map on every call, so :func:`list_predictions` (an unconditional full-log 
 -write in :func:`record_prediction` also has no locking, a race that matters more here than
 for taxonomy/policy since predictions are written continuously, not rarely. The real fix is a
 Store-level primitive for a large, independent, queryable record collection (distinct from
-the small state map and the GitHub-item-shaped ``items`` bucket) — recommend bundling this
-into the same Store-layer follow-up flagged by T1.4's review (item-field clobbering), since
-both point at the same underlying gap.
+the small state map and the GitHub-item-shaped ``items`` bucket) — this is a *different* gap
+than T1.4's item-field-clobbering issue (fixed by T1.10's merge-on-upsert semantics): that one
+was about *how* a write lands on an existing record, this one is about the state map's own
+read/write shape not scaling to an ever-growing collection. Recommend a dedicated follow-up
+when the log's cost actually bites, not bundled into a merge-semantics fix that doesn't touch
+this axis at all.
 """
 
 from __future__ import annotations

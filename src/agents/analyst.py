@@ -16,18 +16,16 @@ one that only differs by case/whitespace — matched the same way :func:`~src.ta
 already does) falls back to :data:`OTHER` — mirrors the T0.8 baseline reporter's own fallback
 bucket, so an item is never silently unclassified because the model went off-script.
 
-Known limitation (not fixed here): ``Store.upsert_items`` is a full per-``(repo, number)``
-replace on every backend (``JsonlStore.merge_jsonl``'s ``existing[rec["number"]] = rec``;
-``FirestoreStore``'s ``batch.set(doc, it)`` with no ``merge=True``) — it doesn't merge fields.
-The collector's own ``_normalize()`` never carries ``category``/``taxonomy_version`` forward,
-so if it re-fetches an item this module already classified (any new comment/label bumps
-``updated_at`` back into its incremental window), the next collector run silently erases the
-classification and this module's own delta check treats it as never-classified again. Fixing
-this properly means Store-level merge-on-upsert semantics (or a separate classification
-keyspace, mirroring :mod:`src.taxonomy`/:mod:`src.policy`'s ``get_state``/``set_state``
-pattern) across both backends and their shared contract test — out of scope for this module;
-flagged here so the next agent that writes onto item records (T1.5, T2.x) doesn't hit it
-blind.
+Previously a known limitation, fixed in T1.10: ``Store.upsert_items`` now merges the given
+fields onto an existing ``(repo, number)`` record rather than fully replacing it (both
+backends). Before that fix, the collector's own ``_normalize()`` — which never carries
+``category``/``taxonomy_version`` forward — would silently erase this module's classification
+the next time it re-fetched an already-classified item (any new comment/label bumps
+``updated_at`` back into the incremental window). Now the collector's re-normalized record
+simply doesn't mention ``category``, and the store-level merge leaves the existing value alone
+— which also means the "delta" check above (``"category" not in item``) no longer treats a
+re-clobbered item as unclassified again, so a re-collected item doesn't get repeatedly and
+wastefully re-sent through ``llm.complete``.
 """
 
 from __future__ import annotations

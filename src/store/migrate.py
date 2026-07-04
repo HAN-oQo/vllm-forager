@@ -6,7 +6,16 @@ every repo JSONL file in a data directory, plus the whole state cursor map, upse
 
 Idempotent by construction — items are upserted by ``(repo, number)`` (Firestore ``set``, not
 ``create``) and state keys are simply overwritten — so re-running (e.g. to pick up items
-collected after an earlier migration pass) is safe and just re-applies the same data.
+collected after an earlier migration pass) is safe and just re-applies the same data. This
+holds because JSONL stays the still-growing, authoritative source in that flow: a
+previously-migrated Firestore doc's fields are always a subset of what's now in the (updated)
+JSONL file, so ``upsert_items``' merge-on-upsert semantics (T1.10) make no practical
+difference. It does NOT hold if this one-shot tool is re-run against a *stale* JSONL snapshot
+after other agents have already written new fields directly to Firestore (e.g. post-cutover to
+``STORE=firestore``) — merge would then preserve those Firestore-only fields instead of
+resetting the doc to exactly mirror the stale source. Not a currently-triggered bug (nothing
+else in this codebase does that), but this script is a one-shot cutover tool, not a repeatable
+sync — don't re-run it against an out-of-date source after Firestore has moved on.
 
 The source is always a :class:`~src.store.jsonl_store.JsonlStore` and the destination is
 always :class:`~src.store.firestore_store.FirestoreStore`: this script's whole purpose is that

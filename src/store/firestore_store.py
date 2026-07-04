@@ -36,7 +36,7 @@ from __future__ import annotations
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from .base import Store
+from .base import Store, merge_record
 
 # Firestore rejects a batch with more than this many writes.
 _BATCH_LIMIT = 500
@@ -71,28 +71,44 @@ class FirestoreStore(Store):
 
     # -- items ------------------------------------------------------------------
     def upsert_items(self, items: list[dict]) -> dict[str, int]:
-        """Upsert `items` (batched, ``set`` overwrites) and return post-upsert totals per repo.
+        """Upsert `items` (batched, field-merged) and return post-upsert totals per repo.
 
-        Deduplicated by ``(repo, number)`` first, last occurrence wins — matching
-        :class:`JsonlStore`'s dict-merge semantics (``existing[rec["number"]] = rec``).
-        Without this, two records for the same item in one call could land in the same
-        Firestore batch, and Firestore's batch API rejects more than one write to the same
-        document in a single commit (``InvalidArgument``), unlike the JSONL backend's silent
-        last-write-wins. Batched in groups of :data:`_BATCH_LIMIT` (the per-batch write cap).
-        Returns ``{repo: post_upsert_total}`` for each repo touched, via a ``count()``
-        aggregation query per repo (one read regardless of that repo's size).
+        Deduplicated by ``(repo, number)`` first — two records for the same item in one call
+        merge together (last one's fields win on overlap, via :func:`~src.store.base.
+        merge_record`), matching :class:`JsonlStore`'s intra-batch merge. Without this dedup,
+        two writes to the same document in one Firestore batch would be rejected
+        (``InvalidArgument``), unlike the JSONL backend's silent last-write-wins. Each write
+        then uses ``set(..., merge=<field names>)`` (T1.10) so a field already stored for that
+        document but absent from `it` is preserved rather than wiped — e.g. the collector
+        re-normalizing an item never carries forward a `category` T1.4's Analyst added, and
+        merge is what keeps that classification from being erased.
+
+        Deliberately ``merge=list(it.keys())``, **not** ``merge=True``: passing an explicit
+        field-path list makes Firestore overwrite each named field as a whole unit (matching
+        :func:`~src.store.base.merge_record`'s shallow semantics), whereas ``merge=True``
+        auto-computes field-mask paths by recursing into any dict-valued field — so a
+        dict-valued item field would be recursively merged on Firestore but wholesale-replaced
+        on JsonlStore, a real backend divergence for a schema shape this codebase doesn't use
+        today but could in the future. Batched in groups of :data:`_BATCH_LIMIT` (the per-batch
+        write cap). Returns ``{repo: post_upsert_total}`` for each repo touched, via a
+        ``count()`` aggregation query per repo (one read regardless of that repo's size).
         """
         if not items:
             return {}
         deduped: dict[tuple[str, int], dict] = {}
         for it in items:
-            deduped[(it["repo"], it["number"])] = it
+            key = (it["repo"], it["number"])
+            deduped[key] = merge_record(deduped.get(key), it)
         deduped_items = list(deduped.values())
         repos = {repo for repo, _ in deduped}
         for batch_items in _chunks(deduped_items, _BATCH_LIMIT):
             batch = self._client.batch()
             for it in batch_items:
-                batch.set(self._items.document(_item_doc_id(it["repo"], it["number"])), it)
+                batch.set(
+                    self._items.document(_item_doc_id(it["repo"], it["number"])),
+                    it,
+                    merge=list(it.keys()),
+                )
             batch.commit()
         return {repo: self._count_for_repo(repo) for repo in repos}
 
