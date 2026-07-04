@@ -85,6 +85,23 @@ def test_main_isolates_repo_failure_and_saves_state(tmp_path, monkeypatch):
     assert "o/good" in state and "o/bad" not in state  # failed repo's cursor NOT advanced
 
 
+def test_merge_jsonl_preserves_unicode_line_separator(tmp_path):
+    """A body containing a literal U+2028 must survive a write→re-read merge cycle.
+
+    Records are written with ensure_ascii=False, so U+2028/U+2029/U+0085 land literally in
+    the file. Re-reading with str.splitlines() (the old bug) would shatter such a record into
+    unparseable fragments and silently drop it; splitting on "\\n" keeps it intact.
+    """
+    path = tmp_path / "o__r.jsonl"
+    body = "line one\u2028line two"  # literal U+2028 LINE SEPARATOR inside the body
+    rec = {"number": 1, "title": "t", "updated_at": "2025-01-01T00:00:00Z", "body": body}
+    assert collector._merge_jsonl(path, [rec]) == 1
+    # Second merge re-reads the file it just wrote; the U+2028 record must not be lost.
+    assert collector._merge_jsonl(path, []) == 1
+    kept = json.loads(path.read_text().rstrip("\n").split("\n")[0])
+    assert kept["body"] == body
+
+
 def test_main_uses_lookback_window(tmp_path, monkeypatch):
     """With no state, main() defaults to a rolling INITIAL_LOOKBACK_DAYS window."""
     monkeypatch.setattr(config, "DATA_DIR", tmp_path)

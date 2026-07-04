@@ -159,7 +159,11 @@ def _merge_jsonl(path, records: list[dict]) -> int:
     """
     existing: dict[int, dict] = {}
     if path.exists():
-        for lineno, line in enumerate(path.read_text().splitlines(), 1):
+        # Split on "\n" only — the record delimiter used when writing (below). Do NOT use
+        # str.splitlines(), which also breaks on U+2028/U+2029/U+0085 etc.; because records
+        # are written with ensure_ascii=False, such characters appear literally inside JSON
+        # string bodies and would otherwise shatter one record into unparseable fragments.
+        for lineno, line in enumerate(path.read_text().split("\n"), 1):
             if not line.strip():
                 continue
             try:
