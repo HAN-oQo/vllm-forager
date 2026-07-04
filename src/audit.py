@@ -1,4 +1,4 @@
-"""Collection data-quality guardrail (T0.11) — reconcile the local KB against GitHub, per run.
+"""Collection data-quality guardrail (T0.11–T0.12) — reconcile the local KB against GitHub.
 
 Guardrail 1b: after collection we must know we didn't *silently* lose data. Two independent
 signals, because either alone has blind spots:
@@ -14,6 +14,9 @@ signals, because either alone has blind spots:
 
 Each run writes a ``data_quality`` record (count delta, gap ratio, error count, flagged) to
 the KB so the live health panel (T5.8) and the policy loop can track drift over time.
+:func:`record_stall` (T0.12) writes the same kind of record for the collector's cursor-stall
+case (see ``src.collector.PAGE_CAP``) — a >1000-item single-timestamp cluster REST pagination
+can't get past — falling back to GraphQL for a count even though the items aren't recoverable.
 
 Storage: records are appended to ``<data_dir>/audit/data_quality.jsonl`` — a **subdirectory**
 on purpose, since :meth:`JsonlStore.query` globs ``*.jsonl`` in the data-dir root and would
@@ -144,6 +147,21 @@ def write_record(data_dir: Path, record: dict, *, checked_at: str) -> Path:
     return path
 
 
+def _resolve_data_dir(store: Store, data_dir: Path | None, *, caller: str) -> Path:
+    """`data_dir` if given, else the store's ``data_dir`` (JsonlStore) — else raise loudly.
+
+    A store without either (a future non-JSONL backend) must not silently misroute records to
+    `config.DATA_DIR` — until M0.6 gives ``data_quality`` a home on the Store interface itself.
+    """
+    resolved = data_dir if data_dir is not None else getattr(store, "data_dir", None)
+    if resolved is None:
+        raise TypeError(
+            f"{caller} needs a JsonlStore or an explicit data_dir; "
+            f"{type(store).__name__} exposes no data_dir"
+        )
+    return resolved
+
+
 def audit_repo(
     store: Store,
     repo: str,
@@ -160,20 +178,44 @@ def audit_repo(
     `remote_fetcher` is injectable so offline tests avoid the network. `since` bounds *both* the
     remote and local counts to the collected window (comparable totals); `errors` is the
     collection error count for this repo (folded into the flag). Requires `checked_at` (an ISO
-    timestamp) so this stays deterministic under test.
-
-    Persistence target: `data_dir` if given, else the store's ``data_dir`` (JsonlStore). A store
-    without one (a future non-JSONL backend) raises loudly rather than silently misrouting the
-    records to disk — until M0.6 gives the ``data_quality`` record a home on the Store interface.
+    timestamp) so this stays deterministic under test. See :func:`_resolve_data_dir` for the
+    `data_dir` persistence target.
     """
     local = local_counts(store, repo, since)
     remote = remote_fetcher(repo, since)
     record = reconcile(repo, local, remote, errors=errors, gap_threshold=gap_threshold)
-    resolved_dir = data_dir if data_dir is not None else getattr(store, "data_dir", None)
-    if resolved_dir is None:
-        raise TypeError(
-            "audit_repo needs a JsonlStore or an explicit data_dir; "
-            f"{type(store).__name__} exposes no data_dir"
-        )
+    resolved_dir = _resolve_data_dir(store, data_dir, caller="audit_repo")
+    write_record(resolved_dir, record, checked_at=checked_at)
+    return record
+
+
+def record_stall(
+    store: Store,
+    repo: str,
+    window_since: str,
+    *,
+    remote_fetcher: RemoteFetcher = remote_counts,
+    checked_at: str,
+    data_dir: Path | None = None,
+) -> dict:
+    """Record a collector cursor-stall (T0.12) as a flagged ``data_quality`` record.
+
+    A stall means too many items (> ``PAGE_CAP`` * ``PER_PAGE``, collector.py) share one
+    ``updated_at`` timestamp, so REST offset-pagination can't advance past it and the collector
+    gives up on that window. This falls back to GraphQL (`remote_fetcher`, the same mechanism as
+    :func:`audit_repo`) to learn the window's true item **count** — the items themselves aren't
+    recoverable via this path, but the *size* of what was missed becomes visible in the
+    data_quality history instead of only a stderr line. Always ``flagged`` (a stall is itself the
+    signal). See :func:`_resolve_data_dir` for the `data_dir` persistence target.
+    """
+    remote = remote_fetcher(repo, window_since)
+    record = {
+        "repo": repo,
+        "reason": "cursor_stall",
+        "window_since": window_since,
+        "remote_total": remote["total"],
+        "flagged": True,
+    }
+    resolved_dir = _resolve_data_dir(store, data_dir, caller="record_stall")
     write_record(resolved_dir, record, checked_at=checked_at)
     return record

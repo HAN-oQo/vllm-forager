@@ -197,7 +197,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
       record (count delta, gap ratio, error count) to the KB each run.
       Test: `tests/test_audit.py` — offline: synthetic local vs remote → delta computed, gap-ratio flagged over
       threshold; live GraphQL compare on a small repo = `@pytest.mark.integration`.
-- [ ] **T0.12 Collector review follow-ups** (from the #3 review): log the cursor-stall case to the `data_quality`
+- [x] **T0.12 Collector review follow-ups** (from the #3 review): log the cursor-stall case to the `data_quality`
       metric (not just stderr) + fall back to GraphQL for single-timestamp clusters >1000; make non-network
       failures in `main` loud (narrow the `except`, log the traceback) instead of looking like a transient skip;
       add `pytest-timeout` so the stall-guard test fails fast rather than hanging the suite.

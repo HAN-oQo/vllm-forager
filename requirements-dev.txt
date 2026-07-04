@@ -2,6 +2,7 @@
 # Pinned so CI matches local exactly — an unpinned ruff/black drifted and auto-fixed a
 # file in CI (hook-modified-files → CI fail) while local passed. Bump deliberately.
 pytest==9.1.1
+pytest-timeout==2.4.0
 black==26.5.1
 ruff==0.15.20
 mypy==2.1.0

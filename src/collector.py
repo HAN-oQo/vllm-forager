@@ -13,6 +13,10 @@ This endpoint returns issues and PRs together (PRs have a `pull_request` key), a
   failures (5xx / timeout / connection) with exponential backoff and honors both primary and
   secondary (`Retry-After`) rate limits; records missing a required field are logged+skipped;
   one repo's failure is isolated (its cursor preserved) so the rest of the run continues.
+- Review follow-ups (T0.12): a cursor stall (see `PAGE_CAP`) is recorded to the `data_quality`
+  metric via `src.audit.record_stall`, not just stderr; `main`'s per-repo isolation logs a full
+  traceback for non-network failures (a real bug) instead of the same message used for an
+  expected transient skip.
 
 Usage:
     python -m src.collector            # incremental collection for all repos
@@ -25,6 +29,8 @@ import argparse
 import os
 import sys
 import time
+import traceback
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -173,12 +179,21 @@ REQUIRED_FIELDS = ("number", "url", "updated_at", "type")
 PAGE_CAP = 10
 
 
-def fetch_repo(slug: str, since: str) -> list[dict]:
+def fetch_repo(
+    slug: str,
+    since: str,
+    *,
+    on_stall: Callable[[str, str], None] | None = None,
+) -> list[dict]:
     """Fetch all issues + PRs for `slug` updated at/after `since`.
 
     Works around GitHub's ~1000-item deep-pagination limit by advancing the `since`
     cursor (sort=updated, asc) whenever a window fills PAGE_CAP pages. Records are keyed
     by issue number, so the inclusive-boundary re-fetch between windows is deduped.
+
+    `on_stall`, if given, is called with ``(slug, window_since)`` when the cursor cannot
+    advance (>``PAGE_CAP``*``PER_PAGE`` items share one ``updated_at``) — `main` uses this
+    to record the gap as a ``data_quality`` metric (T0.12) instead of only a stderr line.
     """
     owner, repo = slug.split("/", 1)
     url = f"{API}/repos/{owner}/{repo}/issues"
@@ -233,6 +248,8 @@ def fetch_repo(slug: str, since: str) -> list[dict]:
             # No forward progress (e.g. >1000 items share one timestamp); stop rather
             # than spin forever.
             print(f"  !! {slug} cursor stalled at {window_since} — stopping early", file=sys.stderr)
+            if on_stall is not None:
+                on_stall(slug, window_since)
             return list(collected.values())
         window_since = last_updated
 
@@ -284,15 +301,42 @@ def main(argv: list[str] | None = None) -> None:
             file=sys.stderr,
         )
 
+    # Local import: audit.py imports collector._headers, so importing it at module level
+    # here would create a circular import; deferring to call time (after collector has
+    # fully loaded) breaks the cycle.
+    from . import audit
+
+    def _on_stall(stalled_slug: str, window_since: str) -> None:
+        # A stall means the REST cursor can't advance (>PAGE_CAP*PER_PAGE items share one
+        # timestamp) — fall back to GraphQL to at least learn the window's true count and
+        # persist it as a flagged data_quality record (T0.12), not just a stderr line. This
+        # diagnostic must not itself abort collection of the records already fetched.
+        # `remote_fetcher=audit.remote_counts` is a live attribute lookup at call time (not
+        # record_stall's early-bound default), so tests can monkeypatch audit.remote_counts.
+        try:
+            audit.record_stall(
+                store,
+                stalled_slug,
+                window_since,
+                remote_fetcher=audit.remote_counts,
+                checked_at=now,
+            )
+        except Exception as exc:
+            print(f"  !! {stalled_slug} failed to record stall: {exc}", file=sys.stderr)
+
     for repo in config.REPOS:
         slug = repo["slug"]
         # --full ignores the stored cursor and re-fetches the whole lookback window.
         since = default_since if args.full else (store.get_state(slug) or default_since)
         print(f"[{slug}] since {since} …")
         try:
-            records = fetch_repo(slug, since)
-        except Exception as exc:  # isolate: one repo's failure must not abort the rest
+            records = fetch_repo(slug, since, on_stall=_on_stall)
+        except requests.RequestException as exc:  # network/HTTP — expected & transient
             print(f"  !! {slug} failed: {exc} — skipping (cursor preserved)", file=sys.stderr)
+            continue
+        except Exception:  # NOT a network failure — a real bug; make it loud, then isolate
+            print(f"  !! {slug} UNEXPECTED failure — skipping (cursor preserved):", file=sys.stderr)
+            traceback.print_exc(file=sys.stderr)
             continue
         totals = store.upsert_items(records)  # {repo: post-upsert total} — no re-read needed
         store.set_state(slug, now)  # persist progress per repo so a later failure can't lose it
