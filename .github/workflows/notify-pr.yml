@@ -1,0 +1,44 @@
+name: notify-pr
+
+# Ping ntfy on the PR lifecycle — whenever a pull request is OPENED and whenever one is
+# MERGED — server-side, so you're notified regardless of whether any local loop was watching
+# (e.g. PRs opened by the dev-loop, or merges you do from the GitHub UI / phone).
+#
+# Setup (once): add a repository secret NOTIFY_URL = your ntfy topic, e.g.
+#   gh secret set NOTIFY_URL --body "https://ntfy.sh/<your-secret-topic>"
+# If the secret is unset the job is a silent no-op (safe for forks, which can't read it).
+
+on:
+  pull_request:
+    types: [opened, closed]
+
+jobs:
+  notify:
+    # Fire on PR opened, or on PR merged (closed + merged). Skip plain closes.
+    if: github.event.action == 'opened' || github.event.pull_request.merged == true
+    runs-on: ubuntu-latest
+    steps:
+      - name: ntfy on PR opened / merged
+        env:
+          NOTIFY_URL: ${{ secrets.NOTIFY_URL }}
+          ACTION: ${{ github.event.action }}
+          PR_NUM: ${{ github.event.pull_request.number }}
+          PR_TITLE: ${{ github.event.pull_request.title }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          BASE: ${{ github.event.pull_request.base.ref }}
+          AUTHOR: ${{ github.event.pull_request.user.login }}
+          MERGER: ${{ github.event.pull_request.merged_by.login }}
+        run: |
+          [ -n "$NOTIFY_URL" ] || { echo "NOTIFY_URL secret unset — skipping"; exit 0; }
+          if [ "$ACTION" = "opened" ]; then
+            title="vllm-forager: PR opened"
+            body="#${PR_NUM} -> ${BASE}: ${PR_TITLE} (by ${AUTHOR})"
+          else
+            title="vllm-forager: PR merged"
+            body="#${PR_NUM} -> ${BASE}: ${PR_TITLE} (merged by ${MERGER})"
+          fi
+          curl -s --max-time 10 \
+            -H "Title: $title" \
+            -H "Click: $PR_URL" \
+            -d "$body" \
+            "$NOTIFY_URL" >/dev/null || true
