@@ -178,7 +178,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** first human-readable deliverable — raw JSONL → a weekly digest, and sets the "every claim cites a link" bar before any LLM is involved.
   - **e.g.:** `## ROCm builds (3)` → `- [vllm#123] hipBLAS build fails on gfx90a — https://github.com/vllm-project/vllm/issues/123`.
   - **Test:** `tests/test_reporter.py` — synthetic items → report contains every item URL + correct per-section counts.
-- [ ] **T0.9 Report CLI** — `python -m src.report` writes `data/reports/YYYY-Www.md`.
+- [x] **T0.9 Report CLI** — `python -m src.report` writes `data/reports/YYYY-Www.md`.
   - **Why:** one command to produce the weekly report on demand / on a schedule.
   - **e.g.:** `python -m src.report` → writes `data/reports/2026-W27.md` and prints its path.
   - **Test:** `tests/test_report_cli.py` — `main()` on a tmp store creates a non-empty file.
