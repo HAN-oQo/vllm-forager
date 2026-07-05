@@ -269,3 +269,43 @@ def run_engineer(
         store, engineer_result.to_run_record(), stage="engineer", repo=repo, number=number
     )
     return engineer_result
+
+
+_DEFAULT_PUSH_TIMEOUT_S = 120.0
+
+
+def push_branch(
+    host: str,
+    branch: str,
+    *,
+    repo_dir: str | None = None,
+    remote: str = "origin",
+    timeout: float = _DEFAULT_PUSH_TIMEOUT_S,
+) -> bool:
+    """Push `branch` (already committed on `host`'s checkout, e.g. by :func:`run_engineer`) to
+    `remote` — T3.7's fix for a real gap this module's own docstring used to flag: a patch
+    committed to a branch that nothing ever made reachable from GitHub, so `gate.py`'s later `gh
+    pr create --head <branch>` had no real branch to point at. `remote` defaults to `"origin"`,
+    the checkout's own configured remote — on a real MI250 deployment this is expected to already
+    point at the contributor's fork (a plain `git clone <fork-url>` sets it up that way), not at
+    the upstream repo itself; this function doesn't configure or validate that, only pushes to
+    whatever `remote` already resolves to.
+
+    `repo_dir`, if given, is `cd`'d into first, exactly like :func:`_verify_command`'s own
+    `repo_dir` handling — see its docstring for why plain `ssh host command` doesn't otherwise
+    land in the checkout.
+
+    Returns:
+        Whether the push succeeded (`exit_code == 0`). Never raises for an ordinary push failure
+        (auth, network, remote rejected the ref) — the caller decides whether "couldn't push" is
+        fatal for its own flow; only :class:`~src.runner.RunnerError` (ssh itself unreachable,
+        the command hanging past `timeout`) still propagates uncaught, matching every sibling
+        M3 stage's treatment of infra failures as a different kind of problem than a verdict.
+    """
+    command = "\n".join(
+        ["set -e"]
+        + ([f"cd {shlex.quote(repo_dir)}"] if repo_dir else [])
+        + [f"git push {shlex.quote(remote)} {shlex.quote(branch)}"]
+    )
+    result = runner.run(host, command, timeout=timeout)
+    return result.exit_code == 0

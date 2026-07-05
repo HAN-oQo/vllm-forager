@@ -387,3 +387,76 @@ def test_synthesize_patch_returns_none_on_llm_error(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(llm, "complete", _raise)
     assert engineer.synthesize_patch("t", "b", "log") is None
+
+
+# --------------------------------------------------------------------- push_branch (T3.7)
+
+
+def test_push_branch_true_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append((host, command))
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    assert engineer.push_branch("mi250-051", "forager/o-r-1") is True
+    host, command = calls[0]
+    assert host == "mi250-051"
+    assert "git push origin forager/o-r-1" in command
+
+
+def test_push_branch_false_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner, "run", lambda host, command, **k: runner.RunResult(exit_code=1, log="rejected\n")
+    )
+
+    assert engineer.push_branch("mi250-051", "forager/o-r-1") is False
+
+
+def test_push_branch_uses_given_remote(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", remote="my-fork")
+
+    assert "git push my-fork forager/o-r-1" in calls[0]
+
+
+def test_push_branch_cds_into_repo_dir_after_set_dash_e(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", repo_dir="/remote/vast0/herom/vllm")
+
+    lines = calls[0].splitlines()
+    assert lines[0] == "set -e"
+    assert lines[1] == "cd /remote/vast0/herom/vllm"
+
+
+def test_push_branch_command_is_syntactically_valid_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", repo_dir="/remote/vast0/herom/vllm")
+
+    result = subprocess.run(
+        ["bash", "-n", "-c", calls[0]], capture_output=True, text=True, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
