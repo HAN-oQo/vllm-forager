@@ -49,6 +49,7 @@ Known limitations, not fixed here:
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import shlex
 import sys
@@ -150,6 +151,16 @@ def synthesize_patch(title: str, body: str, failing_log: str) -> str | None:
     return patch.strip() if isinstance(patch, str) and patch.strip() else None
 
 
+def _remote_script(lines: list[str], *, repo_dir: str | None = None) -> str:
+    """Compose a remote shell script: ``set -e`` first, then an optional ``cd {repo_dir}``, then
+    `lines` verbatim — the one shape both :func:`_verify_command` and :func:`push_branch` need
+    (see :func:`_verify_command`'s own docstring for why `cd` must come *after* `set -e`, not
+    before: a `cd` that fails before `set -e` takes effect doesn't abort the script). Shared so a
+    future fix to this contract (quoting, `set -o pipefail`, the `cd`/`set -e` ordering itself)
+    can't be applied to one call site and silently missed in the other."""
+    return "\n".join(["set -e"] + ([f"cd {shlex.quote(repo_dir)}"] if repo_dir else []) + lines)
+
+
 def _verify_command(
     branch: str, patch: str, repro_command: str, *, base_ref: str, repo_dir: str | None = None
 ) -> str:
@@ -185,10 +196,8 @@ def _verify_command(
     commit, aborting before `repro_command` ever runs and misreporting a correct patch as
     `verified=False`.
     """
-    return "\n".join(
+    return _remote_script(
         [
-            "set -e",
-            *([f"cd {shlex.quote(repo_dir)}"] if repo_dir else []),
             f"git checkout -B {branch} {base_ref}",
             "git clean -fd",
             f"git apply <<'{_PATCH_HEREDOC_DELIMITER}'",
@@ -197,7 +206,8 @@ def _verify_command(
             "git add -A",
             f"git commit -m 'forager: candidate {branch} patch'",
             repro_command,
-        ]
+        ],
+        repo_dir=repo_dir,
     )
 
 
@@ -269,3 +279,101 @@ def run_engineer(
         store, engineer_result.to_run_record(), stage="engineer", repo=repo, number=number
     )
     return engineer_result
+
+
+_DEFAULT_PUSH_TIMEOUT_S = 120.0
+
+
+def push_branch(
+    host: str,
+    branch: str,
+    *,
+    repo_dir: str | None = None,
+    remote: str = "origin",
+    expected_owner: str | None = None,
+    timeout: float = _DEFAULT_PUSH_TIMEOUT_S,
+) -> bool:
+    """Push `branch` (already committed on `host`'s checkout, e.g. by :func:`run_engineer`) to
+    `remote` — T3.7's fix for a real gap this module's own docstring used to flag: a patch
+    committed to a branch that nothing ever made reachable from GitHub, so `gate.py`'s later `gh
+    pr create --head <branch>` had no real branch to point at. `remote` defaults to `"origin"`,
+    the checkout's own configured remote — on a real MI250 deployment this is expected to already
+    point at the contributor's fork (a plain `git clone <fork-url>` sets it up that way), not at
+    the upstream repo itself.
+
+    `expected_owner`, if given (e.g. `"HAN-oQo"`), is checked against `remote`'s configured URL
+    *before* pushing — refuses to push (returns `False`, nothing sent) if the owner isn't found
+    in it. This exists because nothing here otherwise verifies `remote` actually points at a fork
+    rather than the real upstream repo; a checkout whose `origin` was ever cloned from or
+    repointed at the upstream repo directly (plausible on a shared host used for more than one
+    purpose) would otherwise happily push a candidate branch straight to it — a smaller-but-real
+    echo of the exact "wrong destination" class of mistake T3.7 exists to prevent for `gh pr
+    create` itself. Left `None` (default) to skip the check for a caller that already knows
+    `remote` is safe.
+
+    `repo_dir`, if given, is `cd`'d into first, exactly like :func:`_verify_command`'s own
+    `repo_dir` handling — see its docstring for why plain `ssh host command` doesn't otherwise
+    land in the checkout.
+
+    Returns:
+        Whether the push succeeded (`exit_code == 0`) — `False` covers both an ordinary push
+        failure (auth, network, remote rejected the ref) and a failed `expected_owner` check;
+        the caller decides whether "couldn't push" is fatal for its own flow. Only
+        :class:`~src.runner.RunnerError` (ssh itself unreachable, the command hanging past
+        `timeout`) still propagates uncaught, matching every sibling M3 stage's treatment of
+        infra failures as a different kind of problem than a verdict.
+    """
+    owner_check = (
+        [
+            f"git remote get-url {shlex.quote(remote)} | grep -qF {shlex.quote(expected_owner)} "
+            f"|| {{ echo 'push_branch: remote {remote!r} does not look like it belongs to "
+            f"{expected_owner!r}' >&2; exit 1; }}"
+        ]
+        if expected_owner
+        else []
+    )
+    command = _remote_script(
+        owner_check + [f"git push {shlex.quote(remote)} {shlex.quote(branch)}"],
+        repo_dir=repo_dir,
+    )
+    result = runner.run(host, command, timeout=timeout)
+    return result.exit_code == 0
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point for :func:`push_branch` — before this, nothing gave an operator a way to
+    actually run it short of a Python REPL, which several code-review findings on T3.7 called
+    out as a real gap: DEVPLAN's own example (`src.engineer.push_branch(...)`) reads like a
+    runnable pipeline step, but had no command to type. `run_engineer`'s own patch-synthesis loop
+    isn't exposed here — it needs `store`/KB wiring this module's other functions all take for
+    granted, and adding that CLI surface is a separate, larger decision than "give `push_branch`
+    a way to be invoked at all."
+    """
+    ap = argparse.ArgumentParser(
+        prog="python -m src.engineer",
+        description="Push a candidate branch (already committed on --host) to its fork remote.",
+    )
+    ap.add_argument("--host", required=True, help="ssh-reachable alias, e.g. 'mi250-051'")
+    ap.add_argument("--branch", required=True, help="branch name, e.g. 'forager/o-r-1'")
+    ap.add_argument("--repo-dir", default=None, help="cd here on --host before pushing")
+    ap.add_argument("--remote", default="origin", help="git remote to push to (default: origin)")
+    ap.add_argument(
+        "--expected-owner",
+        default=None,
+        help="refuse to push unless --remote's URL contains this (see push_branch's docstring)",
+    )
+    args = ap.parse_args(argv)
+
+    ok = push_branch(
+        args.host,
+        args.branch,
+        repo_dir=args.repo_dir,
+        remote=args.remote,
+        expected_owner=args.expected_owner,
+    )
+    print(f"pushed {args.branch} to {args.remote}" if ok else "push failed (see stderr)")
+    return 0 if ok else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

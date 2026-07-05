@@ -349,7 +349,9 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Expected output:** a reproduced bug signal on MI250; a **verified** patch (signal flips) on a fork branch;
 > ensemble self-review votes; a human-gate artifact; a **draft PR** (only after approval).
 > **Demo:** `python -m src.engineer --candidate <id>` (repro→patch→verify on mi250-05x) prints verified=true/false;
-> the human gate opens a draft PR only with `--approve`.
+> the human gate writes a local draft with `--approve` and opens a real PR only with `--approve --submit`
+> on a *later, separate* invocation (see T3.7 — supersedes this line's original "`--approve` opens a draft
+> PR" wording, which was the exact behavior the T3.6 incident showed was unsafe).
 > **Acceptance:** `pytest -m m3` green · (integration) a real MI250 run yields a verified patch · **T3.6 = a real
 > draft PR URL pasted in the checklist.**
 
@@ -373,6 +375,9 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the mandatory human checkpoint — nothing reaches upstream vLLM without a person seeing the full evidence bundle and approving (reputation safety).
   - **e.g.:** `engineer --candidate d` prints the bundle; only `--approve` triggers `gh pr create --draft`.
   - **Test:** `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked). **HARD: nothing reaches upstream without approval.**
+  - **Superseded by T3.7:** the "approved ⇒ `gh` invoked" line above described a single flag that, in
+    practice, opened a real public PR (see T3.6's incident note) — `gate.py` now requires an explicit,
+    separate `--submit` flag *and* a pre-existing draft from an earlier call before `gh` is ever invoked.
 - [ ] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
   - **Why:** the project's first actual upstream deliverable — proves the whole pipeline end-to-end on a low-risk change before attempting harder fixes.
   - **e.g.:** a docs/typing fix flows repro→patch→verify→self-review→**human confirm**→ a real PR URL on vllm-project/vllm.
@@ -397,10 +402,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > human-confirm flag** · a sample PR body carries problem / root-cause / repro / MI250-verification sections + DCO
 > `Signed-off-by` + `Fixes #`.
 
-- [ ] **T3.7 Fork-first, human-confirmed submission (HARD safety fix)** — the engineer pushes the branch to **the fork** and writes a PR draft artifact (title + body) locally; it must **not** run `gh pr create` against `vllm-project/vllm`. The upstream PR opens only via a separate, explicit `--submit --approve` step after the human reviews the draft.
+- [x] **T3.7 Fork-first, human-confirmed submission (HARD safety fix)** — the engineer pushes the branch to **the fork** and writes a PR draft artifact (title + body) locally; it must **not** run `gh pr create` against `vllm-project/vllm`. The upstream PR opens only via a separate, explicit `--submit --approve` step after the human reviews the draft.
   - **Why:** `gh pr create` from a fork branch defaults base=upstream → a public PR (that is how #47645 escaped). Make the safe path the default so it can't recur.
-  - **e.g.:** `engineer --candidate X` → pushes `forager/…` to the fork + writes `data/pr_drafts/X.md`; zero upstream PRs. The human reads it, runs `engineer --candidate X --submit --approve` → then (and only then) the upstream PR opens.
-  - **Test:** `tests/test_gate.py` — without both flags, `gh pr create` with an upstream base is never invoked (subprocess mocked); with both, invoked exactly once.
+  - **e.g.:** `python -m src.engineer --push-branch --host mi250-051 --branch forager/o-r-X --expected-owner HAN-oQo` pushes to the fork (refusing if the remote doesn't look like the fork); `python -m src.gate --candidate X --approve` writes `data/pr_drafts/o-r-X.md` — zero upstream PRs. The human reads it, runs the *same* `--candidate X --approve --submit` command **again, as a separate invocation** → then (and only then) the upstream PR opens.
+  - **Test:** `tests/test_gate.py` — without both flags, `gh pr create` is never invoked (subprocess mocked); with both flags on the *first* invocation for a candidate, still never invoked (the draft must predate the submit call); only on a later, separate invocation is it invoked exactly once. `tests/test_engineer.py` — `push_branch` composes/runs the right `git push` command (runner mocked) and refuses to push when `--expected-owner` doesn't match the remote.
+  - **Note:** `gh pr create` stays in `gate.py` (where its own tests already lived) rather than moving into `engineer.py`'s CLI — the DEVPLAN's own `engineer --candidate d` phrasing in T3.5 was already loose shorthand for "the M3 pipeline," not literally `src/engineer.py`. `engineer.py` gained the new `push_branch` helper (a separate function, not folded into `run_engineer`, so its already-tested behavior didn't change) plus a minimal CLI to actually invoke it. `gate.py`'s single `--approve` flag was split into `--approve` (writes a local draft, never touches `gh`) and `--submit` (only meaningful together with `--approve`) — and, per a code-review finding on this very fix, `--submit` is additionally inert unless the draft already existed from an *earlier*, separate call (`GateResult.draft_is_new`), so passing both flags together on one command line still can't open a PR on the first try. `push_branch` isn't wired into `run_engineer` or any orchestrator yet (there is no M4 orchestrator to wire it into) — it's a standalone, directly-runnable step for now.
 - [ ] **T3.8 Contribution-norms adapter (repo profile)** — fetch + cache the target repo's `CONTRIBUTING`, PR template, DCO/sign-off requirement, title conventions, and a few recent **merged** PRs as style exemplars; expose as a repo profile the author uses.
   - **Why:** a PR that ignores the template / lacks DCO / uses the wrong title style gets bounced regardless of code quality.
   - **e.g.:** vLLM profile → title `[ROCm][Bugfix] …`, requires `Signed-off-by`, PR-template sections, "tests required".

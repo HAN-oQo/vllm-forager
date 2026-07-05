@@ -387,3 +387,184 @@ def test_synthesize_patch_returns_none_on_llm_error(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(llm, "complete", _raise)
     assert engineer.synthesize_patch("t", "b", "log") is None
+
+
+# --------------------------------------------------------------------- push_branch (T3.7)
+
+
+def test_push_branch_true_on_success(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append((host, command))
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    assert engineer.push_branch("mi250-051", "forager/o-r-1") is True
+    host, command = calls[0]
+    assert host == "mi250-051"
+    assert "git push origin forager/o-r-1" in command
+
+
+def test_push_branch_false_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        runner, "run", lambda host, command, **k: runner.RunResult(exit_code=1, log="rejected\n")
+    )
+
+    assert engineer.push_branch("mi250-051", "forager/o-r-1") is False
+
+
+def test_push_branch_uses_given_remote(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", remote="my-fork")
+
+    assert "git push my-fork forager/o-r-1" in calls[0]
+
+
+def test_push_branch_cds_into_repo_dir_after_set_dash_e(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", repo_dir="/remote/vast0/herom/vllm")
+
+    lines = calls[0].splitlines()
+    assert lines[0] == "set -e"
+    assert lines[1] == "cd /remote/vast0/herom/vllm"
+
+
+def test_push_branch_command_is_syntactically_valid_shell(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", repo_dir="/remote/vast0/herom/vllm")
+
+    result = subprocess.run(
+        ["bash", "-n", "-c", calls[0]], capture_output=True, text=True, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_push_branch_with_expected_owner_checks_remote_before_pushing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: nothing else verifies `remote` actually points at a fork rather than the
+    real upstream repo -- a checkout whose `origin` was ever repointed at upstream would
+    otherwise happily push a candidate branch straight there. `expected_owner` adds a check
+    the composed script runs before `git push`."""
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", expected_owner="HAN-oQo")
+
+    lines = calls[0].splitlines()
+    assert lines[0] == "set -e"
+    assert "git remote get-url origin" in lines[1]
+    assert "HAN-oQo" in lines[1]
+    assert lines[1].index("grep") < len(lines[1])  # the check runs, and precedes the push
+    assert lines[-1] == "git push origin forager/o-r-1"
+
+
+def test_push_branch_with_expected_owner_is_syntactically_valid_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1", expected_owner="HAN-oQo")
+
+    result = subprocess.run(
+        ["bash", "-n", "-c", calls[0]], capture_output=True, text=True, timeout=5
+    )
+    assert result.returncode == 0, result.stderr
+
+
+def test_push_branch_without_expected_owner_skips_the_check(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=0, log="")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    engineer.push_branch("mi250-051", "forager/o-r-1")
+
+    assert "get-url" not in calls[0]
+
+
+# --------------------------------------------------------------------- CLI
+
+
+def test_cli_push_branch_calls_push_branch_with_parsed_args(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    captured = {}
+
+    def _fake_push_branch(host, branch, **kwargs):
+        captured["host"] = host
+        captured["branch"] = branch
+        captured.update(kwargs)
+        return True
+
+    monkeypatch.setattr(engineer, "push_branch", _fake_push_branch)
+
+    rc = engineer.main(
+        [
+            "--host",
+            "mi250-051",
+            "--branch",
+            "forager/o-r-1",
+            "--remote",
+            "my-fork",
+            "--expected-owner",
+            "HAN-oQo",
+        ]
+    )
+
+    assert rc == 0
+    assert captured == {
+        "host": "mi250-051",
+        "branch": "forager/o-r-1",
+        "repo_dir": None,
+        "remote": "my-fork",
+        "expected_owner": "HAN-oQo",
+    }
+    assert "pushed" in capsys.readouterr().out
+
+
+def test_cli_push_branch_returns_nonzero_on_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(engineer, "push_branch", lambda *a, **k: False)
+
+    rc = engineer.main(["--host", "mi250-051", "--branch", "forager/o-r-1"])
+
+    assert rc == 1
