@@ -107,12 +107,18 @@ class PRBody:
 
 @dataclasses.dataclass(frozen=True)
 class PRAuthorResult:
-    """The outcome of one :func:`run_pr_author` call, persisted as `stage="pr_author"`."""
+    """The outcome of one :func:`run_pr_author` call, persisted as `stage="pr_author"`.
+
+    `verify_recorded_at` records which verify run's diff this body was composed against
+    (`bundle.verify_recorded_at`) — T3.10's `pr_quality.py` compares this against the *current*
+    bundle's own `verify_recorded_at` before judging, so a candidate re-verified after this body
+    was composed is never judged against a diff the narrative doesn't actually describe."""
 
     repo: str
     number: int
     title: str
     body: str
+    verify_recorded_at: str
     recorded_at: str
 
     def to_run_record(self) -> dict:
@@ -305,7 +311,12 @@ def run_pr_author(
         return None
     recorded_at = (now or datetime.now(timezone.utc)).strftime(TS_FORMAT)
     result = PRAuthorResult(
-        repo=repo, number=number, title=composed.title, body=composed.body, recorded_at=recorded_at
+        repo=repo,
+        number=number,
+        title=composed.title,
+        body=composed.body,
+        verify_recorded_at=bundle.verify_recorded_at,
+        recorded_at=recorded_at,
     )
     record_run_best_effort(
         store, result.to_run_record(), stage="pr_author", repo=repo, number=number

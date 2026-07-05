@@ -123,6 +123,11 @@ class EvidenceBundle:
     self_review_votes: tuple[dict, ...]
     approve_count: int
     total_votes: int
+    # Which verify run's `patch`/`log` this bundle was built from -- lets a later stage
+    # (pr_author.py, pr_quality.py) detect a candidate that was re-verified after they last
+    # looked at it, instead of silently comparing against a stale pairing. Defaulted (appended
+    # last) so existing direct `EvidenceBundle(...)` construction call sites don't break.
+    verify_recorded_at: str = ""
 
     def format(self) -> str:
         """A human-readable rendering of the bundle — what the CLI prints before asking for
@@ -181,10 +186,14 @@ def _risk_badge(title: str, body: str) -> tuple[str | None, str | None, str | No
     return scores["risk"], scores["effort"], scores["impact"]
 
 
-def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | None:
-    """Gather the full evidence bundle for (`repo`, `number`), or `None` if it isn't ready for
-    the gate yet (see module docstring for the exact readiness conditions — all skip, not
-    raise)."""
+def _readiness(store: Store, repo: str, number: int) -> tuple[dict, dict, dict, list[dict]] | None:
+    """`(item, verify_run, self_review_run, all_runs)` if (`repo`, `number`) is gate-ready, else
+    `None` (skip, logged) — the exact readiness conditions `assemble_bundle` requires, factored
+    out so a caller that doesn't need the full bundle (:func:`verified_diff`, for
+    `pr_quality.py`) can check readiness and read the verify run without also paying for
+    `assemble_bundle`'s own risk-badge LLM call (:func:`_risk_badge`) or repro/self-review-vote
+    assembly it would never use. `all_runs` is returned too so `assemble_bundle` doesn't re-scan
+    the store a second time for the repro lookup."""
     item = get_item_or_skip(store, repo, number, stage="gate")
     if item is None:
         return None
@@ -214,6 +223,18 @@ def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | No
         print(f"gate: self-review for {repo}#{number} did not advance", file=sys.stderr)
         return None
 
+    return item, verify_run, self_review_run, all_runs
+
+
+def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | None:
+    """Gather the full evidence bundle for (`repo`, `number`), or `None` if it isn't ready for
+    the gate yet (see module docstring for the exact readiness conditions — all skip, not
+    raise)."""
+    ready = _readiness(store, repo, number)
+    if ready is None:
+        return None
+    item, verify_run, self_review_run, all_runs = ready
+
     reproduced_runs = [r for r in all_runs if r.get("stage") == "repro" and r.get("reproduced")]
     repro_run = latest_run(reproduced_runs) or {}
 
@@ -227,6 +248,7 @@ def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | No
         title=title,
         branch=verify_run.get("branch") or "",
         diff=verify_run.get("patch") or "",
+        verify_recorded_at=verify_run.get("recorded_at") or "",
         risk=risk,
         effort=effort,
         impact=impact,
@@ -237,6 +259,17 @@ def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | No
         approve_count=self_review_run.get("approve_count") or 0,
         total_votes=self_review_run.get("total_votes") or 0,
     )
+
+
+def verified_diff(store: Store, repo: str, number: int) -> tuple[str, str] | None:
+    """`(diff, verify_recorded_at)` for (`repo`, `number`) if it's gate-ready, else `None` — the
+    one thing a caller needs to judge or compare a diff against (`pr_quality.py`), without
+    paying for `assemble_bundle`'s own risk-badge LLM call or repro/self-review-vote assembly."""
+    ready = _readiness(store, repo, number)
+    if ready is None:
+        return None
+    _item, verify_run, _self_review_run, _all_runs = ready
+    return verify_run.get("patch") or "", verify_run.get("recorded_at") or ""
 
 
 def _pr_draft_path(repo: str, number: int, *, drafts_dir: Path | None = None) -> Path:
