@@ -151,9 +151,17 @@ class JsonlStore(Store):
         state: str | None = None,
         type: str | None = None,
     ) -> list[dict]:
-        # One repo → read its file; otherwise scan every repo JSONL in the dir.
+        # One repo -> read its file; otherwise scan every repo JSONL in the dir. `runs.jsonl`
+        # matches the same "*.jsonl" glob (it lives in the same data_dir) but holds run
+        # records, not items -- excluded explicitly, or a run with a `number` field (nearly
+        # all of them) gets misread as a pseudo-item by `_read_items`. A real, live bug found
+        # via T0.6.4's own migration tests: `forager-data/runs.jsonl`'s real `stage="gate"`
+        # record was being returned by `query()` and would have been written into Firestore's
+        # `items` collection as a fake item by `migrate.py`.
         paths = (
-            [self._path_for(repo)] if repo is not None else sorted(self.data_dir.glob("*.jsonl"))
+            [self._path_for(repo)]
+            if repo is not None
+            else sorted(p for p in self.data_dir.glob("*.jsonl") if p != self.runs_path)
         )
         out: list[dict] = []
         for path in paths:

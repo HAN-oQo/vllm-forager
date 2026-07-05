@@ -44,6 +44,21 @@ def test_query_empty_dir(tmp_path):
     assert JsonlStore(tmp_path / "nope").query() == []
 
 
+def test_query_without_repo_filter_excludes_runs_jsonl(tmp_path):
+    """Regression: `runs.jsonl` matches the same `*.jsonl` glob `query()` scans for "every repo
+    file in the dir" -- a run record (almost always carrying a `number` field) must never be
+    misread as a pseudo-item. Found live in this project's own real data directory via T0.6.4's
+    migration tests."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1)])
+    store.record_run({"repo": "o/r", "number": 2, "stage": "gate", "submitted": True})
+
+    items = store.query()  # no repo filter -- scans every "*.jsonl" file in the dir
+
+    assert [i["number"] for i in items] == [1]
+    assert all("stage" not in i for i in items)
+
+
 def test_read_tolerates_corrupt_and_numberless_lines(tmp_path):
     # A damaged file (a truncated line + a valid-JSON line missing `number`) must not abort
     # the read: the bad lines are skipped and the good record survives / self-heals.
