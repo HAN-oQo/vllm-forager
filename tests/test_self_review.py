@@ -73,10 +73,12 @@ def test_majority_approve_advances(tmp_path, monkeypatch: pytest.MonkeyPatch) ->
     assert result.approve_count == 4
     assert result.total_votes == 5
     assert result.advance is True
+    assert result.verify_recorded_at == "2025-12-31T00:00:00Z"
 
     runs = store.list_runs(repo="o/r", number=1, stage="self_review")
     assert len(runs) == 1
     assert runs[0]["advance"] is True
+    assert runs[0]["verify_recorded_at"] == "2025-12-31T00:00:00Z"
 
 
 def test_split_vote_holds(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -133,6 +135,16 @@ def test_all_critiques_failing_holds_not_advances(
     assert result.advance is False
 
 
+def test_threshold_is_overridable(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """3/5 holds against the default 2/3 threshold, but must advance against a looser one."""
+    store = _store_with_verified_patch(tmp_path)
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, False, False))
+
+    result = self_review.run_self_review(store, "o/r", 1, threshold=0.5, now=_NOW)
+
+    assert result.advance is True
+
+
 def test_a_failed_critique_is_excluded_not_counted_as_reject(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -169,6 +181,29 @@ def test_a_failed_critique_is_excluded_not_counted_as_reject(
 
 def test_returns_none_when_no_verified_patch(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = _store_with_verified_patch(tmp_path, verified=False)
+    monkeypatch.setattr(llm, "complete", _fail_if_llm_called)
+
+    assert self_review.run_self_review(store, "o/r", 1) is None
+
+
+def test_ignores_stale_verified_run_when_latest_is_not_verified(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a candidate verified successfully once, then regressed on a later retry --
+    self-review must not fall back to the older success and must skip, since the CURRENT patch
+    state is unverified."""
+    store = _store_with_verified_patch(tmp_path)  # verified=True, recorded_at=2025-12-31
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "verify",
+            "patch": "--- a/x.py\n+++ b/x.py\n(different, worse patch)\n",
+            "log": "1 failed\n",
+            "verified": False,
+            "recorded_at": "2026-01-02T00:00:00Z",  # newer than the verified=True run
+        }
+    )
     monkeypatch.setattr(llm, "complete", _fail_if_llm_called)
 
     assert self_review.run_self_review(store, "o/r", 1) is None
@@ -224,3 +259,20 @@ def test_critique_rejects_non_bool_looks_correct(monkeypatch: pytest.MonkeyPatch
         llm, "complete", lambda *a, **k: {"looks_correct": "yes", "reason": "because"}
     )
     assert self_review._critique("t", "b", "patch", "log") is None
+
+
+def test_critique_rejects_blank_reason(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A degenerate empty/whitespace-only reason must be excluded, not silently counted as a
+    real vote -- matching engineer.py/repro.py's own blank-string rejection for their single
+    string field."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"looks_correct": True, "reason": "   "})
+    assert self_review._critique("t", "b", "patch", "log") is None
+
+
+def test_critique_strips_reason_whitespace(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        llm, "complete", lambda *a, **k: {"looks_correct": True, "reason": "  ok  "}
+    )
+    critique = self_review._critique("t", "b", "patch", "log")
+    assert critique is not None
+    assert critique.reason == "ok"

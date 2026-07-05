@@ -53,9 +53,9 @@ import dataclasses
 import sys
 from datetime import datetime, timezone
 
-from . import llm, runner
+from . import runner
 from .agents.forecaster import TS_FORMAT
-from .stages import get_item_or_skip, record_run_best_effort
+from .stages import complete_or_none, get_item_or_skip, record_run_best_effort
 from .store.base import MAX_RUN_LOG_CHARS, Store
 
 _PATCH_SCHEMA = {
@@ -140,12 +140,10 @@ def synthesize_patch(title: str, body: str, failing_log: str) -> str | None:
     """A unified diff an LLM believes fixes `title`/`body`'s bug (informed by `failing_log`,
     the T3.2 baseline's captured output), or `None` if the call failed or the reply didn't
     shape into a usable patch (see module docstring: skip, logged, not raised)."""
-    try:
-        reply = llm.complete(_patch_prompt(title, body, failing_log), json_schema=_PATCH_SCHEMA)
-    except llm.LLMError as exc:
-        print(f"engineer: patch synthesis failed for {title!r}: {exc}", file=sys.stderr)
-        return None
-    if not isinstance(reply, dict):
+    reply = complete_or_none(
+        _patch_prompt(title, body, failing_log), _PATCH_SCHEMA, stage="engineer", subject=title
+    )
+    if reply is None:
         return None
     patch = reply.get("patch")
     return patch.strip() if isinstance(patch, str) and patch.strip() else None
