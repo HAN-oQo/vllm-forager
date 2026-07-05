@@ -323,7 +323,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** closes the loop — grading is useless unless the scores actually reweight the policy that drives the next round.
   - **e.g.:** a category with 0.3 precision → its scoring weight drops in `policy@v+1`; a reliable one gains.
   - **Test:** `tests/test_policy_update.py` — a low-precision category → its weight decreases in the new version.
-- [ ] **T2.3 Curator** — `src/agents/curator.py`: propose new / retire dead taxonomy categories from activity.
+- [x] **T2.3 Curator** — `src/agents/curator.py`: propose new / retire dead taxonomy categories from activity.
   - **Why:** the taxonomy must track a moving field — new techniques appear, old ones die; a static vocabulary goes stale.
   - **e.g.:** no activity in a category for N weeks → flagged retire; a novel issue cluster → proposed new category.
   - **Test:** `tests/test_curator.py` — category with no activity for N weeks → flagged retire; a novel cluster → proposed new category.
