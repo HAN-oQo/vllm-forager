@@ -705,6 +705,145 @@ def test_draft_is_new_false_when_content_is_unchanged(
     assert result.submitted is True
 
 
+# --------------------------------------------------------------------- T3.10.6: idempotency
+
+
+def test_refuses_to_submit_when_candidate_already_has_an_open_pr(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core idempotency guard: a prior stage='gate' run already shows a real pr_url --
+    a fresh --approve --submit must never call gh again, even with every other condition met
+    and draft_is_new=True (e.g. the local draft cache was cleared)."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "approved": True,
+            "submitted": True,
+            "pr_url": "https://github.com/o/r/pull/99",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    result = gate.run_gate(
+        store, "o/r", 1, approve=True, submit=True, pr_body="narrative", quality_passed=True
+    )
+
+    assert result.submitted is False
+    assert result.already_open_pr_url == "https://github.com/o/r/pull/99"
+    assert result.draft_is_new is True  # no local draft existed -- this alone must not matter
+
+
+def test_already_open_pr_url_picks_the_most_recent_when_multiple_exist(tmp_path) -> None:
+    """Regression: must use latest_run (deterministic by recorded_at), not a first-match loop
+    over store.list_runs -- Store.list_runs' ordering isn't guaranteed on every backend."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "submitted": True,
+            "pr_url": "https://github.com/o/r/pull/1",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "submitted": True,
+            "pr_url": "https://github.com/o/r/pull/2",
+            "recorded_at": "2026-02-01T00:00:00Z",
+        }
+    )
+    assert gate._already_open_pr_url(store, "o/r", 1) == "https://github.com/o/r/pull/2"
+
+
+def test_allows_submit_when_prior_gate_run_never_actually_submitted(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prior stage='gate' run that was only approved (never submitted, or gh failed and left
+    pr_url=None) must not block a later, real submission."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "approved": True,
+            "submitted": False,
+            "pr_url": None,
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
+    )
+
+    result = _approve_then_submit(store, "o/r", 1)
+
+    assert result.submitted is True
+    assert result.already_open_pr_url is None
+
+
+def test_cli_reports_existing_pr_url_instead_of_resubmitting(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "approved": True,
+            "submitted": True,
+            "pr_url": "https://github.com/o/r/pull/99",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    rc = gate.main(["--candidate", "o/r#1", "--approve", "--submit", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already has an open PR: https://github.com/o/r/pull/99" in out
+
+
+def test_cli_surfaces_existing_pr_even_without_submit_flag(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A human checking status (no --submit, or even no --approve) on an already-submitted
+    candidate should still see the existing PR -- not only when they also pass --submit."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "approved": True,
+            "submitted": True,
+            "pr_url": "https://github.com/o/r/pull/99",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    rc = gate.main(["--candidate", "o/r#1", "--data-dir", str(tmp_path)])  # no flags at all
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "already has an open PR: https://github.com/o/r/pull/99" in out
+    assert "refusing to open a second one" not in out  # --submit wasn't even requested
+
+
 def test_submit_stays_inert_when_quality_passed_is_false_on_a_later_call(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
