@@ -353,7 +353,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Acceptance:** `pytest -m m3` green · (integration) a real MI250 run yields a verified patch · **T3.6 = a real
 > draft PR URL pasted in the checklist.**
 
-- [ ] **T3.1 Remote runner** — `src/runner.py`: run a command on `mi250-05x` over ssh, stream logs, capture exit code + artifacts.
+- [x] **T3.1 Remote runner** — `src/runner.py`: run a command on `mi250-05x` over ssh, stream logs, capture exit code + artifacts.
   - **Why:** the CPU agent needs hands on the GPU box — every repro/build/verify step is a command executed on MI250 with its output captured.
   - **e.g.:** `run("mi250-051", "pytest test_rocm.py")` → streams logs, returns `{exit: 1, artifacts: […]}`.
   - **Test:** `tests/test_runner.py` — mock subprocess/ssh → correct command composed + result parsed. Real ssh = `integration` (runs only when `MI250_HOST` set).
