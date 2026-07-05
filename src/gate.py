@@ -73,6 +73,23 @@ Also not fixed: `approve`/`submit` record no approver identity, only that *an* a
 submission happened and when — acceptable for a single-operator project (the person with shell
 access on `ce-master`), but a real gap if this ever runs with more than one person able to
 invoke it.
+
+**T3.10.5 wiring:** for a while, T3.9's composed narrative (`pr_author.py`) and T3.10's quality
+verdict (`pr_quality.py`) each existed as standalone modules with no caller in this module —
+`--submit` could still open a real PR carrying `EvidenceBundle.format()`'s raw evidence dump
+(the same `# Candidate … Risk badge` shape that got #47645 withdrawn), with no quality check in
+the way at all. `_finalize`/`run_gate` now take `pr_body: str | None` (used as the draft/PR body
+instead of `bundle.format()` when given) and `quality_passed: bool | None` (`submit` is now
+inert unless this is the literal `True`, on top of the existing three conditions). This module
+deliberately does **not** import `pr_author`/`pr_quality` at module level — both already import
+`gate`, so that would be a real circular import, not a style nit. Instead `main()` *reads* (never
+re-runs) the latest persisted `stage="pr_author"`/`stage="pr_quality"` KB records directly via
+`store.list_runs`, cross-checking `recorded_at` so a quality verdict for an older, superseded
+narrative is never read as covering the current one. Reading rather than re-invoking also avoids
+a subtler bug: re-running `pr_author.run_pr_author` on the second (`--submit`) call would make a
+fresh, non-deterministic LLM call and could compose a body different from the one a human
+actually read in the draft file written by the first call — the exact "the human saw something
+different from what got submitted" gap this whole module exists to close.
 """
 
 from __future__ import annotations
@@ -163,7 +180,9 @@ class GateResult:
     the candidate's draft file for the first time — the reason `submitted` came back `False`
     even though `submit=True` was passed is almost always this. `fork_owner` records what was
     actually passed (or `None`) — the KB's own audit trail for a cross-repo PR should show which
-    fork the head branch was addressed against, not just that approval happened."""
+    fork the head branch was addressed against, not just that approval happened. `quality_passed`
+    records what was passed in (`None` if no T3.10 verdict was available) — a `submitted=False`
+    despite `submit=True` and a pre-existing draft is otherwise this, not `draft_is_new`."""
 
     repo: str
     number: int
@@ -174,6 +193,7 @@ class GateResult:
     fork_owner: str | None = None
     draft_path: Path | None = None
     draft_is_new: bool = False
+    quality_passed: bool | None = None
 
 
 def _risk_badge(title: str, body: str) -> tuple[str | None, str | None, str | None]:
@@ -353,17 +373,23 @@ def _finalize(
     fork_owner: str | None = None,
     pr_drafts_dir: Path | None = None,
     now: datetime | None = None,
+    pr_body: str | None = None,
+    quality_passed: bool | None = None,
 ) -> GateResult:
     """Approve-or-not `bundle`, submit-or-not the approved draft, record the `stage="gate"`
     outcome, and return the result. Shared by :func:`run_gate` (assemble+decide in one call) and
     `main` (which prints `bundle` in between assembling and calling this, so the human sees it
     before any decision is acted on).
 
-    Opening a real PR (:func:`_create_draft_pr`) requires **three** things, not two: `approve is
-    True`, `submit is True`, AND the candidate's draft file already existing *before* this call
-    (i.e. written by an earlier, separate call) — see module docstring for why the third
-    condition exists. `GateResult.draft_is_new` reports whether this call was the one that
-    created it, which is almost always why `submit=True` didn't actually submit.
+    Opening a real PR (:func:`_create_draft_pr`) requires **four** things, not two: `approve is
+    True`, `submit is True`, the candidate's draft file already existing *before* this call (i.e.
+    written by an earlier, separate call), AND `quality_passed is True` — see module docstring
+    for why the third and fourth conditions exist. `GateResult.draft_is_new`/`quality_passed`
+    report which of these is almost always why `submit=True` didn't actually submit.
+
+    `pr_body`, if given (T3.9's composed narrative), is written/submitted instead of
+    `bundle.format()`'s raw evidence-dump rendering — the draft a human reviews and the PR that
+    gets opened are always the same document either way, just a better one when `pr_body` exists.
 
     `fork_owner` is passed straight through to :func:`_create_draft_pr` — see its own docstring
     — and persisted in the `stage="gate"` record too, so the KB's own audit trail for a
@@ -376,11 +402,11 @@ def _finalize(
     draft_path = None
     body = None
     if approved:
-        body = bundle.format()
+        body = pr_body if pr_body is not None else bundle.format()
         target_path = _pr_draft_path(repo, number, drafts_dir=pr_drafts_dir)
         draft_is_new = not target_path.exists()
         draft_path = _write_pr_draft(bundle, body, drafts_dir=pr_drafts_dir)
-    submitted = approved and submit is True and not draft_is_new
+    submitted = approved and submit is True and not draft_is_new and quality_passed is True
     pr_url = None
     if submitted:
         assert body is not None  # submitted implies approved implies body was set above
@@ -399,6 +425,7 @@ def _finalize(
             "fork_owner": fork_owner,
             "draft_path": str(draft_path) if draft_path else None,
             "draft_is_new": draft_is_new,
+            "quality_passed": quality_passed,
             "recorded_at": when.strftime(TS_FORMAT),
         },
         stage="gate",
@@ -415,6 +442,7 @@ def _finalize(
         fork_owner=fork_owner,
         draft_path=draft_path,
         draft_is_new=draft_is_new,
+        quality_passed=quality_passed,
     )
 
 
@@ -428,12 +456,19 @@ def run_gate(
     fork_owner: str | None = None,
     pr_drafts_dir: Path | None = None,
     now: datetime | None = None,
+    pr_body: str | None = None,
+    quality_passed: bool | None = None,
 ) -> GateResult | None:
     """Assemble the evidence bundle for (`repo`, `number`); if `approve` is the literal `True`,
-    write a local PR-draft file; **only if `approve` and `submit` are both the literal `True`
-    AND the draft already existed from an earlier, separate call**, additionally open a real PR
-    against `repo`. Records the outcome as a `stage="gate"` run regardless (see module docstring
-    for why submission needs a third, temporal condition on top of the two flags).
+    write a local PR-draft file; **only if `approve` and `submit` are both the literal `True`,
+    the draft already existed from an earlier, separate call, AND `quality_passed` is the literal
+    `True`**, additionally open a real PR against `repo`. Records the outcome as a `stage="gate"`
+    run regardless (see module docstring for why submission needs conditions beyond the two
+    flags).
+
+    `pr_body`/`quality_passed` are plain values, not looked up here — this function doesn't
+    import `pr_author`/`pr_quality` (see module docstring for why); a caller (`main()`) that
+    wants T3.9/T3.10 in the loop reads their latest KB records itself and passes the results in.
 
     `fork_owner`, if given (e.g. `"HAN-oQo"`), tells `gh` the branch lives on that fork rather
     than `repo` itself — see :func:`_create_draft_pr`'s own docstring for why this is required
@@ -445,8 +480,8 @@ def run_gate(
         `None` if the candidate isn't ready for the gate (see :func:`assemble_bundle`; skipped,
         not raised). Otherwise a :class:`GateResult` — check `submitted` (not just `approve`/
         `submit`, the arguments) for whether submission was actually attempted, and `pr_url` for
-        whether it actually succeeded; `draft_is_new` explains a `submitted=False` despite
-        `submit=True`.
+        whether it actually succeeded; `draft_is_new`/`quality_passed` explain a `submitted=False`
+        despite `submit=True`.
     """
     bundle = assemble_bundle(store, repo, number)
     if bundle is None:
@@ -461,7 +496,32 @@ def run_gate(
         fork_owner=fork_owner,
         pr_drafts_dir=pr_drafts_dir,
         now=now,
+        pr_body=pr_body,
+        quality_passed=quality_passed,
     )
+
+
+def _current_narrative(store: Store, repo: str, number: int) -> tuple[str | None, bool | None]:
+    """`(pr_body, quality_passed)` for (`repo`, `number`), read directly from the latest
+    persisted `stage="pr_author"`/`stage="pr_quality"` KB records — never by calling into
+    `pr_author.py`/`pr_quality.py` themselves (see module docstring for why: a circular import,
+    and re-running composition here could produce a body different from the one already written
+    to a draft file). `pr_body` is `None` if no `pr_author` run exists yet (caller falls back to
+    `bundle.format()`). `quality_passed` is `None` (treated as "not passed" by `_finalize`) if no
+    `pr_author` run exists, no `pr_quality` run exists, or the latest `pr_quality` run's
+    `pr_author_recorded_at` doesn't match the `pr_author` run being used — a verdict for a
+    superseded narrative must never be read as covering the current one."""
+    pr_author_run = latest_run(store.list_runs(repo=repo, number=number, stage="pr_author"))
+    if pr_author_run is None:
+        return None, None
+    pr_body = pr_author_run.get("body") or None
+
+    pr_quality_run = latest_run(store.list_runs(repo=repo, number=number, stage="pr_quality"))
+    if pr_quality_run is None:
+        return pr_body, None
+    if pr_quality_run.get("pr_author_recorded_at") != pr_author_run.get("recorded_at"):
+        return pr_body, None
+    return pr_body, bool(pr_quality_run.get("passes"))
 
 
 def _parse_candidate(raw: str) -> tuple[str, int]:
@@ -528,6 +588,21 @@ def main(argv: list[str] | None = None) -> int:
 
     print(bundle.format())
 
+    pr_body, quality_passed = _current_narrative(store, repo, number)
+    if pr_body is None:
+        print(
+            "\nNo composed PR narrative yet (T3.9) -- the draft/PR body above will use the raw "
+            "evidence bundle. Run `python -m src.pr_author --candidate "
+            f"{repo}#{number}` first for a maintainer-grade body."
+        )
+    else:
+        print(f"\nPR-quality gate (T3.10): {'PASSED' if quality_passed else 'NOT PASSED'}")
+        if not quality_passed:
+            print(
+                f"Run `python -m src.pr_quality --candidate {repo}#{number}` to judge the "
+                "current narrative -- --submit stays inert until it passes."
+            )
+
     result = _finalize(
         store,
         repo,
@@ -537,6 +612,8 @@ def main(argv: list[str] | None = None) -> int:
         submit=args.submit,
         fork_owner=args.fork_owner,
         pr_drafts_dir=resolved_data_dir / _PR_DRAFTS_SUBDIR,
+        pr_body=pr_body,
+        quality_passed=quality_passed,
     )
     if result.submitted:
         print(f"\nOpened PR: {result.pr_url}" if result.pr_url else "\ngh pr create failed.")
@@ -546,6 +623,12 @@ def main(argv: list[str] | None = None) -> int:
             "NOT submitted: this is the first time this candidate's draft was written, so "
             "there's been no chance to actually review it yet. Read the file, then re-run "
             "this same command (--approve --submit) again to open the real PR."
+        )
+    elif result.approved and args.submit and not result.quality_passed:
+        print(f"\nWrote PR draft: {result.draft_path}")
+        print(
+            "NOT submitted: no passing T3.10 PR-quality verdict for the current narrative -- "
+            "see the message above."
         )
     elif result.approved:
         print(f"\nWrote PR draft: {result.draft_path}")
