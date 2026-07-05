@@ -327,7 +327,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the taxonomy must track a moving field — new techniques appear, old ones die; a static vocabulary goes stale.
   - **e.g.:** no activity in a category for N weeks → flagged retire; a novel issue cluster → proposed new category.
   - **Test:** `tests/test_curator.py` — category with no activity for N weeks → flagged retire; a novel cluster → proposed new category.
-- [ ] **T2.4 Parity matrix** — `src/parity.py`: engine × capability with evidence + gap flags.
+- [x] **T2.4 Parity matrix** — `src/parity.py`: engine × capability with evidence + gap flags.
   - **Why:** the contribution strategy is "find what exists elsewhere but is missing upstream" — the matrix makes those gaps explicit.
   - **e.g.:** (ROCm/vllm fork, "fp8 kv-cache") = present, (upstream vllm, same) = missing → gap flagged as a port candidate.
   - **Test:** `tests/test_parity.py` — synthetic capability signals → matrix cell populated + "present in fork, missing upstream" gap flagged.
