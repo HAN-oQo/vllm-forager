@@ -39,6 +39,27 @@ def test_record_outcome_rejects_negative_cost() -> None:
         Bandit().record_outcome("claude_api", reward=1.0, cost=-1.0)
 
 
+def test_record_outcome_rejects_nan_cost() -> None:
+    """Regression: `cost < 0.0` is False for NaN, so a NaN cost used to bypass validation
+    entirely and permanently poison the arm's total_value with NaN."""
+    with pytest.raises(llm_bandit.BanditError, match="cost must be >= 0"):
+        Bandit().record_outcome("claude_api", reward=1.0, cost=float("nan"))
+
+
+def test_record_outcome_rejects_negative_latency() -> None:
+    with pytest.raises(llm_bandit.BanditError, match="latency_s must be >= 0"):
+        Bandit().record_outcome("claude_api", reward=1.0, cost=1.0, latency_s=-1.0)
+
+
+def test_record_outcome_latency_lowers_value() -> None:
+    """DEVPLAN's T2.6 line explicitly weighs reward against 'cost/latency' together -- a slow
+    provider should score lower than an equally-cheap, fast one at the same reward."""
+    fast = Bandit().record_outcome("fast", reward=1.0, cost=0.01, latency_s=0.0)
+    slow = Bandit().record_outcome("slow", reward=1.0, cost=0.01, latency_s=100.0)
+
+    assert fast.stats["fast"].mean_value > slow.stats["slow"].mean_value
+
+
 def test_record_outcome_is_immutable() -> None:
     """record_outcome returns a NEW Bandit -- the original is untouched."""
     original = Bandit()
@@ -100,6 +121,24 @@ def test_select_prefers_higher_success_rate_at_equal_cost() -> None:
     assert bandit.select(["reliable", "flaky"]) == "reliable"
 
 
+def test_select_ignores_pulls_from_arms_not_in_candidate_list() -> None:
+    """Regression: total_pulls used to sum every arm this Bandit had EVER recorded, so a
+    stale/retired provider not even passed to select() could inflate the shared exploration
+    bonus and change the outcome for arms that don't include it at all."""
+    without_retired = Bandit()
+    with_retired = Bandit()
+    for _ in range(3):
+        without_retired = without_retired.record_outcome("a", reward=1.0, cost=1.0)
+        with_retired = with_retired.record_outcome("a", reward=1.0, cost=1.0)
+    for _ in range(10):
+        without_retired = without_retired.record_outcome("b", reward=0.9, cost=1.0)
+        with_retired = with_retired.record_outcome("b", reward=0.9, cost=1.0)
+    for _ in range(100_000):
+        with_retired = with_retired.record_outcome("retired", reward=1.0, cost=1.0)
+
+    assert without_retired.select(["a", "b"]) == with_retired.select(["a", "b"])
+
+
 def test_ucb_score_increases_with_more_total_pulls_for_same_arm() -> None:
     """The exploration bonus grows with elapsed rounds -- an arm not pulled recently becomes
     relatively more attractive as other arms accumulate pulls."""
@@ -135,3 +174,49 @@ def test_bandit_from_json_missing_field_raises() -> None:
 
 def test_bandit_empty_json_roundtrip() -> None:
     assert Bandit.from_json(Bandit().to_json()).stats == {}
+
+
+def test_bandit_from_json_rejects_non_numeric_pulls() -> None:
+    """Regression: from_json only checked that pulls/total_value KEYS existed, never their
+    TYPES -- a string "3" for pulls used to deserialize successfully and only surface as an
+    uncaught TypeError far later (e.g. inside record_outcome's `pulls + 1`)."""
+    with pytest.raises(llm_bandit.BanditError, match="corrupt bandit record"):
+        Bandit.from_json('{"claude_api": {"pulls": "3", "total_value": 1.0}}')
+
+
+def test_bandit_stats_is_read_only() -> None:
+    """Regression: Bandit.stats was a plain mutable dict despite Bandit's own docstring
+    advertising it as immutable -- mirrors policy.py's _freeze lesson (MappingProxyType)."""
+    bandit = Bandit().record_outcome("claude_api", reward=1.0, cost=1.0)
+    with pytest.raises(TypeError):
+        bandit.stats["claude_api"] = llm_bandit.ArmStats()  # type: ignore[index]
+
+
+# --------------------------------------------------------------------- ArmStats validation
+
+
+def test_arm_stats_rejects_negative_pulls() -> None:
+    with pytest.raises(llm_bandit.BanditError, match="pulls must be >= 0"):
+        llm_bandit.ArmStats(pulls=-1, total_value=0.0)
+
+
+def test_arm_stats_rejects_nonzero_value_with_zero_pulls() -> None:
+    with pytest.raises(llm_bandit.BanditError, match="total_value must be 0.0"):
+        llm_bandit.ArmStats(pulls=0, total_value=5.0)
+
+
+# --------------------------------------------------------------------- replace_arm
+
+
+def test_replace_arm_seeds_exact_state() -> None:
+    bandit = Bandit().replace_arm("claude_api", llm_bandit.ArmStats(pulls=7, total_value=3.5))
+
+    assert bandit.stats["claude_api"].pulls == 7
+    assert bandit.stats["claude_api"].mean_value == pytest.approx(0.5)
+
+
+def test_replace_arm_rejects_inconsistent_stats() -> None:
+    """replace_arm bypasses reward/cost validation, but ArmStats's own internal-consistency
+    check (see test_arm_stats_rejects_nonzero_value_with_zero_pulls) still applies."""
+    with pytest.raises(llm_bandit.BanditError, match="total_value must be 0.0"):
+        Bandit().replace_arm("claude_api", llm_bandit.ArmStats(pulls=0, total_value=5.0))
