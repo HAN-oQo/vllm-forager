@@ -1,0 +1,184 @@
+"""Ensemble self-review gate (T3.4): N independent adversarial critiques of a verified patch,
+before the human gate. *(Borrowed from The AI Scientist's ensemble reviewer.)*
+
+A passing MI250 test can still hide a bad patch — reward-hacking (a fix that makes the specific
+repro command pass without addressing the reported bug), an unrelated side effect, or a
+change too narrow/too broad to be a real fix. T3.3's `verified=True` only proves "the failing
+signal flipped"; it says nothing about whether the patch is *actually correct*. This module asks
+an LLM to critique the same patch `N` times, independently, and only advances the candidate to
+T3.5's human gate on a **supermajority** "looks correct" — the DEVPLAN's own worked example (5
+critiques, 4 approve → advance; a 3–2 split → hold) is *not* a plain >50% majority (3/5 is
+already a majority) but a real supermajority threshold, :data:`SUPERMAJORITY_THRESHOLD` (2/3):
+4/5 ≈ 0.80 clears it, 3/5 = 0.60 doesn't.
+
+Like :mod:`src.engineer`, "no verified T3.3 run for this candidate" and "no KB item record"
+both skip (`None`, logged) — the same per-item failure isolation every sibling agent applies.
+A single critique call failing (`llm.LLMError`, malformed reply) doesn't abort the whole
+ensemble either: it's excluded from the vote entirely (neither an approve nor a reject), so one
+flaky call doesn't silently tip a real 4-1 into a recorded 3-1 that reads as a rejection instead
+of a missing data point. If *every* critique fails, `total_votes == 0` and the candidate holds
+(fails safe: no votes cast is never treated as "unanimous approval").
+"""
+
+from __future__ import annotations
+
+import dataclasses
+import sys
+from datetime import datetime, timezone
+
+from . import llm
+from .agents.forecaster import TS_FORMAT
+from .stages import get_item_or_skip, record_run_best_effort
+from .store.base import Store
+
+_CRITIQUE_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "looks_correct": {"type": "boolean"},
+        "reason": {"type": "string"},
+    },
+    "required": ["looks_correct", "reason"],
+}
+
+DEFAULT_VOTES = 5
+
+# A proportional supermajority, not a plain >50% majority -- see module docstring for why the
+# DEVPLAN's own worked example (4/5 advances, 3/5 holds) requires this rather than a bare
+# majority (3/5 = 0.6 is already a majority by the plain definition).
+SUPERMAJORITY_THRESHOLD = 2 / 3
+
+
+class SelfReviewError(RuntimeError):
+    """`n` (the number of critiques to request) was less than 1."""
+
+
+@dataclasses.dataclass(frozen=True)
+class Critique:
+    """One adversarial critique's vote."""
+
+    looks_correct: bool
+    reason: str
+
+
+@dataclasses.dataclass(frozen=True)
+class SelfReviewResult:
+    """The ensemble's verdict on one verified patch.
+
+    `advance` is `total_votes > 0 and approve_count / total_votes >= SUPERMAJORITY_THRESHOLD` —
+    zero votes (every critique call failed) never advances (see module docstring: fails safe).
+    """
+
+    repo: str
+    number: int
+    critiques: tuple[Critique, ...]
+    approve_count: int
+    total_votes: int
+    advance: bool
+    recorded_at: str
+
+    def to_run_record(self) -> dict:
+        """This result as a plain dict, shaped for :meth:`~src.store.base.Store.record_run`."""
+        return {
+            "repo": self.repo,
+            "number": self.number,
+            "stage": "self_review",
+            "critiques": [dataclasses.asdict(c) for c in self.critiques],
+            "approve_count": self.approve_count,
+            "total_votes": self.total_votes,
+            "advance": self.advance,
+            "recorded_at": self.recorded_at,
+        }
+
+
+def _critique_prompt(title: str, body: str, patch: str, log: str) -> str:
+    return (
+        "A patch was applied to fix a vLLM/ROCm bug and the previously-failing test now "
+        "passes. Adversarially review whether the patch actually, correctly fixes the "
+        "*reported* bug — watch for reward-hacking (a change that only makes this specific "
+        "test pass without addressing the real issue), unrelated side effects, or a fix too "
+        "narrow/broad in scope. Reply with `looks_correct` (boolean) and `reason` (a short "
+        "explanation).\n\n"
+        f"Title: {title[:500]}\n\nBody: {(body or '')[:4000]}\n\n"
+        f"Patch:\n{patch[:4000]}\n\n"
+        f"Test output after the patch:\n{(log or '')[:2000]}"
+    )
+
+
+def _critique(title: str, body: str, patch: str, log: str) -> Critique | None:
+    """One independent adversarial critique, or `None` if the call failed or the reply didn't
+    shape into a usable vote (see module docstring: excluded from the tally, not a reject)."""
+    try:
+        reply = llm.complete(
+            _critique_prompt(title, body, patch, log), json_schema=_CRITIQUE_SCHEMA
+        )
+    except llm.LLMError as exc:
+        print(f"self_review: critique call failed for {title!r}: {exc}", file=sys.stderr)
+        return None
+    if not isinstance(reply, dict):
+        return None
+    looks_correct = reply.get("looks_correct")
+    reason = reply.get("reason")
+    if not isinstance(looks_correct, bool) or not isinstance(reason, str):
+        return None
+    return Critique(looks_correct=looks_correct, reason=reason)
+
+
+def run_self_review(
+    store: Store,
+    repo: str,
+    number: int,
+    *,
+    n: int = DEFAULT_VOTES,
+    now: datetime | None = None,
+) -> SelfReviewResult | None:
+    """Run `n` independent adversarial critiques of the most recent verified T3.3 patch for
+    (`repo`, `number`), record the ensemble's verdict to `store`, and return it.
+
+    Returns:
+        `None` if there's no `verified=True` T3.3 run for (`repo`, `number`), or `store` has no
+        item record for it (both skip, not raise).
+
+    Raises:
+        SelfReviewError: `n` is less than 1.
+    """
+    if n < 1:
+        raise SelfReviewError(f"n must be >= 1, got {n}")
+
+    verify_runs = [
+        r for r in store.list_runs(repo=repo, number=number, stage="verify") if r.get("verified")
+    ]
+    if not verify_runs:
+        print(f"self_review: no verified patch for {repo}#{number}", file=sys.stderr)
+        return None
+    verify_run = max(verify_runs, key=lambda r: r.get("recorded_at") or "")
+
+    item = get_item_or_skip(store, repo, number, stage="self_review")
+    if item is None:
+        return None
+
+    patch = verify_run.get("patch") or ""
+    log = verify_run.get("log") or ""
+    title = item.get("title") or ""
+    body = item.get("body") or ""
+
+    critiques = tuple(
+        c for c in (_critique(title, body, patch, log) for _ in range(n)) if c is not None
+    )
+    approve_count = sum(1 for c in critiques if c.looks_correct)
+    total_votes = len(critiques)
+    advance = total_votes > 0 and (approve_count / total_votes) >= SUPERMAJORITY_THRESHOLD
+
+    when = now or datetime.now(timezone.utc)
+    result = SelfReviewResult(
+        repo=repo,
+        number=number,
+        critiques=critiques,
+        approve_count=approve_count,
+        total_votes=total_votes,
+        advance=advance,
+        recorded_at=when.strftime(TS_FORMAT),
+    )
+    record_run_best_effort(
+        store, result.to_run_record(), stage="self_review", repo=repo, number=number
+    )
+    return result
