@@ -221,3 +221,13 @@ def test_record_run_never_merges_into_a_prior_one(store):
 
     exit_codes = sorted(run["exit_code"] for run in store.list_runs(repo="o/r", number=1))
     assert exit_codes == [0, 1]
+
+
+def test_list_runs_filters_by_stage(store):
+    store.record_run({"repo": "o/r", "number": 1, "stage": "repro", "exit_code": 1})
+    store.record_run({"repo": "o/r", "number": 1, "stage": "verify", "exit_code": 0})
+
+    assert len(store.list_runs(repo="o/r", number=1, stage="repro")) == 1
+    assert len(store.list_runs(repo="o/r", number=1, stage="verify")) == 1
+    assert len(store.list_runs(repo="o/r", number=1)) == 2
+    assert store.list_runs(repo="o/r", number=1, stage="nonexistent") == []

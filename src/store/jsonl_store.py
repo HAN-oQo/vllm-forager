@@ -21,6 +21,7 @@ from __future__ import annotations
 import json
 import sys
 from collections import defaultdict
+from collections.abc import Iterator
 from pathlib import Path
 
 from .base import Store, merge_record
@@ -28,33 +29,40 @@ from .base import Store, merge_record
 # --------------------------------------------------------------------- file-level helpers
 
 
-def _read_items(path: Path) -> dict[int, dict]:
-    """Read a repo JSONL into a ``{number: record}`` map (empty if the file is absent).
+def _iter_jsonl_records(path: Path) -> Iterator[tuple[int, dict]]:
+    """Yield ``(lineno, record)`` for every parsed JSON line in `path` (nothing if absent).
 
     A corrupt/partial line (as an interrupted write can leave) is skipped with a warning
-    rather than aborting the read, so a damaged file self-heals on the next rewrite.
+    rather than aborting the read, so a damaged file self-heals on the next rewrite — the one
+    JSONL-parsing loop shared by :func:`_read_items` (items) and
+    :meth:`JsonlStore.list_runs` (runs), so this recovery policy only needs to be right once.
 
     Splits on ``"\n"`` only — the delimiter used when writing. ``str.splitlines()`` also
     breaks on U+2028/U+2029/U+0085 etc.; because records are written with
     ``ensure_ascii=False``, those characters appear literally inside JSON string bodies and
     would otherwise shatter one record into unparseable fragments.
     """
+    if not path.exists():
+        return
+    for lineno, line in enumerate(path.read_text().split("\n"), 1):
+        if not line.strip():
+            continue
+        try:
+            yield lineno, json.loads(line)
+        except json.JSONDecodeError as exc:
+            print(f"  !! {path.name}:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
+
+
+def _read_items(path: Path) -> dict[int, dict]:
+    """Read a repo JSONL into a ``{number: record}`` map (empty if the file is absent)."""
     items: dict[int, dict] = {}
-    if path.exists():
-        for lineno, line in enumerate(path.read_text().split("\n"), 1):
-            if not line.strip():
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError as exc:
-                print(f"  !! {path.name}:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
-                continue
-            # A syntactically-valid line without `number` can't be keyed — skip it too,
-            # rather than let one bad record KeyError-abort the whole read.
-            if "number" not in rec:
-                print(f"  !! {path.name}:{lineno} skipping line with no 'number'", file=sys.stderr)
-                continue
-            items[rec["number"]] = rec
+    for lineno, rec in _iter_jsonl_records(path):
+        # A syntactically-valid line without `number` can't be keyed — skip it too,
+        # rather than let one bad record KeyError-abort the whole read.
+        if "number" not in rec:
+            print(f"  !! {path.name}:{lineno} skipping line with no 'number'", file=sys.stderr)
+            continue
+        items[rec["number"]] = rec
     return items
 
 
@@ -172,28 +180,34 @@ class JsonlStore(Store):
     # -- runs -------------------------------------------------------------------
     def record_run(self, run: dict) -> None:
         """Append `run` as one line to ``runs.jsonl`` — never rewrites existing lines, so
-        (unlike item writes) this doesn't need the temp-file-plus-rename atomicity dance;
-        a crash mid-append can only corrupt the last, in-flight line, which :meth:`list_runs`
-        tolerates the same way item reads tolerate a corrupt item line."""
+        (unlike item writes) this doesn't need the temp-file-plus-rename atomicity dance for a
+        *single writer*: a crash mid-append can only corrupt the last, in-flight line, which
+        :meth:`list_runs` tolerates the same way item reads tolerate a corrupt item line.
+
+        Not safe against **concurrent** writers, though: two processes appending large records
+        (e.g. a big captured MI250 log) around the same time can have their underlying
+        multi-syscall writes interleave, corrupting more than just a trailing line — the same
+        overlapping-writers problem T4.3 ("Locking / idempotency") exists to solve project-wide,
+        not fixed here for just this one file.
+        """
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self.runs_path.open("a") as f:
             f.write(json.dumps(run, ensure_ascii=False) + "\n")
 
-    def list_runs(self, *, repo: str | None = None, number: int | None = None) -> list[dict]:
-        if not self.runs_path.exists():
-            return []
+    def list_runs(
+        self,
+        *,
+        repo: str | None = None,
+        number: int | None = None,
+        stage: str | None = None,
+    ) -> list[dict]:
         out: list[dict] = []
-        for lineno, line in enumerate(self.runs_path.read_text().split("\n"), 1):
-            if not line.strip():
-                continue
-            try:
-                rec = json.loads(line)
-            except json.JSONDecodeError as exc:
-                print(f"  !! runs.jsonl:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
-                continue
+        for _, rec in _iter_jsonl_records(self.runs_path):
             if repo is not None and rec.get("repo") != repo:
                 continue
             if number is not None and rec.get("number") != number:
+                continue
+            if stage is not None and rec.get("stage") != stage:
                 continue
             out.append(rec)
         return out

@@ -173,13 +173,25 @@ class FirestoreStore(Store):
         items, runs have no natural (repo, number)-style identity to key a document by."""
         self._runs.add(run)
 
-    def list_runs(self, *, repo: str | None = None, number: int | None = None) -> list[dict]:
+    def list_runs(
+        self,
+        *,
+        repo: str | None = None,
+        number: int | None = None,
+        stage: str | None = None,
+    ) -> list[dict]:
+        """See :meth:`~src.store.base.Store.list_runs` — no ``order_by`` here, since
+        `record_run` doesn't establish any orderable field every record is guaranteed to
+        carry; a `Store.list_runs` caller that needs the most recent run must sort the
+        returned list itself (see that method's own docstring)."""
         out: list[dict] = []
         for snap in self._runs.stream():
             rec = snap.to_dict() or {}
             if repo is not None and rec.get("repo") != repo:
                 continue
             if number is not None and rec.get("number") != number:
+                continue
+            if stage is not None and rec.get("stage") != stage:
                 continue
             out.append(rec)
         return out

@@ -5,6 +5,18 @@ to synthesize a shell command that attempts to reproduce it, runs that command o
 via :func:`~src.runner.run`, and records the outcome as a run in the KB's `runs` collection
 (:meth:`~src.store.base.Store.record_run`, T3.2's own reason for that collection existing).
 
+**Security note — read before wiring this to a real MI250 host:** :func:`synthesize_repro_command`
+turns *untrusted, externally-authored* GitHub issue text into a shell command that
+:func:`run_repro` then executes verbatim on real hardware, unreviewed — exactly the risk
+``runner.run``'s own docstring warns against ("callers must not compose it from untrusted
+external input without their own escaping"). This module does that anyway, because reproducing
+a *reported* bug inherently means running something derived from what a reporter wrote — there
+is no way to do T3.2's job at all without it. Nothing here sandboxes, allowlists, or reviews the
+synthesized command before it runs; a crafted issue body (prompt-injection style) could steer the
+LLM into emitting a destructive command. Treat any host `run_repro` is pointed at as disposable,
+non-production hardware, and do not point it at anything else, until a real sandboxing/review
+layer exists — that's future work, not something this first cut mitigates.
+
 This is the "before" half of T3.3's fail→patch→pass proof: a candidate with no baseline failing
 signal has nothing for a later patch to flip. `ReproResult.reproduced` (`exit_code != 0`) is
 that signal — the DEVPLAN's own framing ("capture the failing assertion/log as the baseline
@@ -19,7 +31,10 @@ handle shouldn't abort a caller iterating over many. A :class:`~src.runner.Runne
 :func:`~src.runner.run` itself is a different kind of failure (ssh unreachable, a genuine hang)
 and is deliberately **not** caught here — an infra problem isn't "no signal to record," it's
 something the caller needs to see and retry, not silently misread as "candidate doesn't
-reproduce."
+reproduce." A `store.record_run` failure, by contrast, IS caught — the repro already happened on
+real hardware by that point; losing the in-memory :class:`ReproResult` too, on top of a mere
+persistence hiccup, would force redoing the (possibly expensive) MI250 run just to recover an
+outcome this process already has.
 
 Known limitation, not fixed here: the synthesized repro command is exactly as good as the LLM's
 read of the issue body — it may run something that doesn't actually exercise the reported bug
@@ -31,8 +46,8 @@ issue text alone.
 
 from __future__ import annotations
 
+import dataclasses
 import sys
-from dataclasses import dataclass
 from datetime import datetime, timezone
 
 from . import llm, runner
@@ -45,8 +60,19 @@ _REPRO_SCHEMA = {
     "required": ["command"],
 }
 
+# A repro is meant to be a quick reproduction check, not a full ROCm build -- much shorter than
+# runner.DEFAULT_TIMEOUT_S (an hour, sized for that build). Still overridable per call.
+DEFAULT_REPRO_TIMEOUT_S = 600.0
 
-@dataclass(frozen=True)
+# The tail of `log` actually persisted to the KB -- the failing assertion/traceback is
+# conventionally at the end (matching runner.py's own `log[-500:]` convention for its ssh-255
+# error message), and this keeps a real MI250 log comfortably under Firestore's ~1 MiB
+# per-document limit. The in-memory ReproResult.log returned to the immediate caller is never
+# truncated -- only the persisted copy is.
+_MAX_PERSISTED_LOG_CHARS = 100_000
+
+
+@dataclasses.dataclass(frozen=True)
 class ReproResult:
     """One repro attempt's outcome — the same fields :meth:`to_run_record` shapes for
     :meth:`~src.store.base.Store.record_run`.
@@ -65,18 +91,14 @@ class ReproResult:
     recorded_at: str
 
     def to_run_record(self) -> dict:
-        """This result as a plain dict, shaped for :meth:`~src.store.base.Store.record_run`."""
-        return {
-            "repo": self.repo,
-            "number": self.number,
-            "stage": "repro",
-            "host": self.host,
-            "command": self.command,
-            "exit_code": self.exit_code,
-            "log": self.log,
-            "reproduced": self.reproduced,
-            "recorded_at": self.recorded_at,
-        }
+        """This result as a plain dict, shaped for :meth:`~src.store.base.Store.record_run` —
+        `log` is truncated to its last :data:`_MAX_PERSISTED_LOG_CHARS` characters for the
+        persisted copy only (see module-level comment); this `ReproResult` itself keeps the
+        full text."""
+        record = dataclasses.asdict(self)
+        record["stage"] = "repro"
+        record["log"] = record["log"][-_MAX_PERSISTED_LOG_CHARS:]
+        return record
 
 
 def _repro_prompt(title: str, body: str) -> str:
@@ -85,7 +107,7 @@ def _repro_prompt(title: str, body: str) -> str:
         "attempts to reproduce it on a ROCm (gfx90a) machine with vLLM already checked out in "
         "the current directory — e.g. a minimal pytest/python invocation exercising the "
         "described failure. Reply with `command`.\n\n"
-        f"Title: {title}\n\nBody: {(body or '')[:4000]}"
+        f"Title: {title[:500]}\n\nBody: {(body or '')[:4000]}"
     )
 
 
@@ -110,6 +132,7 @@ def run_repro(
     number: int,
     host: str,
     *,
+    timeout: float = DEFAULT_REPRO_TIMEOUT_S,
     now: datetime | None = None,
 ) -> ReproResult | None:
     """Synthesize and run a repro command for (`repo`, `number`) on `host`, record the result
@@ -132,7 +155,7 @@ def run_repro(
     if command is None:
         return None
 
-    result = runner.run(host, command)
+    result = runner.run(host, command, timeout=timeout)
     when = now or datetime.now(timezone.utc)
     repro_result = ReproResult(
         repo=repo,
@@ -144,5 +167,9 @@ def run_repro(
         reproduced=result.exit_code != 0,
         recorded_at=when.strftime(TS_FORMAT),
     )
-    store.record_run(repro_result.to_run_record())
+    try:
+        store.record_run(repro_result.to_run_record())
+    except Exception as exc:
+        # See module docstring: never lose an already-run result over a mere persistence hiccup.
+        print(f"repro: failed to record run for {repo}#{number}: {exc}", file=sys.stderr)
     return repro_result

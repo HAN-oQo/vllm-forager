@@ -100,6 +100,21 @@ class Store(ABC):
         into a prior record, unlike :meth:`upsert_items`; each call adds a new one."""
 
     @abstractmethod
-    def list_runs(self, *, repo: str | None = None, number: int | None = None) -> list[dict]:
+    def list_runs(
+        self,
+        *,
+        repo: str | None = None,
+        number: int | None = None,
+        stage: str | None = None,
+    ) -> list[dict]:
         """Return every recorded run matching the given filters (AND; omitted filters don't
-        constrain), in the order they were recorded."""
+        constrain, and a record simply missing a filtered-on key never matches it).
+
+        Best-effort insertion order: exact on :class:`~src.store.jsonl_store.JsonlStore` (a
+        strictly append-only file), but **not guaranteed** on
+        :class:`~src.store.firestore_store.FirestoreStore` — its auto-generated document IDs
+        carry no reliable chronological ordering, and no run record is required to carry an
+        orderable timestamp field a query could sort by. A caller that needs a reliable "most
+        recent run" must sort the returned list itself by whatever timestamp field its own run
+        records carry (e.g. :attr:`~src.repro.ReproResult.recorded_at`).
+        """
