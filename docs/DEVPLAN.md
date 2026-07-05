@@ -215,6 +215,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** carry the data already collected under JSONL into Firestore without re-fetching from GitHub.
   - **e.g.:** `python -m src.store.migrate` → every `data/*.jsonl` item becomes a Firestore `items` doc.
   - **Test:** `tests/test_store_migrate.py` (`integration`) — sample jsonl → docs present in emulator.
+- [x] **T0.6.4 Migration must also carry `runs.jsonl`** — `migrate()` only copies items + `state.json`; it never reads/writes run records (`stage="verify"`/`"self_review"`/`"pr_author"`/`"pr_quality"`/`"gate"`, etc.).
+  - **Why:** found via code review on T3.10.6 (PR #71): a jsonl→Firestore cutover would silently drop every candidate's entire pipeline history, including `stage="gate"` records showing an already-submitted `pr_url` — defeating T3.10.6's idempotency check with zero warning right at the moment of a KB migration.
+  - **e.g.:** `source.list_runs()` (no filters — every run across every repo/candidate/stage) → each written to Firestore via `dest.record_run(run)`; summary gains `runs_migrated`. Real run against the live Firestore emulator: a `stage="gate"` run with `submitted=True, pr_url="https://github.com/o/r/pull/99"` survived the migration and was correctly readable back via `FirestoreStore.list_runs(...)`.
+  - **Test:** `tests/test_store_migrate.py` (`integration`, run against the live emulator on `localhost:8081`) — a jsonl source with `verify`/`gate` runs recorded → after `migrate()`, `FirestoreStore.list_runs(...)` returns them, including the `submitted=True, pr_url=...` gate run; a dedicated test documents that re-running `migrate()` duplicates run records (unlike items/state).
+  - **Note:** unlike items (`upsert_items`, deduped by `(repo, number)`) and state (`set_state`, overwrite-by-key), `record_run` has **no natural identity key** to de-duplicate on, on either backend — re-running this migration would duplicate every run record every time, unlike the items/state halves' documented "safe to re-run" behavior. Not fixed here (a synthetic dedup key would be a larger design change to `record_run` itself); the module docstring is updated to make this asymmetry explicit rather than implying the whole script shares one re-run safety story.
 
 ## M1 — Intelligence plane (inner loop)
 
