@@ -128,6 +128,49 @@ def test_approved_calls_gh(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert "--head" in cmd and "forager/o-r-1" in cmd
 
 
+def test_approved_with_fork_owner_prefixes_head(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: `--head <branch>` alone makes `gh` look for that branch *inside* `--repo`
+    itself, which fails for a fork-hosted branch (`gh` errors "No commits between main and
+    <branch>" / "Head ref must be a branch") -- T3.6's own first real run hit this. `gh`'s
+    required form for a fork-hosted head is `owner:branch`."""
+    store = _store_ready_for_gate(tmp_path)
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/o/r/pull/99\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run)
+
+    result = gate.run_gate(store, "o/r", 1, approve=True, fork_owner="HAN-oQo")
+
+    assert result is not None
+    assert result.pr_url == "https://github.com/o/r/pull/99"
+    cmd = calls[0]
+    assert "--head" in cmd
+    assert cmd[cmd.index("--head") + 1] == "HAN-oQo:forager/o-r-1"
+
+
+def test_approved_without_fork_owner_leaves_head_unprefixed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Default (`fork_owner=None`) preserves prior behavior: a bare branch name, for a
+    same-repo head."""
+    store = _store_ready_for_gate(tmp_path)
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/o/r/pull/99\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run)
+
+    gate.run_gate(store, "o/r", 1, approve=True)
+
+    cmd = calls[0]
+    assert cmd[cmd.index("--head") + 1] == "forager/o-r-1"
+
+
 def test_gh_failure_still_returns_result_with_no_pr_url(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -174,6 +217,25 @@ def test_run_gate_records_its_own_outcome(tmp_path, monkeypatch: pytest.MonkeyPa
     assert len(gate_runs) == 1
     assert gate_runs[0]["approved"] is True
     assert gate_runs[0]["pr_url"] == "https://x/pull/1"
+
+
+def test_run_gate_records_fork_owner_in_its_own_outcome(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The KB's own audit trail for a cross-repo PR should show which fork the head branch was
+    addressed against, not just that approval happened."""
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
+    )
+
+    result = gate.run_gate(store, "o/r", 1, approve=True, fork_owner="HAN-oQo")
+
+    assert result.fork_owner == "HAN-oQo"
+    gate_runs = store.list_runs(repo="o/r", number=1, stage="gate")
+    assert gate_runs[0]["fork_owner"] == "HAN-oQo"
 
 
 def test_run_gate_records_outcome_even_when_unapproved(
@@ -374,3 +436,31 @@ def test_cli_prints_bundle_before_opening_pr(
     bundle_pos = out.index("Candidate o/r#1")
     pr_pos = out.index("Opened draft PR")
     assert bundle_pos < pr_pos
+
+
+def test_cli_fork_owner_flag_prefixes_head(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--fork-owner` on the CLI reaches `gh pr create`'s `--head` the same way the
+    programmatic `run_gate(..., fork_owner=...)` path does."""
+    _store_ready_for_gate(tmp_path)
+    calls = []
+
+    def _fake_run(cmd, **k):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run)
+
+    gate.main(
+        [
+            "--candidate",
+            "o/r#1",
+            "--approve",
+            "--fork-owner",
+            "HAN-oQo",
+            "--data-dir",
+            str(tmp_path),
+        ]
+    )
+
+    cmd = calls[0]
+    assert cmd[cmd.index("--head") + 1] == "HAN-oQo:forager/o-r-1"
