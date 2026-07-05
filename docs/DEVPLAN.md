@@ -445,6 +445,10 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **e.g.:** maintainer asks "add a test for the empty case" → agent drafts the test + a reply → human approves → pushed. Real run (real LLM, real comment, never posted): fed PR #71's own actual code-review summary comment into `_compose_response` — the composed reply correctly addressed all 5 numbered findings point-by-point, including citing the exact commit SHAs and the separate follow-up PR (#72) that closed one of them.
   - **Test:** `tests/test_review_loop.py` — a mock review comment → a response draft + a proposed diff are produced; nothing is pushed without approval.
   - **Note:** `run_review_loop` (compose) and `post_reply` (post) are two separate functions/CLI subcommands, not two flags on one call — unlike `gate.py`'s original design, there's no single call site where "compose" and "post" could be passed together, so `post_reply` structurally requires a `stage="review_response"` record from an earlier, separate call to exist first. Deliberately does **not** auto-apply/push a `proposed_diff`, even though one is drafted: it's LLM-composed, never run through `engineer.py`'s MI250 verification (the project's "empirical verification oracle"), so auto-pushing it onto a live public PR would bypass that oracle entirely — a materially worse risk than opening a draft PR a human approves first. The diff is a copy-pasteable starting point for a human (or a future MI250-gated automation) to verify and push through the existing pipeline. Reads GitHub's general issue-comment thread (`gh api repos/{repo}/issues/{number}/comments`), not inline line-level review comments — the more common case for a small project's PRs, with the inline feed left as a known gap.
+- [ ] **T3.12 Attempt report per worked issue (success *or* fail)** — for every candidate the engineer works, write a human-readable report to the KB: **(1) issue overview · (2) how it tried to solve it (approach + what actually happened) · (3) exact steps for a human to reproduce the agent's approach** — plus the outcome (verified / failed + why). Written on **both** success and failure.
+  - **Why:** transparency + learning + reproducibility — a failed attempt is still valuable (what was tried, why it failed), and a human must be able to re-run the agent's exact approach; feeds the M5 "Attempts" tab (T5.11).
+  - **e.g.:** `data/attempts/<candidate>.md` — "Issue: … · Approach: patched X, rebuilt on mi250-051 · Reproduce: `git fetch fork <branch>; ./repro.sh` · Outcome: FAILED — signal didn't flip because …".
+  - **Test:** `tests/test_attempt_report.py` — a mock verified run and a mock failed run each produce a report with all 3 sections + outcome + a runnable reproduce block; failure reports are still written.
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
@@ -487,6 +491,9 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > **Expected output:** a local web dashboard reading the KB — a **live health / "what's running now" view**
 > (which stage is active, alive/stalled, current step, intermediate output), monitoring panels, trend charts,
 > engine×capability parity heatmap, pipeline data-flow diagram, guardrail panels, and the patch review pane.
+> Unified as a **tabbed operator console** — tabs: **Issues** (tree) · **Reports/Trends** (daily archive) ·
+> **Candidates** (ranking + why-selected + human "work this" select) · **Attempts** (per-issue reports) ·
+> **Health/Guardrails**. Read-only **except two human decisions**: candidate selection (T5.10) and patch review (T5.6).
 > **Demo:** `python -m dashboard` (or `streamlit run dashboard/app.py`) → open the printed localhost URL.
 > **Acceptance:** `pytest -m m5` green · panels/charts render from a seeded KB · the health view shows a running
 > stage as active and a stale one as `stalled`.
@@ -523,6 +530,22 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the "is it alive right now?" view — the whole reason liveness (T4.5) exists; a stall must show red, never a frozen "running".
   - **e.g.:** classifier = 🟢 running "item 40/120", collector = ⚪ idle, engineer = 🔴 stalled (heartbeat 20m old).
   - **Test:** `tests/test_dashboard_health.py` — seeded run events → a running stage renders active with its step + output tail; a stale heartbeat renders `stalled`; a `failed` event renders red.
+- [ ] **T5.9 Reports/Trends archive tab (daily)** — browse past reports, **one per day**, newest first; open any day's cited tree report (M1.5) + its trend charts (T5.3).
+  - **Why:** the trend story is a time series — you read today's report and compare it to prior days.
+  - **e.g.:** a date list `2026-07-06, 07-05, …` → selecting a date opens that day's tree report + charts.
+  - **Test:** `tests/test_dashboard_archive.py` — seeded daily reports → archive lists them newest-first; selecting a date returns that report.
+- [ ] **T5.10 Candidate selection + human-in-the-loop signal** — the Candidates tab shows the risk-ranked queue **with *why* each was selected** (score breakdown + evidence) and a **"work this / skip" control**; the choice writes a `decision` record to the KB that the orchestrator/engineer reads — so the agent only works **human-selected** candidates.
+  - **Why:** the human picks what's worth doing and the agent receives that signal **from the dashboard** (not a CLI) — human-in-the-loop selection *before* any MI250 work. (Distinct from T5.6, which approves the *result* after work.)
+  - **e.g.:** click "Work #d" → writes `{candidate:d, decision:"selected", by, ts}`; the engineer's queue = selected-only.
+  - **Test:** `tests/test_dashboard_select.py` — a select action writes a decision record; the engineer/orchestrator query returns only selected candidates (write path mocked; everything else stays read-only).
+- [ ] **T5.11 Attempts tab (per-issue reports)** — browse the T3.12 attempt reports: outcome badge (🟢 verified / 🔴 failed), the issue overview, the approach, and the reproduce steps; link to the PR draft (if any).
+  - **Why:** see exactly what the contribution agent did on each issue — success or fail — and reproduce it by hand.
+  - **e.g.:** a list of worked issues with 🟢/🔴 → click → the full T3.12 attempt report rendered.
+  - **Test:** `tests/test_dashboard_attempts.py` — seeded attempt reports → the tab lists them with outcome + renders all 3 sections.
+- [ ] **T5.12 Tabbed console shell** — unify the panels into one **tabbed** nav: **Issues** (tree, M1.5) · **Reports/Trends** (T5.9) · **Candidates** (select, T5.10) · **Attempts** (T5.11) · **Health/Guardrails** (T5.8/T5.7). Read-only except the T5.10 selection and T5.6 review actions.
+  - **Why:** one operator console for the whole loop instead of scattered CLIs/panels — what the user asked for.
+  - **e.g.:** `python -m dashboard` → top-nav tabs, each deep-linkable.
+  - **Test:** `tests/test_dashboard_tabs.py` — each tab route renders its panel from seeded data.
 
 ---
 
