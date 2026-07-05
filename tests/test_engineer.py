@@ -253,10 +253,13 @@ def test_verify_command_omits_cd_when_repo_dir_not_given() -> None:
     assert command.startswith("set -e")
 
 
-def test_verify_command_cds_into_repo_dir_before_any_git_operation() -> None:
+def test_verify_command_cds_into_repo_dir_after_set_dash_e_but_before_git() -> None:
     """Regression: plain `ssh host command` lands in the ssh session's default directory, not
     necessarily the checkout -- without this `cd`, every git command below it silently runs
-    against whatever directory ssh happened to default to."""
+    against whatever directory ssh happened to default to. The `cd` must come *after* `set -e`,
+    not before -- a `cd` that fails before `set -e` takes effect does not abort the script
+    (verified directly: `bash -c "cd /no-such-dir; set -e; echo reached"` prints "reached" and
+    exits 0), which would silently defeat this fix's whole purpose."""
     command = engineer._verify_command(
         "forager/o-r-1",
         "--- a\n+++ b\n",
@@ -266,10 +269,42 @@ def test_verify_command_cds_into_repo_dir_before_any_git_operation() -> None:
     )
 
     lines = command.splitlines()
-    assert lines[0] == "cd /remote/vast0/herom/vllm"
+    assert lines[0] == "set -e"
+    assert lines.index("cd /remote/vast0/herom/vllm") == 1
     assert lines.index("cd /remote/vast0/herom/vllm") < lines.index(
         "git checkout -B forager/o-r-1 main"
     )
+
+
+def test_verify_command_aborts_at_failed_cd_without_running_git_operations() -> None:
+    """Direct execution proof of the ordering regression above: a nonexistent `repo_dir` must
+    make the whole script fail before any git command runs, not after."""
+    command = engineer._verify_command(
+        "forager/o-r-1",
+        "--- a\n+++ b\n",
+        "pytest test_x.py",
+        base_ref="main",
+        repo_dir="/no/such/directory/xyz",
+    )
+
+    result = subprocess.run(
+        ["bash", "-x", "-c", command], capture_output=True, text=True, timeout=5
+    )
+
+    assert result.returncode != 0
+    assert "+ git checkout" not in result.stderr
+
+
+def test_verify_command_quotes_repo_dir_containing_a_space() -> None:
+    command = engineer._verify_command(
+        "forager/o-r-1",
+        "--- a\n+++ b\n",
+        "pytest test_x.py",
+        base_ref="main",
+        repo_dir="/data/vllm forager",
+    )
+
+    assert "cd '/data/vllm forager'" in command.splitlines()
 
 
 def test_verify_command_with_repo_dir_is_syntactically_valid_shell() -> None:
@@ -325,7 +360,7 @@ def test_run_engineer_passes_repo_dir_through_to_verify_command(
 
     engineer.run_engineer(store, "o/r", 1, "mi250-051", repo_dir="/remote/vast0/herom/vllm")
 
-    assert calls[0].startswith("cd /remote/vast0/herom/vllm")
+    assert "cd /remote/vast0/herom/vllm" in calls[0].splitlines()
 
 
 # --------------------------------------------------------------------- synthesize_patch

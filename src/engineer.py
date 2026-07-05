@@ -50,6 +50,7 @@ Known limitations, not fixed here:
 from __future__ import annotations
 
 import dataclasses
+import shlex
 import sys
 from datetime import datetime, timezone
 
@@ -156,12 +157,16 @@ def _verify_command(
     clean `base_ref`, apply `patch` via a heredoc, commit it, then re-run `repro_command` — the
     exact command T3.2 originally captured a failing signal from.
 
-    `repo_dir`, if given, is prefixed as a `cd` before anything else — per
-    :mod:`~src.runner`'s own documented contract ("a caller that needs `command` to run inside a
-    specific checkout composes that itself"), plain `ssh host command` lands in the ssh session's
-    default directory, not necessarily the checkout; nothing below this line works otherwise.
-    Left `None` (default) to preserve prior behavior: assume the ssh session's own default
-    directory is already the checkout.
+    `repo_dir`, if given, is `cd`'d into right after `set -e` (not before — a `cd` that runs
+    before `set -e` takes effect can fail without aborting the script, silently leaving every
+    later git operation running in the ssh session's default directory instead; verified
+    directly: `bash -c "cd /no-such-dir; set -e; echo reached"` prints "reached" and exits 0)
+    — per :mod:`~src.runner`'s own documented contract ("a caller that needs `command` to run
+    inside a specific checkout composes that itself"), plain `ssh host command` lands in the ssh
+    session's default directory, not necessarily the checkout; nothing below this line works
+    otherwise. Quoted via :func:`shlex.quote` since a real checkout path is not guaranteed to be
+    free of spaces/shell metacharacters. Left `None` (default) to preserve prior behavior: assume
+    the ssh session's own default directory is already the checkout.
 
     Uses ``set -e`` plus one statement per line, not `cmd1 && cmd2 <<'EOF' ... EOF && cmd3`: a
     heredoc's closing delimiter must be alone on its own line, which ends the *enclosing*
@@ -181,9 +186,9 @@ def _verify_command(
     `verified=False`.
     """
     return "\n".join(
-        ([f"cd {repo_dir}"] if repo_dir else [])
-        + [
+        [
             "set -e",
+            *([f"cd {shlex.quote(repo_dir)}"] if repo_dir else []),
             f"git checkout -B {branch} {base_ref}",
             "git clean -fd",
             f"git apply <<'{_PATCH_HEREDOC_DELIMITER}'",

@@ -47,6 +47,7 @@ issue text alone.
 from __future__ import annotations
 
 import dataclasses
+import shlex
 from datetime import datetime, timezone
 
 from . import runner
@@ -94,10 +95,10 @@ class ReproResult:
         return record
 
 
-def _repro_prompt(title: str, body: str, repo_dir: str | None) -> str:
+def _repro_prompt(title: str, body: str, repo_dir: str | None = None) -> str:
     cwd_hint = (
-        f"vLLM is already checked out at `{repo_dir}` on the target host — start your command "
-        f"with `cd {repo_dir} &&` before anything else."
+        f"Your command will already be run with `{repo_dir}` (vLLM's checkout) as its working "
+        "directory."
         if repo_dir
         else "vLLM is already checked out in the current directory."
     )
@@ -115,11 +116,11 @@ def synthesize_repro_command(title: str, body: str, repo_dir: str | None = None)
     failed or the reply didn't shape into a usable command (see module docstring: skip,
     logged, not raised).
 
-    `repo_dir`, if given, is passed to the LLM as the checkout's actual path on the target host
-    (see :func:`run_repro` — plain ``ssh host command`` does not otherwise land in it; without
-    this, the prompt's "already checked out in the current directory" claim only holds if the
-    host's default ssh login directory happens to already be the checkout, which nothing here
-    guarantees)."""
+    `repo_dir`, if given, is mentioned to the LLM purely as *context* (so it doesn't compose a
+    redundant `cd` of its own) — :func:`run_repro` is what actually guarantees the command lands
+    there, deterministically, the same way :func:`~src.engineer._verify_command` does; asking the
+    LLM to compose the `cd` itself would make that guarantee only as reliable as the reply's own
+    compliance, which nothing here would catch if it silently omitted or malformed it."""
     reply = complete_or_none(
         _repro_prompt(title, body, repo_dir), _REPRO_SCHEMA, stage="repro", subject=title
     )
@@ -142,10 +143,13 @@ def run_repro(
     """Synthesize and run a repro command for (`repo`, `number`) on `host`, record the result
     to `store`, and return it.
 
-    `repo_dir`, if given, is the checkout's actual absolute path on `host` — passed through to
-    :func:`synthesize_repro_command` so the LLM composes a command that actually lands there
-    (see that function's own docstring). Left `None` (default) to preserve prior behavior:
-    assume the ssh session's own default directory is already the checkout.
+    `repo_dir`, if given, is the checkout's actual absolute path on `host` — passed to
+    :func:`synthesize_repro_command` as context, then deterministically prepended as a `cd` to
+    whatever command comes back (mirroring :func:`~src.engineer._verify_command`'s own fix for
+    the identical problem: plain `ssh host command` lands in the ssh session's default
+    directory, not necessarily the checkout, per :mod:`~src.runner`'s own documented contract).
+    Left `None` (default) to preserve prior behavior: assume the ssh session's own default
+    directory is already the checkout.
 
     Returns:
         `None` if `store` has no record for (`repo`, `number`), or no repro command could be
@@ -162,6 +166,8 @@ def run_repro(
     command = synthesize_repro_command(item.get("title") or "", item.get("body") or "", repo_dir)
     if command is None:
         return None
+    if repo_dir:
+        command = f"cd {shlex.quote(repo_dir)} && {command}"
 
     result = runner.run(host, command, timeout=timeout)
     when = now or datetime.now(timezone.utc)

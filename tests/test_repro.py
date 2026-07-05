@@ -89,6 +89,65 @@ def test_run_repro_passes_repo_dir_through_to_the_prompt(
     assert "/remote/vast0/herom/vllm" in captured["prompt"]
 
 
+def test_run_repro_deterministically_prefixes_cd_onto_the_synthesized_command(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: relying on the LLM to remember its own `cd` (mere prompt text) is only as
+    reliable as the reply's compliance -- run_repro must guarantee it itself, the same way
+    engineer._verify_command does."""
+    store = _store_with_item(tmp_path)
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"command": "pytest test_fp8.py"})
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=1, log="fail\n")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    result = repro.run_repro(store, "o/r", 1, "mi250-051", repo_dir="/remote/vast0/herom/vllm")
+
+    assert calls[0] == "cd /remote/vast0/herom/vllm && pytest test_fp8.py"
+    assert result is not None
+    assert result.command == calls[0]  # the persisted command reflects what actually ran
+
+
+def test_run_repro_quotes_repo_dir_containing_a_space(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_with_item(tmp_path)
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"command": "pytest test_fp8.py"})
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=1, log="fail\n")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    repro.run_repro(store, "o/r", 1, "mi250-051", repo_dir="/data/vllm forager")
+
+    assert calls[0] == "cd '/data/vllm forager' && pytest test_fp8.py"
+
+
+def test_run_repro_omits_cd_when_repo_dir_not_given(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_with_item(tmp_path)
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"command": "pytest test_fp8.py"})
+    calls = []
+
+    def _fake_run(host, command, **k):
+        calls.append(command)
+        return runner.RunResult(exit_code=1, log="fail\n")
+
+    monkeypatch.setattr(runner, "run", _fake_run)
+
+    repro.run_repro(store, "o/r", 1, "mi250-051")
+
+    assert calls[0] == "pytest test_fp8.py"
+
+
 def test_run_repro_records_non_reproducing_result(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
