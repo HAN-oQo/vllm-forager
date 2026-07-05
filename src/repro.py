@@ -47,12 +47,11 @@ issue text alone.
 from __future__ import annotations
 
 import dataclasses
-import sys
 from datetime import datetime, timezone
 
-from . import llm, runner
+from . import runner
 from .agents.forecaster import TS_FORMAT
-from .stages import get_item_or_skip, record_run_best_effort
+from .stages import complete_or_none, get_item_or_skip, record_run_best_effort
 from .store.base import MAX_RUN_LOG_CHARS, Store
 
 _REPRO_SCHEMA = {
@@ -109,12 +108,10 @@ def synthesize_repro_command(title: str, body: str) -> str | None:
     """A shell command an LLM believes reproduces `title`/`body`'s bug, or `None` if the call
     failed or the reply didn't shape into a usable command (see module docstring: skip,
     logged, not raised)."""
-    try:
-        reply = llm.complete(_repro_prompt(title, body), json_schema=_REPRO_SCHEMA)
-    except llm.LLMError as exc:
-        print(f"repro: command synthesis failed for {title!r}: {exc}", file=sys.stderr)
-        return None
-    if not isinstance(reply, dict):
+    reply = complete_or_none(
+        _repro_prompt(title, body), _REPRO_SCHEMA, stage="repro", subject=title
+    )
+    if reply is None:
         return None
     command = reply.get("command")
     return command.strip() if isinstance(command, str) and command.strip() else None

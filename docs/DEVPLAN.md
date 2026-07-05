@@ -365,7 +365,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the core contribution act — and MI250 is the empirical oracle: a patch counts as verified only when the failing signal actually flips to passing.
   - **e.g.:** patch applied → rebuild on mi250-051 → the T3.2 failing test now passes ⇒ `verified=True`; still fails ⇒ no PR.
   - **Test:** `tests/test_engineer.py` — mock llm+runner: fail→patch→pass ⇒ `verified=True`; fail→patch→fail ⇒ `verified=False` and **no PR**.
-- [ ] **T3.4 Ensemble self-review gate** — before the human gate, run N independent adversarial self-critiques of the verified patch (multi-sample vote) via `llm.complete`; require a majority "looks correct" **in addition to** the MI250 pass. *(Borrowed from The AI Scientist's ensemble reviewer.)*
+- [x] **T3.4 Ensemble self-review gate** — before the human gate, run N independent adversarial self-critiques of the verified patch (multi-sample vote) via `llm.complete`; require a majority "looks correct" **in addition to** the MI250 pass. *(Borrowed from The AI Scientist's ensemble reviewer.)*
   - **Why:** a passing test can still hide a bad patch (reward-hacking, side effects) — an adversarial vote catches what the hardware check can't, before spending the human's attention.
   - **e.g.:** 5 critiques, 4 say "correct" → advance to human gate; a 3–2 split → hold, don't gate.
   - **Test:** `tests/test_self_review.py` — mock llm votes: majority-approve ⇒ advance; split/reject ⇒ hold (no gate).
