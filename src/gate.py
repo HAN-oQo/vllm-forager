@@ -63,8 +63,28 @@ but the bundle still assembles fine (`risk=None`), so this doesn't affect correc
 same KB audit trail T3.2–T3.4 already leave, and this durable record is exactly what T3.10.6's
 `_already_open_pr_url` scans: every prior `stage="gate"` run for a candidate, not just the
 latest, so a candidate that already has a real `pr_url` from an earlier submission can never be
-submitted a second time — even if the local draft cache is cleared or `--data-dir` changes,
-which would otherwise reset `draft_is_new` to `True` and look like a first-time approval.
+submitted a second time through the **same underlying `store`** — even if the local draft cache
+is cleared, which would otherwise reset `draft_is_new` to `True` and look like a first-time
+approval. **This guarantee is scoped to one `store`, not to the real-world candidate**: `--data-
+dir` pointing at a genuinely *different* store (a separate JSONL directory, a different Firestore
+project) has no visibility into the first store's gate history at all — a candidate submitted
+once from `ce-master`'s default store and later gated again against an unrelated `--data-dir`
+would not be caught. This is an inherent limit of a local-KB-based check, not a bug to fix here;
+a human operator is still the backstop (the CLI always prints the bundle before any decision).
+
+Known, deliberately unclosed gaps in T3.10.6's idempotency check:
+- **No TOCTOU protection.** The read (`_already_open_pr_url`) and the write (`gh pr create` +
+  `record_run_best_effort`) aren't atomic — two `--approve --submit` invocations for the same
+  candidate running close together could both read "no prior PR" before either records its own.
+  `JsonlStore.record_run`'s own docstring already documents "not safe against concurrent
+  writers" (general locking is T4.3, unstarted); this module doesn't add a narrower fix on top.
+- **A KB proxy, not `gh`'s actual state.** This checks local records, never `gh pr list` itself
+  — a KB that's stale, corrupted-and-recovered, or migrated without its run history (see
+  `src/store/migrate.py`) would silently stop protecting against a re-submission with no warning.
+- **No override for a legitimately closed/rejected PR.** If a prior real PR was closed without
+  merging, this candidate is permanently blocked from resubmission through `gate.py` — correct
+  fail-closed behavior for a safety gate, but there's no CLI escape hatch; a human would need to
+  resubmit manually outside this tool.
 
 `_create_draft_pr`'s `fork_owner` parameter (`--head {fork_owner}:{branch}`) is required for a
 real cross-repo PR — plain `--head <branch>` makes `gh` look for the branch *inside* `bundle.repo`
@@ -308,16 +328,23 @@ def verified_diff(store: Store, repo: str, number: int) -> tuple[str, str] | Non
 def _already_open_pr_url(store: Store, repo: str, number: int) -> str | None:
     """The `pr_url` of a PRIOR `stage="gate"` run for (`repo`, `number`) that actually opened a
     real PR (`submitted=True` and a truthy `pr_url`), or `None` if none exists — T3.10.6's
-    idempotency check. Scans every recorded `stage="gate"` run, not just the latest one: a
-    candidate could have several gate runs (approved-only, a failed `gh` call, a later
-    successful submit), and a real PR opened at any point in that history must never be opened
-    a second time, regardless of what the most recent run says (e.g. a later `approved=True,
-    submitted=False` run after a local draft cache was cleared must not look like "never
-    submitted")."""
-    for run in store.list_runs(repo=repo, number=number, stage="gate"):
-        if run.get("submitted") and run.get("pr_url"):
-            return str(run["pr_url"])
-    return None
+    idempotency check. Considers every recorded `stage="gate"` run with a real `pr_url`, not
+    just the latest one overall: a candidate could have several gate runs (approved-only, a
+    failed `gh` call, a later successful submit), and a real PR opened at any point in that
+    history must never be opened a second time, regardless of what the most recent run says
+    (e.g. a later `approved=True, submitted=False` run after a local draft cache was cleared
+    must not look like "never submitted"). Uses :func:`~src.stages.latest_run` (not a
+    first-match loop) to pick deterministically among multiple qualifying runs — `Store.list_runs`
+    only guarantees insertion order on `JsonlStore`; `FirestoreStore`'s own docstring says a
+    caller needing the most recent run must sort itself, so a plain first-match iteration could
+    non-deterministically report a different (stale) PR URL on that backend."""
+    submitted_runs = [
+        r
+        for r in store.list_runs(repo=repo, number=number, stage="gate")
+        if r.get("submitted") and r.get("pr_url")
+    ]
+    latest = latest_run(submitted_runs)
+    return str(latest["pr_url"]) if latest is not None else None
 
 
 def _pr_draft_path(repo: str, number: int, *, drafts_dir: Path | None = None) -> Path:
@@ -691,12 +718,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     if result.submitted:
         print(f"\nOpened PR: {result.pr_url}" if result.pr_url else "\ngh pr create failed.")
-    elif result.approved and args.submit and result.already_open_pr_url:
-        print(f"\nWrote PR draft: {result.draft_path}")
-        print(
-            f"NOT submitted: this candidate already has an open PR at "
-            f"{result.already_open_pr_url} -- refusing to open a second one."
-        )
+    elif result.already_open_pr_url:
+        # Surfaced regardless of --approve/--submit -- a human checking status on an
+        # already-submitted candidate should see this even on a bare or --approve-only call,
+        # not only when they also happen to pass --submit.
+        if result.draft_path is not None:
+            print(f"\nWrote PR draft: {result.draft_path}")
+        note = f"\nThis candidate already has an open PR: {result.already_open_pr_url}"
+        if args.submit:
+            note += " -- refusing to open a second one."
+        print(note)
     elif result.approved and args.submit and result.draft_is_new:
         print(f"\nWrote PR draft (first time): {result.draft_path}")
         print(
