@@ -339,7 +339,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** different tasks warrant different models — spend big-model budget only where it pays off, cheap/local elsewhere — automatically, from measured reward-per-cost.
   - **e.g.:** classification runs fine on local vLLM (cheap) while patch-writing routes to a stronger provider — the bandit learns this from outcomes.
   - **Test:** `tests/test_llm_bandit.py` — synthetic reward/cost history → bandit prefers the best reward-per-cost provider; an unseen provider still gets explored.
-- [ ] **T2.7 Novelty / dedup filter before expensive evaluation** — `src/novelty.py`: reject a candidate *before* a costly MI250 build if it near-duplicates a prior attempt (embedding similarity ≥ threshold) or an LLM-as-novelty-judge rules it redundant. Gates T3.2/T3.3. *(Borrowed from ShinkaEvolve — the biggest sample-efficiency lever.)*
+- [x] **T2.7 Novelty / dedup filter before expensive evaluation** — `src/novelty.py`: reject a candidate *before* a costly MI250 build if it near-duplicates a prior attempt (embedding similarity ≥ threshold) or an LLM-as-novelty-judge rules it redundant. Gates T3.2/T3.3. *(Borrowed from ShinkaEvolve — the biggest sample-efficiency lever.)*
   - **Why:** MI250 build+verify is the most expensive step — not re-attempting a near-duplicate candidate is the single biggest way to save that budget.
   - **e.g.:** a new candidate 0.95-similar to a failed prior attempt → rejected before any build; a genuinely new one passes.
   - **Test:** `tests/test_novelty.py` — near-duplicate candidate rejected; a genuinely new one passes (embedding + judge mocked).
