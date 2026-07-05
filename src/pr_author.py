@@ -44,12 +44,20 @@ Known limitations, not fixed here:
   actual submitted PR draft is left to T3.10 (which needs to score/gate this module's output
   first) or M4's orchestrator, matching the same "not wired into the pipeline yet" note T3.7 left
   for `engineer.push_branch`.
+- `run_pr_author` recomputes and re-persists a fresh (non-deterministic) run on every call, with
+  no idempotency check against an already-composed body for the same candidate — the same gap
+  `gate.py`'s own docstring documents for its own re-submission case, not newly introduced here.
+- The composed `title`/prose don't themselves enforce `profile.title_pattern`/`requires_dco`
+  compliance (see above: that's T3.10's job) — `_escape_markdown_structure` only guards against
+  the model's prose corrupting this module's own template structure, not against it ignoring the
+  target repo's conventions.
 """
 
 from __future__ import annotations
 
 import argparse
 import dataclasses
+import re
 import subprocess
 import sys
 from datetime import datetime, timezone
@@ -83,6 +91,10 @@ _LOG_CONTEXT_CHARS = 2000
 _PROFILE_EXCERPT_CHARS = 1000
 
 _GIT_CONFIG_TIMEOUT_S = 5.0
+
+# Matches a line that would render as a Markdown heading (`#`..`######`) or list/checklist item
+# (`- `) once spliced into the body -- see `_escape_markdown_structure`.
+_STRUCTURAL_LINE = re.compile(r"^(\s*)(#{1,6}\s|-\s)")
 
 
 @dataclasses.dataclass(frozen=True)
@@ -179,19 +191,46 @@ def _body_prompt(bundle: gate.EvidenceBundle, profile: RepoProfile | None) -> st
     )
 
 
+def _escape_markdown_structure(text: str) -> str:
+    """Escape a leading heading (`#`) or list-item (`- `) marker on any line of `text` (the
+    LLM's own free-form prose) so it can never render as a spoofed section heading or checklist
+    item once spliced next to the real, bundle-derived ones in :func:`_render_body` — the model
+    is untrusted content here the same way any other external input would be."""
+    return "\n".join(
+        _STRUCTURAL_LINE.sub(lambda m: f"{m.group(1)}\\{m.group(2)}", line)
+        for line in text.split("\n")
+    )
+
+
 def _render_repro_section(bundle: gate.EvidenceBundle) -> str:
     if not bundle.repro_command and not bundle.repro_log:
         return "(no captured pre-fix reproduction for this candidate)"
-    return f"```\n$ {bundle.repro_command}\n{bundle.repro_log[-_LOG_CONTEXT_CHARS:]}\n```"
+    command_line = (
+        f"$ {bundle.repro_command}" if bundle.repro_command else "$ (command not captured)"
+    )
+    log_text = (
+        bundle.repro_log[-_LOG_CONTEXT_CHARS:] if bundle.repro_log else "(no output captured)"
+    )
+    return f"```\n{command_line}\n{log_text}\n```"
+
+
+def _render_verify_section(bundle: gate.EvidenceBundle) -> str:
+    if not bundle.verify_log:
+        return "(no captured MI250 verification log for this candidate)"
+    return f"```\n{bundle.verify_log[-_LOG_CONTEXT_CHARS:]}\n```"
 
 
 def _render_body(bundle: gate.EvidenceBundle, fields: dict[str, str], signoff: str | None) -> str:
     """Assemble the final markdown body: `fields`' narrative prose around the repro/verify/
     checklist/sign-off sections, which are built here from `bundle`/`signoff` directly rather
     than from anything the model returned — see module docstring."""
+    has_repro = bool(bundle.repro_command or bundle.repro_log)
+    has_verify_log = bool(bundle.verify_log)
     checklist = [
-        "- [x] Reproduced the reported failure before the fix (see Reproduction)",
-        "- [x] Verified the fix on MI250 (see MI250 verification)",
+        f"- [{'x' if has_repro else ' '}] Reproduced the reported failure before the fix "
+        f"(see Reproduction)",
+        f"- [{'x' if has_verify_log else ' '}] Verified the fix on MI250 "
+        f"(see MI250 verification)",
         f"- [x] Self-reviewed by an independent ensemble "
         f"({bundle.approve_count}/{bundle.total_votes} approve)",
         f"- [{'x' if signoff else ' '}] Includes a DCO sign-off below",
@@ -201,8 +240,7 @@ def _render_body(bundle: gate.EvidenceBundle, fields: dict[str, str], signoff: s
         f"## Root cause\n{fields['root_cause']}",
         f"## Fix rationale\n{fields['fix_rationale']}",
         f"## Reproduction\nBefore the fix:\n{_render_repro_section(bundle)}",
-        f"## MI250 verification\nAfter the fix, on MI250:\n"
-        f"```\n{bundle.verify_log[-_LOG_CONTEXT_CHARS:]}\n```",
+        f"## MI250 verification\nAfter the fix, on MI250:\n{_render_verify_section(bundle)}",
         f"## Limitations\n{fields['limitations']}",
         "## Checklist\n" + "\n".join(checklist),
     ]
@@ -235,6 +273,12 @@ def compose_pr_body(
             print(f"pr_author: reply missing/empty {key!r} for {subject}", file=sys.stderr)
             return None
         fields[key] = value.strip()
+    # `title` becomes a PR title, not body prose -- collapse it to one line so a stray
+    # newline in the reply (or an embedded `Fixes #`/trailer line) can't smuggle extra
+    # lines into whatever eventually calls `gh pr create --title`.
+    fields["title"] = " ".join(fields["title"].split())
+    for key in ("problem", "root_cause", "fix_rationale", "limitations"):
+        fields[key] = _escape_markdown_structure(fields[key])
     resolved_signoff = signoff if signoff is not None else _default_signoff()
     body = _render_body(bundle, fields, resolved_signoff)
     return PRBody(title=fields["title"], body=body)
@@ -269,20 +313,15 @@ def run_pr_author(
     return result
 
 
-def _parse_candidate(raw: str) -> tuple[str, int]:
-    repo, _, number = raw.rpartition("#")
-    if not repo or not number.isdigit():
-        raise argparse.ArgumentTypeError(f"--candidate must be 'owner/repo#number', got {raw!r}")
-    return repo, int(number)
-
-
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: compose and print `--candidate`'s PR title + body."""
     ap = argparse.ArgumentParser(
         prog="python -m src.pr_author",
         description="Compose a maintainer-grade PR title + body for a gate-ready candidate.",
     )
-    ap.add_argument("--candidate", required=True, type=_parse_candidate, help="owner/repo#number")
+    ap.add_argument(
+        "--candidate", required=True, type=gate._parse_candidate, help="owner/repo#number"
+    )
     ap.add_argument("--data-dir", type=Path, default=None)
     args = ap.parse_args(argv)
     repo, number = args.candidate

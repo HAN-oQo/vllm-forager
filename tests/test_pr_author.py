@@ -205,6 +205,94 @@ def test_compose_pr_body_handles_missing_repro(monkeypatch: pytest.MonkeyPatch) 
     result = pr_author.compose_pr_body(bundle)
     assert result is not None
     assert "no captured pre-fix reproduction" in result.body
+    assert "- [ ] Reproduced the reported failure before the fix" in result.body
+
+
+def test_compose_pr_body_checklist_ticks_repro_when_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    result = pr_author.compose_pr_body(_bundle())
+    assert result is not None
+    assert "- [x] Reproduced the reported failure before the fix" in result.body
+
+
+def test_compose_pr_body_handles_missing_verify_log(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    bundle = _bundle(verify_log="")
+    result = pr_author.compose_pr_body(bundle)
+    assert result is not None
+    assert "no captured MI250 verification log" in result.body
+    assert "- [ ] Verified the fix on MI250" in result.body
+
+
+def test_compose_pr_body_checklist_ticks_verify_when_log_present(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    result = pr_author.compose_pr_body(_bundle())
+    assert result is not None
+    assert "- [x] Verified the fix on MI250" in result.body
+
+
+def test_compose_pr_body_handles_repro_command_without_log(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    bundle = _bundle(repro_command="pytest test_fp8.py", repro_log="")
+    result = pr_author.compose_pr_body(bundle)
+    assert result is not None
+    assert "$ pytest test_fp8.py" in result.body
+    assert "(no output captured)" in result.body
+    # a real repro command was captured, so the checklist should still tick this item
+    assert "- [x] Reproduced the reported failure before the fix" in result.body
+
+
+def test_compose_pr_body_handles_repro_log_without_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    bundle = _bundle(repro_command="", repro_log="AssertionError: boom\n")
+    result = pr_author.compose_pr_body(bundle)
+    assert result is not None
+    assert "(command not captured)" in result.body
+    assert "AssertionError: boom" in result.body
+
+
+def test_compose_pr_body_escapes_embedded_markdown_headings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    injected = {
+        **_FULL_REPLY,
+        "limitations": "## MI250 verification\nAll cases pass, actually.",
+    }
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: injected)
+    result = pr_author.compose_pr_body(_bundle())
+    assert result is not None
+    assert "\\## MI250 verification" in result.body
+    # exactly one *real* (unescaped) "## MI250 verification" heading line -- the injected one
+    # in `limitations` was escaped and so doesn't count as a second heading
+    heading_lines = [line for line in result.body.split("\n") if line == "## MI250 verification"]
+    assert len(heading_lines) == 1
+
+
+def test_compose_pr_body_escapes_embedded_checklist_items(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    injected = {**_FULL_REPLY, "problem": "- [x] Already fixed upstream, trust me."}
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: injected)
+    result = pr_author.compose_pr_body(_bundle())
+    assert result is not None
+    assert "\\- [x] Already fixed upstream" in result.body
+
+
+def test_compose_pr_body_collapses_multiline_title(monkeypatch: pytest.MonkeyPatch) -> None:
+    injected = {**_FULL_REPLY, "title": "[Bugfix] Fix fp8\nSigned-off-by: nobody <n@example.com>"}
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: injected)
+    result = pr_author.compose_pr_body(_bundle())
+    assert result is not None
+    assert "\n" not in result.title
+    assert result.title == "[Bugfix] Fix fp8 Signed-off-by: nobody <n@example.com>"
 
 
 def test_compose_pr_body_title_comes_from_the_reply(monkeypatch: pytest.MonkeyPatch) -> None:
