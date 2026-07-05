@@ -69,6 +69,26 @@ def test_run_repro_records_failing_signal(tmp_path, monkeypatch: pytest.MonkeyPa
     assert runs[0]["host"] == "mi250-051"
 
 
+def test_run_repro_passes_repo_dir_through_to_the_prompt(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_with_item(tmp_path)
+    captured = {}
+
+    def _fake_complete(prompt, **k):
+        captured["prompt"] = prompt
+        return {"command": "pytest test_fp8.py"}
+
+    monkeypatch.setattr(llm, "complete", _fake_complete)
+    monkeypatch.setattr(
+        runner, "run", lambda host, command, **k: runner.RunResult(exit_code=1, log="fail\n")
+    )
+
+    repro.run_repro(store, "o/r", 1, "mi250-051", repo_dir="/remote/vast0/herom/vllm")
+
+    assert "/remote/vast0/herom/vllm" in captured["prompt"]
+
+
 def test_run_repro_records_non_reproducing_result(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -243,3 +263,34 @@ def test_synthesize_repro_command_rejects_blank_command(monkeypatch: pytest.Monk
 def test_synthesize_repro_command_rejects_non_dict_reply(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm, "complete", lambda *a, **k: "not a dict")
     assert repro.synthesize_repro_command("t", "b") is None
+
+
+def test_repro_prompt_tells_llm_the_checkout_path_when_repo_dir_given() -> None:
+    """Regression: without a concrete path, the prompt's "already checked out in the current
+    directory" claim only holds if ssh's own default login directory happens to be the
+    checkout -- nothing guarantees that for plain `ssh host command`."""
+    prompt = repro._repro_prompt("t", "b", "/remote/vast0/herom/vllm")
+
+    assert "/remote/vast0/herom/vllm" in prompt
+
+
+def test_repro_prompt_falls_back_to_current_directory_wording_when_repo_dir_omitted() -> None:
+    prompt = repro._repro_prompt("t", "b", None)
+
+    assert "already checked out in the current directory" in prompt
+
+
+def test_synthesize_repro_command_passes_repo_dir_to_the_prompt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    captured = {}
+
+    def _fake_complete(prompt, **k):
+        captured["prompt"] = prompt
+        return {"command": "pytest test_x.py"}
+
+    monkeypatch.setattr(llm, "complete", _fake_complete)
+
+    repro.synthesize_repro_command("t", "b", "/remote/vast0/herom/vllm")
+
+    assert "/remote/vast0/herom/vllm" in captured["prompt"]

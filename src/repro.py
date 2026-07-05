@@ -94,22 +94,34 @@ class ReproResult:
         return record
 
 
-def _repro_prompt(title: str, body: str) -> str:
+def _repro_prompt(title: str, body: str, repo_dir: str | None) -> str:
+    cwd_hint = (
+        f"vLLM is already checked out at `{repo_dir}` on the target host — start your command "
+        f"with `cd {repo_dir} &&` before anything else."
+        if repo_dir
+        else "vLLM is already checked out in the current directory."
+    )
     return (
         "This is a vLLM/ROCm GitHub issue describing a bug. Write ONE shell command that "
-        "attempts to reproduce it on a ROCm (gfx90a) machine with vLLM already checked out in "
-        "the current directory — e.g. a minimal pytest/python invocation exercising the "
-        "described failure. Reply with `command`.\n\n"
+        f"attempts to reproduce it on a ROCm (gfx90a) machine — {cwd_hint} A minimal "
+        "pytest/python invocation exercising the described failure is enough. Reply with "
+        "`command`.\n\n"
         f"Title: {title[:500]}\n\nBody: {(body or '')[:4000]}"
     )
 
 
-def synthesize_repro_command(title: str, body: str) -> str | None:
+def synthesize_repro_command(title: str, body: str, repo_dir: str | None = None) -> str | None:
     """A shell command an LLM believes reproduces `title`/`body`'s bug, or `None` if the call
     failed or the reply didn't shape into a usable command (see module docstring: skip,
-    logged, not raised)."""
+    logged, not raised).
+
+    `repo_dir`, if given, is passed to the LLM as the checkout's actual path on the target host
+    (see :func:`run_repro` — plain ``ssh host command`` does not otherwise land in it; without
+    this, the prompt's "already checked out in the current directory" claim only holds if the
+    host's default ssh login directory happens to already be the checkout, which nothing here
+    guarantees)."""
     reply = complete_or_none(
-        _repro_prompt(title, body), _REPRO_SCHEMA, stage="repro", subject=title
+        _repro_prompt(title, body, repo_dir), _REPRO_SCHEMA, stage="repro", subject=title
     )
     if reply is None:
         return None
@@ -123,11 +135,17 @@ def run_repro(
     number: int,
     host: str,
     *,
+    repo_dir: str | None = None,
     timeout: float = DEFAULT_REPRO_TIMEOUT_S,
     now: datetime | None = None,
 ) -> ReproResult | None:
     """Synthesize and run a repro command for (`repo`, `number`) on `host`, record the result
     to `store`, and return it.
+
+    `repo_dir`, if given, is the checkout's actual absolute path on `host` — passed through to
+    :func:`synthesize_repro_command` so the LLM composes a command that actually lands there
+    (see that function's own docstring). Left `None` (default) to preserve prior behavior:
+    assume the ssh session's own default directory is already the checkout.
 
     Returns:
         `None` if `store` has no record for (`repo`, `number`), or no repro command could be
@@ -141,7 +159,7 @@ def run_repro(
     if item is None:
         return None
 
-    command = synthesize_repro_command(item.get("title") or "", item.get("body") or "")
+    command = synthesize_repro_command(item.get("title") or "", item.get("body") or "", repo_dir)
     if command is None:
         return None
 
