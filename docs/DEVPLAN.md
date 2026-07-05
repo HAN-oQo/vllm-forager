@@ -361,7 +361,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** a fix is only credible if the bug was first *reproduced on real hardware* — the failing signal is the "before" half of the proof.
   - **e.g.:** candidate #d → run its repro on mi250-051 → capture the failing assertion/log as the baseline signal.
   - **Test:** `tests/test_repro.py` — mock runner returns a failing log → failing signal recorded.
-- [ ] **T3.3 Engineer patch loop** — `llm.complete` generates a patch on a fork branch → rebuild/test on MI250 → confirm signal flips.
+- [x] **T3.3 Engineer patch loop** — `llm.complete` generates a patch on a fork branch → rebuild/test on MI250 → confirm signal flips.
   - **Why:** the core contribution act — and MI250 is the empirical oracle: a patch counts as verified only when the failing signal actually flips to passing.
   - **e.g.:** patch applied → rebuild on mi250-051 → the T3.2 failing test now passes ⇒ `verified=True`; still fails ⇒ no PR.
   - **Test:** `tests/test_engineer.py` — mock llm+runner: fail→patch→pass ⇒ `verified=True`; fail→patch→fail ⇒ `verified=False` and **no PR**.
