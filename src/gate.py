@@ -60,10 +60,11 @@ but the bundle still assembles fine (`risk=None`), so this doesn't affect correc
 
 `run_gate` persists its own outcome (`stage="gate"`: `approved`, `submitted`, `pr_url`,
 `fork_owner`, `draft_path`, `recorded_at`) — the terminal, human-facing checkpoint deserves the
-same KB audit trail T3.2–T3.4 already leave, and a durable record is also what a future caller
-would need to notice "this candidate was already submitted" before re-submitting it (not
-implemented here — this module doesn't check its own gate history before opening a second PR on
-a re-run; that idempotency check is future work).
+same KB audit trail T3.2–T3.4 already leave, and this durable record is exactly what T3.10.6's
+`_already_open_pr_url` scans: every prior `stage="gate"` run for a candidate, not just the
+latest, so a candidate that already has a real `pr_url` from an earlier submission can never be
+submitted a second time — even if the local draft cache is cleared or `--data-dir` changes,
+which would otherwise reset `draft_is_new` to `True` and look like a first-time approval.
 
 `_create_draft_pr`'s `fork_owner` parameter (`--head {fork_owner}:{branch}`) is required for a
 real cross-repo PR — plain `--head <branch>` makes `gh` look for the branch *inside* `bundle.repo`
@@ -184,12 +185,16 @@ class GateResult:
     since changed (e.g. T3.9 recomposed the narrative between the required `--approve` and
     `--approve --submit` calls) — content-based, not just file-existence, so a re-composed
     narrative can never be silently submitted without a human getting a fresh chance to read it.
-    The reason `submitted` came back `False` even though `submit=True` was passed is almost
-    always this. `fork_owner` records what was actually passed (or `None`) — the KB's own audit
-    trail for a cross-repo PR should show which fork the head branch was addressed against, not
-    just that approval happened. `quality_passed` records what was passed in (`None` if no T3.10
-    verdict was available) — a `submitted=False` despite `submit=True` and an unchanged draft is
-    otherwise this, not `draft_is_new`."""
+    `already_open_pr_url` is set (and `submitted` forced `False`) when a prior `stage="gate"` run
+    for this candidate already shows a real submitted PR — see module docstring's T3.10.6 note;
+    this is checked *before* `draft_is_new`, so it explains a `submitted=False` even on a
+    freshly-written first draft (e.g. after the local draft cache was cleared). The reason
+    `submitted` came back `False` despite `submit=True` is, in priority order: an existing open
+    PR (`already_open_pr_url`), then a changed/new draft (`draft_is_new`), then a missing quality
+    pass (`quality_passed` not `True`). `fork_owner` records what was actually passed (or `None`)
+    — the KB's own audit trail for a cross-repo PR should show which fork the head branch was
+    addressed against, not just that approval happened. `quality_passed` records what was passed
+    in (`None` if no T3.10 verdict was available)."""
 
     repo: str
     number: int
@@ -201,6 +206,7 @@ class GateResult:
     draft_path: Path | None = None
     draft_is_new: bool = False
     quality_passed: bool | None = None
+    already_open_pr_url: str | None = None
 
 
 def _risk_badge(title: str, body: str) -> tuple[str | None, str | None, str | None]:
@@ -299,6 +305,21 @@ def verified_diff(store: Store, repo: str, number: int) -> tuple[str, str] | Non
     return verify_run.get("patch") or "", verify_run.get("recorded_at") or ""
 
 
+def _already_open_pr_url(store: Store, repo: str, number: int) -> str | None:
+    """The `pr_url` of a PRIOR `stage="gate"` run for (`repo`, `number`) that actually opened a
+    real PR (`submitted=True` and a truthy `pr_url`), or `None` if none exists — T3.10.6's
+    idempotency check. Scans every recorded `stage="gate"` run, not just the latest one: a
+    candidate could have several gate runs (approved-only, a failed `gh` call, a later
+    successful submit), and a real PR opened at any point in that history must never be opened
+    a second time, regardless of what the most recent run says (e.g. a later `approved=True,
+    submitted=False` run after a local draft cache was cleared must not look like "never
+    submitted")."""
+    for run in store.list_runs(repo=repo, number=number, stage="gate"):
+        if run.get("submitted") and run.get("pr_url"):
+            return str(run["pr_url"])
+    return None
+
+
 def _pr_draft_path(repo: str, number: int, *, drafts_dir: Path | None = None) -> Path:
     """Where :func:`_write_pr_draft` puts (and a human can find) one candidate's draft — matches
     :func:`~src.engineer._branch_name`'s own ``repo.replace("/", "-")`` convention so the two are
@@ -388,11 +409,12 @@ def _finalize(
     `main` (which prints `bundle` in between assembling and calling this, so the human sees it
     before any decision is acted on).
 
-    Opening a real PR (:func:`_create_draft_pr`) requires **four** things, not two: `approve is
+    Opening a real PR (:func:`_create_draft_pr`) requires **five** things, not two: `approve is
     True`, `submit is True`, the candidate's draft file already existing *before* this call (i.e.
-    written by an earlier, separate call), AND `quality_passed is True` — see module docstring
-    for why the third and fourth conditions exist. `GateResult.draft_is_new`/`quality_passed`
-    report which of these is almost always why `submit=True` didn't actually submit.
+    written by an earlier, separate call), `quality_passed is True`, AND no prior `stage="gate"`
+    run for this candidate already opened a real PR (T3.10.6's idempotency check) — see module
+    docstring for why these conditions exist. `GateResult.already_open_pr_url`/`draft_is_new`/
+    `quality_passed` report which of these is almost always why `submit=True` didn't submit.
 
     `pr_body`, if given (T3.9's composed narrative), is written/submitted instead of
     `bundle.format()`'s raw evidence-dump rendering — the draft a human reviews and the PR that
@@ -421,7 +443,14 @@ def _finalize(
         existing_content = target_path.read_text() if target_path.exists() else None
         draft_is_new = existing_content != body
         draft_path = _write_pr_draft(bundle, body, drafts_dir=pr_drafts_dir)
-    submitted = approved and submit is True and not draft_is_new and quality_passed is True
+    already_open_pr_url = _already_open_pr_url(store, repo, number)
+    submitted = (
+        approved
+        and submit is True
+        and not draft_is_new
+        and quality_passed is True
+        and already_open_pr_url is None
+    )
     pr_url = None
     if submitted:
         assert body is not None  # submitted implies approved implies body was set above
@@ -458,6 +487,7 @@ def _finalize(
         draft_path=draft_path,
         draft_is_new=draft_is_new,
         quality_passed=quality_passed,
+        already_open_pr_url=already_open_pr_url,
     )
 
 
@@ -476,10 +506,10 @@ def run_gate(
 ) -> GateResult | None:
     """Assemble the evidence bundle for (`repo`, `number`); if `approve` is the literal `True`,
     write a local PR-draft file; **only if `approve` and `submit` are both the literal `True`,
-    the draft already existed from an earlier, separate call, AND `quality_passed` is the literal
-    `True`**, additionally open a real PR against `repo`. Records the outcome as a `stage="gate"`
-    run regardless (see module docstring for why submission needs conditions beyond the two
-    flags).
+    the draft already existed from an earlier, separate call, `quality_passed` is the literal
+    `True`, AND no prior `stage="gate"` run for this candidate already opened a real PR**,
+    additionally open a real PR against `repo`. Records the outcome as a `stage="gate"` run
+    regardless (see module docstring for why submission needs conditions beyond the two flags).
 
     `pr_body`/`quality_passed` are plain values, not looked up here — this function doesn't
     import `pr_author`/`pr_quality` (see module docstring for why); a caller (`main()`) that
@@ -495,8 +525,8 @@ def run_gate(
         `None` if the candidate isn't ready for the gate (see :func:`assemble_bundle`; skipped,
         not raised). Otherwise a :class:`GateResult` — check `submitted` (not just `approve`/
         `submit`, the arguments) for whether submission was actually attempted, and `pr_url` for
-        whether it actually succeeded; `draft_is_new`/`quality_passed` explain a `submitted=False`
-        despite `submit=True`.
+        whether it actually succeeded; `already_open_pr_url`/`draft_is_new`/`quality_passed`
+        explain a `submitted=False` despite `submit=True`, in that priority order.
     """
     bundle = assemble_bundle(store, repo, number)
     if bundle is None:
@@ -661,6 +691,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     if result.submitted:
         print(f"\nOpened PR: {result.pr_url}" if result.pr_url else "\ngh pr create failed.")
+    elif result.approved and args.submit and result.already_open_pr_url:
+        print(f"\nWrote PR draft: {result.draft_path}")
+        print(
+            f"NOT submitted: this candidate already has an open PR at "
+            f"{result.already_open_pr_url} -- refusing to open a second one."
+        )
     elif result.approved and args.submit and result.draft_is_new:
         print(f"\nWrote PR draft (first time): {result.draft_path}")
         print(
