@@ -36,7 +36,12 @@ Status: **M0 (bootstrapping)** — collector implemented + tested; everything el
   opened** — the human may merge it at any moment, stranding the commit off `main` (this has happened repeatedly).
   Need to add or fix something? Open a **new** branch off `main`. Before any push to a PR branch, confirm it is
   still open with `gh pr view <n> --json state`.
-- **Human review gate is mandatory:** nothing goes upstream to vLLM without explicit human approval.
+- **Human review gate is mandatory — fork-first, never spray public:** nothing reaches a public/upstream repo
+  without explicit human confirmation. Agents **never run `gh pr create` against `vllm-project/vllm`** — a PR from
+  a fork branch defaults its *base* to upstream (that is how a test draft escaped to `vllm-project/vllm#47645`,
+  since withdrawn). Agents **push the branch to the fork and prepare the PR draft only**; a human opens/submits
+  every upstream PR. Enforcement is in code (M3.5 `T3.7`), not a settings deny (a blanket `gh pr create` deny
+  would also block internal dev PRs). See M3.5 in `docs/DEVPLAN.md`.
 
 ## Commands
 ```bash

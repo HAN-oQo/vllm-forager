@@ -375,9 +375,48 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Test:** `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked). **HARD: nothing reaches upstream without approval.**
 - [ ] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
   - **Why:** the project's first actual upstream deliverable — proves the whole pipeline end-to-end on a low-risk change before attempting harder fixes.
-  - **e.g.:** a docs/typing fix flows repro→patch→verify→self-review→approve→ a real draft PR URL on vllm-project/vllm.
-  - **Test:** manual/`integration` — **draft PR URL pasted here**; checked only then.
+  - **e.g.:** a docs/typing fix flows repro→patch→verify→self-review→**human confirm**→ a real PR URL on vllm-project/vllm.
+  - **Test:** manual/`integration` — **PR URL pasted here**; checked only then.
   - **Note:** PR URL = …
+  - **⚠ BLOCKED — do this only via M3.5.** The M3 test flow auto-opened a low-quality draft on the **public**
+    `vllm-project/vllm#47645` (now withdrawn) because `gh pr create` from a fork branch defaults base=upstream. Do
+    **not** open any upstream PR until M3.5 lands (fork-first + human-confirm + maintainer-grade authoring).
+
+## M3.5 — Maintainer-grade upstream PRs (fork-first, human-confirmed)
+
+> **Why this milestone:** a PR only gets merged if it reads like careful human work — clear problem statement, root
+> cause, reproduction, on-hardware verification, and adherence to the target repo's norms — **and** nothing reaches
+> a public repo without an explicit human OK. Incident: a test draft auto-opened on `vllm-project/vllm#47645`
+> (withdrawn) because `gh pr create` from a fork branch defaults its base to upstream. This milestone makes the safe
+> path the default *and* raises PRs to acceptance quality. Extends M3; tests carry `pytest.mark.m3`.
+> **Expected output:** PRs prepared on a **fork branch** to maintainer standard; a human explicitly confirms before
+> any upstream submission; a review-response loop.
+> **Demo:** `python -m src.engineer --candidate <id>` → pushes a fork branch + writes a PR draft file, **no upstream
+> PR**; `--submit --approve` opens the upstream PR only after the human OK.
+> **Acceptance:** `pytest -m m3` green · **no code path opens a PR against `vllm-project/vllm` without an explicit
+> human-confirm flag** · a sample PR body carries problem / root-cause / repro / MI250-verification sections + DCO
+> `Signed-off-by` + `Fixes #`.
+
+- [ ] **T3.7 Fork-first, human-confirmed submission (HARD safety fix)** — the engineer pushes the branch to **the fork** and writes a PR draft artifact (title + body) locally; it must **not** run `gh pr create` against `vllm-project/vllm`. The upstream PR opens only via a separate, explicit `--submit --approve` step after the human reviews the draft.
+  - **Why:** `gh pr create` from a fork branch defaults base=upstream → a public PR (that is how #47645 escaped). Make the safe path the default so it can't recur.
+  - **e.g.:** `engineer --candidate X` → pushes `forager/…` to the fork + writes `data/pr_drafts/X.md`; zero upstream PRs. The human reads it, runs `engineer --candidate X --submit --approve` → then (and only then) the upstream PR opens.
+  - **Test:** `tests/test_gate.py` — without both flags, `gh pr create` with an upstream base is never invoked (subprocess mocked); with both, invoked exactly once.
+- [ ] **T3.8 Contribution-norms adapter (repo profile)** — fetch + cache the target repo's `CONTRIBUTING`, PR template, DCO/sign-off requirement, title conventions, and a few recent **merged** PRs as style exemplars; expose as a repo profile the author uses.
+  - **Why:** a PR that ignores the template / lacks DCO / uses the wrong title style gets bounced regardless of code quality.
+  - **e.g.:** vLLM profile → title `[ROCm][Bugfix] …`, requires `Signed-off-by`, PR-template sections, "tests required".
+  - **Test:** `tests/test_pr_profile.py` — mock fetch → profile has template + sign-off flag + title pattern + N exemplars.
+- [ ] **T3.9 PR-author agent (maintainer-grade body)** — from the evidence bundle, `llm.complete` composes a title + body following the profile: **problem → root cause → fix rationale → reproduction (before/after) → MI250 verification (logs/benchmarks) → limitations**, with `Fixes #NNNN`, DCO sign-off, checklist ticked.
+  - **Why:** the "reads like a human did it" step — structured, specific, evidence-backed, template-compliant (vs the `# Candidate … Risk badge` + empty-Repro + raw-diff dump that got #47645 withdrawn).
+  - **e.g.:** body opens with the user-facing problem + linked issue, explains *why* the bug happens, then the fix, a copy-pasteable repro, and the MI250 pass log.
+  - **Test:** `tests/test_pr_author.py` — mock llm + bundle → body has all required sections, links the issue, carries `Signed-off-by`, and every repro/perf claim cites the captured MI250 run.
+- [ ] **T3.10 PR-quality gate ("would a maintainer accept this?")** — an adversarial ensemble scores the PR narrative against the profile + exemplars (clarity, completeness, claims-backed-by-evidence, focused diff, not boilerplate); must pass **before** the human-confirm step.
+  - **Why:** catch thin / AI-looking PRs automatically before they reach a person or a maintainer.
+  - **e.g.:** flags "empty Repro block" / "perf claim without numbers" / "raw diff dumped in body" → sends it back to T3.9.
+  - **Test:** `tests/test_pr_quality.py` — a thin/boilerplate body fails; a complete, evidence-backed one passes (mock judges).
+- [ ] **T3.11 Review-response loop (human-gated)** — after a PR is (human-)submitted, watch maintainer comments and draft point-by-point replies + follow-up commits; the human approves each before anything is pushed to the public PR.
+  - **Why:** PRs merge through the review conversation, not the first push; an unanswered review is a dead PR — but responses must never auto-push to a public PR.
+  - **e.g.:** maintainer asks "add a test for the empty case" → agent drafts the test + a reply → human approves → pushed.
+  - **Test:** `tests/test_review_loop.py` — a mock review comment → a response draft + a proposed diff are produced; nothing is pushed without approval.
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
