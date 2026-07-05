@@ -24,6 +24,14 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+# Shared by every stage that persists a run record with a captured log (repro.py, engineer.py):
+# the tail actually persisted, to stay comfortably under Firestore's ~1 MiB per-document limit.
+# The failing assertion/traceback is conventionally at the end of a log (matching runner.py's
+# own log[-500:] convention for its ssh-255 error message), so keeping the tail, not the head,
+# preserves the part most likely to matter. Callers keep their own in-memory copy full-length —
+# only the persisted copy is truncated.
+MAX_RUN_LOG_CHARS = 100_000
+
 
 def merge_record(old: dict | None, new: dict) -> dict:
     """The one shallow-merge every backend's ``upsert_items`` must apply: `new`'s fields win.

@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src import llm, repro, runner
+from src.store import base as store_base
 from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m3
@@ -207,7 +208,7 @@ def test_run_repro_returns_result_even_if_record_run_fails(
 
 
 def test_to_run_record_truncates_persisted_log_but_result_keeps_full_log() -> None:
-    huge_log = "x" * (repro._MAX_PERSISTED_LOG_CHARS + 1000) + "TAIL"
+    huge_log = "x" * (store_base.MAX_RUN_LOG_CHARS + 1000) + "TAIL"
     result = repro.ReproResult(
         repo="o/r",
         number=1,
@@ -221,7 +222,7 @@ def test_to_run_record_truncates_persisted_log_but_result_keeps_full_log() -> No
 
     record = result.to_run_record()
 
-    assert len(record["log"]) == repro._MAX_PERSISTED_LOG_CHARS
+    assert len(record["log"]) == store_base.MAX_RUN_LOG_CHARS
     assert record["log"].endswith("TAIL")
     assert result.log == huge_log  # the in-memory result itself is never truncated
 

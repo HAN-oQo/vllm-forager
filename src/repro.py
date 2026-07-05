@@ -52,7 +52,8 @@ from datetime import datetime, timezone
 
 from . import llm, runner
 from .agents.forecaster import TS_FORMAT
-from .store.base import Store
+from .stages import get_item_or_skip, record_run_best_effort
+from .store.base import MAX_RUN_LOG_CHARS, Store
 
 _REPRO_SCHEMA = {
     "type": "object",
@@ -63,13 +64,6 @@ _REPRO_SCHEMA = {
 # A repro is meant to be a quick reproduction check, not a full ROCm build -- much shorter than
 # runner.DEFAULT_TIMEOUT_S (an hour, sized for that build). Still overridable per call.
 DEFAULT_REPRO_TIMEOUT_S = 600.0
-
-# The tail of `log` actually persisted to the KB -- the failing assertion/traceback is
-# conventionally at the end (matching runner.py's own `log[-500:]` convention for its ssh-255
-# error message), and this keeps a real MI250 log comfortably under Firestore's ~1 MiB
-# per-document limit. The in-memory ReproResult.log returned to the immediate caller is never
-# truncated -- only the persisted copy is.
-_MAX_PERSISTED_LOG_CHARS = 100_000
 
 
 @dataclasses.dataclass(frozen=True)
@@ -92,12 +86,12 @@ class ReproResult:
 
     def to_run_record(self) -> dict:
         """This result as a plain dict, shaped for :meth:`~src.store.base.Store.record_run` —
-        `log` is truncated to its last :data:`_MAX_PERSISTED_LOG_CHARS` characters for the
-        persisted copy only (see module-level comment); this `ReproResult` itself keeps the
-        full text."""
+        `log` is truncated to its last :data:`~src.store.base.MAX_RUN_LOG_CHARS` characters for
+        the persisted copy only (see that constant's own docstring); this `ReproResult` itself
+        keeps the full text."""
         record = dataclasses.asdict(self)
         record["stage"] = "repro"
-        record["log"] = record["log"][-_MAX_PERSISTED_LOG_CHARS:]
+        record["log"] = record["log"][-MAX_RUN_LOG_CHARS:]
         return record
 
 
@@ -146,9 +140,8 @@ def run_repro(
         runner.RunnerError: propagated uncaught from :func:`~src.runner.run` — see module
             docstring for why an infra failure isn't treated the same as "no signal."
     """
-    item = store.get_item(repo, number)
+    item = get_item_or_skip(store, repo, number, stage="repro")
     if item is None:
-        print(f"repro: no KB record for {repo}#{number}", file=sys.stderr)
         return None
 
     command = synthesize_repro_command(item.get("title") or "", item.get("body") or "")
@@ -167,9 +160,7 @@ def run_repro(
         reproduced=result.exit_code != 0,
         recorded_at=when.strftime(TS_FORMAT),
     )
-    try:
-        store.record_run(repro_result.to_run_record())
-    except Exception as exc:
-        # See module docstring: never lose an already-run result over a mere persistence hiccup.
-        print(f"repro: failed to record run for {repo}#{number}: {exc}", file=sys.stderr)
+    record_run_best_effort(
+        store, repro_result.to_run_record(), stage="repro", repo=repo, number=number
+    )
     return repro_result
