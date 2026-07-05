@@ -145,6 +145,51 @@ def test_gh_failure_still_returns_result_with_no_pr_url(
     assert result.pr_url is None
 
 
+def test_approve_requires_the_literal_true_not_just_truthiness(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `approve` is checked with `is True`, not plain truthiness -- a caller
+    passing any other truthy value (a non-empty string, an int) must NOT open a PR."""
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    result = gate.run_gate(store, "o/r", 1, approve="yes")  # type: ignore[arg-type]
+
+    assert result is not None
+    assert result.approved is False
+    assert result.pr_url is None
+
+
+def test_run_gate_records_its_own_outcome(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
+    )
+
+    gate.run_gate(store, "o/r", 1, approve=True)
+
+    gate_runs = store.list_runs(repo="o/r", number=1, stage="gate")
+    assert len(gate_runs) == 1
+    assert gate_runs[0]["approved"] is True
+    assert gate_runs[0]["pr_url"] == "https://x/pull/1"
+
+
+def test_run_gate_records_outcome_even_when_unapproved(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    gate.run_gate(store, "o/r", 1, approve=False)
+
+    gate_runs = store.list_runs(repo="o/r", number=1, stage="gate")
+    assert len(gate_runs) == 1
+    assert gate_runs[0]["approved"] is False
+    assert gate_runs[0]["pr_url"] is None
+
+
 # --------------------------------------------------------------------- assemble_bundle: skip paths
 
 
@@ -189,6 +234,48 @@ def test_returns_none_when_item_missing(tmp_path, monkeypatch: pytest.MonkeyPatc
     monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
 
     assert gate.run_gate(store, "o/r", 404, approve=True) is None
+
+
+def test_returns_none_when_both_timestamps_are_missing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a verify run missing `recorded_at` and a self_review run missing
+    `verify_recorded_at` must NOT be treated as matching just because `None == None`."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items([{"repo": "o/r", "number": 1, "type": "issue", "title": "t"}])
+    store.record_run({"repo": "o/r", "number": 1, "stage": "verify", "verified": True})
+    store.record_run(
+        {"repo": "o/r", "number": 1, "stage": "self_review", "advance": True, "critiques": []}
+    )
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    assert gate.run_gate(store, "o/r", 1, approve=True) is None
+
+
+def test_bundle_uses_most_recent_reproduced_repro_run(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a later stray repro run with reproduced=False must not shadow an earlier
+    reproduced=True run in the evidence bundle -- matching engineer.py's own baseline-selection
+    convention (filter to reproduced=True, then take the latest)."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "repro",
+            "command": "pytest test_other.py",
+            "log": "no failure here\n",
+            "reproduced": False,
+            "recorded_at": "2026-01-05T00:00:00Z",  # newer than the reproduced=True run
+        }
+    )
+
+    bundle = gate.assemble_bundle(store, "o/r", 1)
+
+    assert bundle is not None
+    assert bundle.repro_command == "pytest test_fp8.py"
+    assert bundle.repro_log == "AssertionError\n"
 
 
 # --------------------------------------------------------------------- assemble_bundle: content
@@ -237,3 +324,53 @@ def test_bundle_format_includes_key_sections(tmp_path, monkeypatch: pytest.Monke
     assert "1 passed" in text  # verify log
     assert "AssertionError" in text  # repro log
     assert "diff" in text  # the patch fence
+
+
+def test_critique_missing_reason_does_not_crash_format(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: format() reads each vote defensively -- a malformed critique record missing
+    a field must degrade gracefully, not raise, since this is the one function whose entire job
+    is safely surfacing evidence to the human approver."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "self_review",
+            "critiques": [{"looks_correct": True}],  # missing "reason"
+            "approve_count": 1,
+            "total_votes": 1,
+            "advance": True,
+            "verify_recorded_at": "2025-12-31T00:00:00Z",
+            "recorded_at": "2026-01-02T00:00:00Z",  # newer -- becomes the matching review
+        }
+    )
+
+    bundle = gate.assemble_bundle(store, "o/r", 1)
+    assert bundle is not None
+    bundle.format()  # must not raise
+
+
+# --------------------------------------------------------------------- CLI ordering
+
+
+def test_cli_prints_bundle_before_opening_pr(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """Regression: CLAUDE.md's word is 'seeing' -- the bundle must appear in the human's
+    terminal before any PR exists, even on a single `--candidate X --approve` invocation."""
+    _store_ready_for_gate(tmp_path)  # populates the JsonlStore the CLI itself will open
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
+    )
+
+    rc = gate.main(["--candidate", "o/r#1", "--approve", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    bundle_pos = out.index("Candidate o/r#1")
+    pr_pos = out.index("Opened draft PR")
+    assert bundle_pos < pr_pos

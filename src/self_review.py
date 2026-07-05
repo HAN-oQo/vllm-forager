@@ -42,7 +42,7 @@ import sys
 from datetime import datetime, timezone
 
 from .agents.forecaster import TS_FORMAT
-from .stages import complete_or_none, get_item_or_skip, record_run_best_effort
+from .stages import complete_or_none, get_item_or_skip, latest_run, record_run_best_effort
 from .store.base import Store
 
 _CRITIQUE_SCHEMA = {
@@ -161,11 +161,10 @@ def run_self_review(
     if n < 1:
         raise SelfReviewError(f"n must be >= 1, got {n}")
 
-    verify_runs = store.list_runs(repo=repo, number=number, stage="verify")
-    if not verify_runs:
+    verify_run = latest_run(store.list_runs(repo=repo, number=number, stage="verify"))
+    if verify_run is None:
         print(f"self_review: no verify run for {repo}#{number}", file=sys.stderr)
         return None
-    verify_run = max(verify_runs, key=lambda r: r.get("recorded_at") or "")
     if not verify_run.get("verified"):
         print(
             f"self_review: most recent verify run for {repo}#{number} is not verified",

@@ -2,13 +2,18 @@
 and open a draft PR — but **only** on an explicit `approve=True`.
 
 This is CLAUDE.md's mandatory human checkpoint: **HARD requirement — nothing reaches upstream
-without a person seeing the full evidence bundle and approving.** `run_gate`'s own control flow
-makes this impossible to get backwards: :func:`_create_draft_pr` is called from exactly one
-branch, gated on `approve`, and this module's own test suite proves the unapproved path never
-touches `gh` at all — see `tests/test_gate.py`'s own name for that guarantee. Nothing here ever
-merges anything either (`gh pr create --draft` opens a *draft*; CLAUDE.md's separate rule that
-agents never call `gh pr merge` is enforced at the environment level, not by this module, but
-this module doesn't need or attempt to touch it).
+without a person seeing the full evidence bundle and approving.** `run_gate` checks `approve is
+True` explicitly (not plain truthiness) before ever calling :func:`_create_draft_pr` — a caller
+passing anything other than the literal `True` (a truthy string, a non-empty container) does
+**not** trigger a PR, so the hard rule holds regardless of what a future caller passes, not just
+for today's CLI (whose `argparse action="store_true"` always produces a real `bool` anyway). The
+CLI's own `main()` prints the bundle to the terminal *before* ever calling into the approval
+path — CLAUDE.md's word is "seeing," and a human running `--approve` interactively must see the
+bundle in their own terminal before the PR exists, not after. This module's own test suite
+proves the unapproved path never touches `gh` at all — see `tests/test_gate.py`'s own name for
+that guarantee. Nothing here ever merges anything either (`gh pr create --draft` opens a *draft*;
+CLAUDE.md's separate rule that agents never call `gh pr merge` is enforced at the environment
+level, not by this module, but this module doesn't need or attempt to touch it).
 
 A candidate only reaches the gate once the full T3.2→T3.4 chain agrees: a **specific** verify
 attempt was `verified=True`, *and* the self-review run for **that same attempt** (matched via
@@ -24,7 +29,17 @@ The **risk badge** the DEVPLAN asks for isn't persisted anywhere by an earlier s
 Scout scores candidates at discovery time but (by its own documented design) never writes that
 score back to the KB. Rather than invent a second, redundant risk-scoring KB field, this module
 reuses :func:`~src.agents.scout._score` directly (the same LLM call Scout itself makes) to
-produce a fresh risk/effort/impact readout for the gate — see :func:`_risk_badge`.
+produce a fresh risk/effort/impact readout for the gate — see :func:`_risk_badge`. Known
+cosmetic limitation: `_score`'s own failure log line is prefixed `"scout:"`, since it doesn't
+know it's being called from here — a real hiccup shows up in stderr under the wrong module name,
+but the bundle still assembles fine (`risk=None`), so this doesn't affect correctness.
+
+Unlike every other M3 stage, `run_gate` persists its own outcome (`stage="gate"`: `approved`,
+`pr_url`, `recorded_at`) — the terminal, human-facing checkpoint deserves the same KB audit
+trail T3.2–T3.4 already leave, and a durable record is also what a future caller would need to
+notice "this candidate was already approved" before re-approving it (not implemented here —
+this module doesn't check its own gate history before opening a second PR on a re-run; that
+idempotency check is future work once T3.6 actually exercises repeat runs).
 
 Known limitation, not fixed here: `engineer.py`'s patch is committed to a branch on the MI250
 host's own local checkout, not pushed to the real GitHub remote — `gh pr create --draft --head
@@ -32,7 +47,10 @@ host's own local checkout, not pushed to the real GitHub remote — `gh pr creat
 host, since that's where the commit physically lives) is a prerequisite this module doesn't
 perform itself; DEVPLAN's own T3.5 test bullet scopes this module to "gh invoked" (mocked), not
 to the push step, and guessing at that integration's shape now — before T3.6's first real PR
-actually exercises it — would be premature.
+actually exercises it — would be premature. Also not fixed: `approve` records no approver
+identity, only that *an* approval happened and when — acceptable for a single-operator project
+(the person with shell access on `ce-master`), but a real gap if this ever runs with more than
+one person able to invoke it.
 """
 
 from __future__ import annotations
@@ -41,19 +59,17 @@ import argparse
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from pathlib import Path
 
+from .agents.forecaster import TS_FORMAT
 from .agents.reporter import evidence_url
 from .agents.scout import _score
-from .stages import get_item_or_skip
+from .stages import get_item_or_skip, latest_run, record_run_best_effort
 from .store import resolve_store
 from .store.base import Store
 
 _DEFAULT_GH_TIMEOUT_S = 60.0
-
-
-class GateError(RuntimeError):
-    """`gh` wasn't found on `PATH`, or the `gh pr create` call itself failed."""
 
 
 @dataclass(frozen=True)
@@ -79,9 +95,12 @@ class EvidenceBundle:
 
     def format(self) -> str:
         """A human-readable rendering of the bundle — what the CLI prints before asking for
-        approval, and the body of the draft PR :func:`run_gate` opens once approved."""
+        approval, and the body of the draft PR :func:`run_gate` opens once approved. Reads each
+        vote defensively (`.get`, not `[...]`) since a vote dict's shape is only as trustworthy
+        as whatever wrote it to the store, unlike the rest of this method's own fields, which
+        already default at construction time in :func:`assemble_bundle`."""
         votes_lines = "\n".join(
-            f"  - {'✅' if v['looks_correct'] else '❌'} {v['reason']}"
+            f"  - {'✅' if v.get('looks_correct') else '❌'} {v.get('reason', '(no reason given)')}"
             for v in self.self_review_votes
         )
         risk_line = f"risk={self.risk} effort={self.effort} impact={self.impact}"
@@ -125,30 +144,33 @@ def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | No
     if item is None:
         return None
 
-    verify_runs = store.list_runs(repo=repo, number=number, stage="verify")
-    if not verify_runs:
+    all_runs = store.list_runs(repo=repo, number=number)
+    verify_run = latest_run([r for r in all_runs if r.get("stage") == "verify"])
+    if verify_run is None:
         print(f"gate: no verify run for {repo}#{number}", file=sys.stderr)
         return None
-    verify_run = max(verify_runs, key=lambda r: r.get("recorded_at") or "")
     if not verify_run.get("verified"):
         print(f"gate: most recent verify run for {repo}#{number} is not verified", file=sys.stderr)
         return None
 
+    verify_recorded_at = verify_run.get("recorded_at")
     matching_reviews = [
         r
-        for r in store.list_runs(repo=repo, number=number, stage="self_review")
-        if r.get("verify_recorded_at") == verify_run.get("recorded_at")
+        for r in all_runs
+        if r.get("stage") == "self_review"
+        and verify_recorded_at is not None
+        and r.get("verify_recorded_at") == verify_recorded_at
     ]
-    if not matching_reviews:
+    self_review_run = latest_run(matching_reviews)
+    if self_review_run is None:
         print(f"gate: no self-review for {repo}#{number}'s current verify run", file=sys.stderr)
         return None
-    self_review_run = max(matching_reviews, key=lambda r: r.get("recorded_at") or "")
     if not self_review_run.get("advance"):
         print(f"gate: self-review for {repo}#{number} did not advance", file=sys.stderr)
         return None
 
-    repro_runs = store.list_runs(repo=repo, number=number, stage="repro")
-    repro_run = max(repro_runs, key=lambda r: r.get("recorded_at") or "") if repro_runs else {}
+    reproduced_runs = [r for r in all_runs if r.get("stage") == "repro" and r.get("reproduced")]
+    repro_run = latest_run(reproduced_runs) or {}
 
     title = item.get("title") or ""
     risk, effort, impact = _risk_badge(title, item.get("body") or "")
@@ -205,22 +227,62 @@ def _create_draft_pr(bundle: EvidenceBundle) -> str | None:
     return result.stdout.strip()
 
 
-def run_gate(store: Store, repo: str, number: int, *, approve: bool = False) -> GateResult | None:
-    """Assemble the evidence bundle for (`repo`, `number`) and, **only if `approve` is
-    `True`**, open a draft PR for it.
+def _finalize(
+    store: Store,
+    repo: str,
+    number: int,
+    bundle: EvidenceBundle,
+    *,
+    approve: bool,
+    now: datetime | None = None,
+) -> GateResult:
+    """Approve-or-not `bundle` (`approve is True` is the only thing that ever opens a PR — see
+    module docstring), record the `stage="gate"` outcome, and return the result. Shared by
+    :func:`run_gate` (assemble+decide in one call) and `main` (which prints `bundle` in between
+    assembling and calling this, so the human sees it before any PR exists)."""
+    approved = approve is True
+    pr_url = _create_draft_pr(bundle) if approved else None
+
+    when = now or datetime.now(timezone.utc)
+    record_run_best_effort(
+        store,
+        {
+            "repo": repo,
+            "number": number,
+            "stage": "gate",
+            "approved": approved,
+            "pr_url": pr_url,
+            "recorded_at": when.strftime(TS_FORMAT),
+        },
+        stage="gate",
+        repo=repo,
+        number=number,
+    )
+    return GateResult(repo=repo, number=number, bundle=bundle, approved=approved, pr_url=pr_url)
+
+
+def run_gate(
+    store: Store,
+    repo: str,
+    number: int,
+    *,
+    approve: bool = False,
+    now: datetime | None = None,
+) -> GateResult | None:
+    """Assemble the evidence bundle for (`repo`, `number`) and, **only if `approve` is the
+    literal `True`**, open a draft PR for it. Records the outcome as a `stage="gate"` run
+    regardless (see module docstring).
 
     Returns:
         `None` if the candidate isn't ready for the gate (see :func:`assemble_bundle`; skipped,
-        not raised). Otherwise a :class:`GateResult` — `pr_url` is `None` whenever `approve` is
-        `False` (by construction: :func:`_create_draft_pr` is only ever called in the `approve`
+        not raised). Otherwise a :class:`GateResult` — `pr_url` is `None` whenever `approve`
+        isn't `True` (by construction: :func:`_create_draft_pr` is only ever called in that
         branch) or if the `gh` call itself failed.
     """
     bundle = assemble_bundle(store, repo, number)
     if bundle is None:
         return None
-
-    pr_url = _create_draft_pr(bundle) if approve else None
-    return GateResult(repo=repo, number=number, bundle=bundle, approved=approve, pr_url=pr_url)
+    return _finalize(store, repo, number, bundle, approve=approve, now=now)
 
 
 def _parse_candidate(raw: str) -> tuple[str, int]:
@@ -231,9 +293,11 @@ def _parse_candidate(raw: str) -> tuple[str, int]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """CLI entry point: print the evidence bundle for one candidate, and open a draft PR for
-    it **only** if `--approve` was passed — see module docstring for why that's a hard
-    requirement, not a convenience default.
+    """CLI entry point: print the evidence bundle for one candidate, then — **only** if
+    `--approve` was passed — open a draft PR for it. The bundle is always printed *before* the
+    approval branch runs (see module docstring: CLAUDE.md's "seeing the bundle" requirement
+    means the human's own terminal must show it before any PR exists, even when `--approve` is
+    passed on the very first invocation).
     """
     ap = argparse.ArgumentParser(
         prog="python -m src.gate",
@@ -254,12 +318,14 @@ def main(argv: list[str] | None = None) -> int:
     repo, number = args.candidate
 
     store, _ = resolve_store(args.data_dir)
-    result = run_gate(store, repo, number, approve=args.approve)
-    if result is None:
+    bundle = assemble_bundle(store, repo, number)
+    if bundle is None:
         print(f"{repo}#{number} is not ready for the gate (see stderr for why).")
         return 1
 
-    print(result.bundle.format())
+    print(bundle.format())
+
+    result = _finalize(store, repo, number, bundle, approve=args.approve)
     if args.approve:
         print(f"\nOpened draft PR: {result.pr_url}" if result.pr_url else "\ngh pr create failed.")
     else:

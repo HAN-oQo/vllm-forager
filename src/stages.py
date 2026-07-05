@@ -7,9 +7,11 @@ so a fourth stage doesn't retype them from memory of an earlier one's version.
 "call the LLM, catch `llm.LLMError`, require a dict reply" shell around a schema call — with
 two call sites (T3.2, T3.3) this stayed inline per-module, matching CLAUDE.md's "three similar
 lines is better than a premature abstraction"; a third *whole copy of the same function* crossed
-that line. What's still deliberately NOT shared: extracting/validating a reply's own fields —
-that differs in shape per stage (a repro command vs. a patch vs. a bool+reason vote) and stays
-in each stage's own module.
+that line. `latest_run` was added the same way once "find the most-recently-recorded run in a
+list, by `recorded_at`" appeared identically in `engineer.py`, `self_review.py`, and three
+places in `gate.py` (T3.5) — five copies of one `max(...)` expression. What's still deliberately
+NOT shared: extracting/validating a reply's own fields — that differs in shape per stage (a
+repro command vs. a patch vs. a bool+reason vote) and stays in each stage's own module.
 """
 
 from __future__ import annotations
@@ -27,6 +29,16 @@ def get_item_or_skip(store: Store, repo: str, number: int, *, stage: str) -> dic
     if item is None:
         print(f"{stage}: no KB record for {repo}#{number}", file=sys.stderr)
     return item
+
+
+def latest_run(runs: list[dict]) -> dict | None:
+    """The most recently recorded run in `runs` (by `recorded_at`, missing treated as oldest),
+    or `None` if `runs` is empty — one consistent "no run" sentinel, unlike each call site
+    picking its own (a stray `{}` fallback in one spot behaves differently from `None` in
+    another when a caller forgets to check first)."""
+    if not runs:
+        return None
+    return max(runs, key=lambda r: r.get("recorded_at") or "")
 
 
 def complete_or_none(prompt: str, schema: dict, *, stage: str, subject: str) -> dict | None:
