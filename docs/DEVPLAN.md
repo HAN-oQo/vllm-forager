@@ -369,7 +369,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** a passing test can still hide a bad patch (reward-hacking, side effects) — an adversarial vote catches what the hardware check can't, before spending the human's attention.
   - **e.g.:** 5 critiques, 4 say "correct" → advance to human gate; a 3–2 split → hold, don't gate.
   - **Test:** `tests/test_self_review.py` — mock llm votes: majority-approve ⇒ advance; split/reject ⇒ hold (no gate).
-- [ ] **T3.5 Human gate** — assemble `{diff, risk badge, repro evidence, MI250 logs, self-review votes}`; `gh pr create --draft` **only** after an explicit approve flag.
+- [x] **T3.5 Human gate** — assemble `{diff, risk badge, repro evidence, MI250 logs, self-review votes}`; `gh pr create --draft` **only** after an explicit approve flag.
   - **Why:** the mandatory human checkpoint — nothing reaches upstream vLLM without a person seeing the full evidence bundle and approving (reputation safety).
   - **e.g.:** `engineer --candidate d` prints the bundle; only `--approve` triggers `gh pr create --draft`.
   - **Test:** `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked). **HARD: nothing reaches upstream without approval.**

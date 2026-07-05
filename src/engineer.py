@@ -55,7 +55,7 @@ from datetime import datetime, timezone
 
 from . import runner
 from .agents.forecaster import TS_FORMAT
-from .stages import complete_or_none, get_item_or_skip, record_run_best_effort
+from .stages import complete_or_none, get_item_or_skip, latest_run, record_run_best_effort
 from .store.base import MAX_RUN_LOG_CHARS, Store
 
 _PATCH_SCHEMA = {
@@ -210,10 +210,10 @@ def run_engineer(
     baseline_runs = [
         r for r in store.list_runs(repo=repo, number=number, stage="repro") if r.get("reproduced")
     ]
-    if not baseline_runs:
+    baseline = latest_run(baseline_runs)
+    if baseline is None:
         print(f"engineer: no reproduced baseline for {repo}#{number}", file=sys.stderr)
         return None
-    baseline = max(baseline_runs, key=lambda r: r.get("recorded_at") or "")
 
     item = get_item_or_skip(store, repo, number, stage="engineer")
     if item is None:
