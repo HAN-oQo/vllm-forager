@@ -47,6 +47,28 @@ def test_discover_candidates_from_parity_gap(monkeypatch: pytest.MonkeyPatch) ->
     assert "fp8-kv-cache" in candidates[0].title
 
 
+def test_discover_candidates_skips_gap_with_no_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a Gap with evidence=None (parity.py's own documented case when no shipped
+    item's URL resolves) used to produce a Candidate(evidence="") -- a fabricated-empty
+    citation, not real evidence. Such a gap is now skipped instead of ranked."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    gap = parity.Gap(capability="fp8-kv-cache", evidence=None)
+
+    assert scout.discover_candidates([], [gap]) == []
+
+
+def test_discover_candidates_good_first_issue_hyphenated_label(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    items = [_item("o/r", 1, title="fix typo", labels=["good-first-issue"])]
+
+    candidates = scout.discover_candidates(items)
+
+    assert len(candidates) == 1
+    assert candidates[0].source == "good-first-issue"
+
+
 def test_discover_candidates_good_first_issue(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
     items = [_item("o/r", 1, title="fix typo", labels=["good first issue"])]
@@ -199,3 +221,20 @@ def test_discover_from_store(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources = {c.source for c in candidates}
     assert "rocm-reproducible" in sources
     assert "parity-gap" in sources
+
+
+def test_discover_from_store_degrades_gracefully_on_parity_error(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a config.REPOS misconfiguration (no fork/primary role) used to crash the
+    whole run via an uncaught parity.ParityError, losing the good-first-issue/rocm-reproducible
+    sources too, even though neither depends on parity gaps at all."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, title="hipBLAS bug on gfx90a")])
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    monkeypatch.setattr(parity.config, "REPOS", [{"slug": "o/r", "role": "primary"}])
+
+    candidates = scout.discover_from_store(store)
+
+    assert len(candidates) == 1
+    assert candidates[0].source == "rocm-reproducible"
