@@ -8,12 +8,15 @@ from datetime import datetime, timezone
 
 import pytest
 
-from src import gate, llm, pr_quality
+from src import llm, pr_quality
 from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m3
 
 _NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
+
+
+_VERIFY_RECORDED_AT = "2025-12-31T00:00:00Z"
 
 
 def _store_ready_for_quality(
@@ -22,6 +25,7 @@ def _store_ready_for_quality(
     repo="o/r",
     number=1,
     pr_author_recorded_at="2026-01-01T00:00:00Z",
+    pr_author_verify_recorded_at=_VERIFY_RECORDED_AT,
     title="[Bugfix] Fix fp8 assertion on gfx90a",
     body="## Problem\n...\n\nFixes #1",
 ):
@@ -51,7 +55,7 @@ def _store_ready_for_quality(
             "patch": "--- a/x.py\n+++ b/x.py\n",
             "log": "1 passed\n",
             "verified": True,
-            "recorded_at": "2025-12-31T00:00:00Z",
+            "recorded_at": _VERIFY_RECORDED_AT,
         }
     )
     store.record_run(
@@ -63,7 +67,7 @@ def _store_ready_for_quality(
             "approve_count": 4,
             "total_votes": 5,
             "advance": True,
-            "verify_recorded_at": "2025-12-31T00:00:00Z",
+            "verify_recorded_at": _VERIFY_RECORDED_AT,
             "recorded_at": "2025-12-31T12:00:00Z",
         }
     )
@@ -75,6 +79,7 @@ def _store_ready_for_quality(
                 "stage": "pr_author",
                 "title": title,
                 "body": body,
+                "verify_recorded_at": pr_author_verify_recorded_at,
                 "recorded_at": pr_author_recorded_at,
             }
         )
@@ -95,13 +100,11 @@ def _fail_if_llm_called(*a, **k):
 
 
 @pytest.fixture(autouse=True)
-def _mock_risk_score(monkeypatch: pytest.MonkeyPatch):
-    """`gate.assemble_bundle` calls `_risk_badge` (scout's own real LLM call) -- isolate every
-    test from it the same way tests/test_gate.py does, so the `llm.complete` mocks below only
-    ever see pr_quality's own judge calls."""
-    monkeypatch.setattr(
-        gate, "_score", lambda *a, **k: {"risk": "low", "effort": "low", "impact": "medium"}
-    )
+def _no_profile_fetch(monkeypatch: pytest.MonkeyPatch):
+    """`get_profile` hits live GitHub on a cache miss -- keep every test in this file offline by
+    defaulting to no profile unless a test overrides `pr_quality.get_profile` (or passes
+    `profile=`) itself."""
+    monkeypatch.setattr(pr_quality, "get_profile", lambda repo, **k: None)
 
 
 # --------------------------------------------------------------------- run_pr_quality: voting
@@ -230,6 +233,9 @@ def test_returns_none_when_not_gate_ready(tmp_path, monkeypatch: pytest.MonkeyPa
 
 
 def test_ignores_stale_pr_author_run_recorded_at(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """`latest_run` must pick the most recent `stage=\"pr_author\"` record, not an older one --
+    both composed against the same (current) verify run here, so this exercises only the
+    latest-run selection, not the separate verify_recorded_at staleness guard below."""
     store = _store_ready_for_quality(tmp_path, pr_author_recorded_at="2025-01-01T00:00:00Z")
     store.record_run(
         {
@@ -238,6 +244,7 @@ def test_ignores_stale_pr_author_run_recorded_at(tmp_path, monkeypatch: pytest.M
             "stage": "pr_author",
             "title": "newer title",
             "body": "newer body",
+            "verify_recorded_at": _VERIFY_RECORDED_AT,
             "recorded_at": "2026-06-01T00:00:00Z",
         }
     )
@@ -247,6 +254,35 @@ def test_ignores_stale_pr_author_run_recorded_at(tmp_path, monkeypatch: pytest.M
 
     assert result is not None
     assert result.pr_author_recorded_at == "2026-06-01T00:00:00Z"
+
+
+def test_returns_none_when_pr_author_composed_against_a_different_verify_run(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression guard: a candidate re-verified (e.g. a follow-up fix) after T3.9 composed its
+    narrative must not have that stale narrative judged against the new diff."""
+    store = _store_ready_for_quality(tmp_path, pr_author_verify_recorded_at="2025-01-01T00:00:00Z")
+    monkeypatch.setattr(llm, "complete", _fail_if_llm_called)
+
+    assert pr_quality.run_pr_quality(store, "o/r", 1) is None
+
+
+def test_judges_when_pr_author_verify_recorded_at_matches_current(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_quality(tmp_path)  # default already matches _VERIFY_RECORDED_AT
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, True, True))
+
+    result = pr_quality.run_pr_quality(store, "o/r", 1, now=_NOW)
+
+    assert result is not None
+    assert result.passes is True
+
+
+def test_raises_for_n_less_than_one(tmp_path) -> None:
+    store = _store_ready_for_quality(tmp_path)
+    with pytest.raises(pr_quality.PRQualityError, match=r"n must be >= 1"):
+        pr_quality.run_pr_quality(store, "o/r", 1, n=0)
 
 
 # --------------------------------------------------------------------- _judge

@@ -496,6 +496,7 @@ def test_bundle_includes_risk_badge(tmp_path, monkeypatch: pytest.MonkeyPatch) -
     assert bundle.diff == "--- a/x.py\n+++ b/x.py\n"
     assert bundle.branch == "forager/o-r-1"
     assert bundle.evidence_url == "https://github.com/o/r/issues/1"
+    assert bundle.verify_recorded_at == "2025-12-31T00:00:00Z"
     assert bundle.approve_count == 4
     assert bundle.total_votes == 5
 
@@ -552,6 +553,34 @@ def test_critique_missing_reason_does_not_crash_format(
     bundle = gate.assemble_bundle(store, "o/r", 1)
     assert bundle is not None
     bundle.format()  # must not raise
+
+
+# --------------------------------------------------------------------- verified_diff
+
+
+def test_verified_diff_returns_diff_and_recorded_at_when_ready(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+
+    def _fail_if_scored(*a, **k):
+        raise AssertionError("_score should not be called by verified_diff")
+
+    monkeypatch.setattr(gate, "_score", _fail_if_scored)
+
+    result = gate.verified_diff(store, "o/r", 1)
+
+    assert result == ("--- a/x.py\n+++ b/x.py\n", "2025-12-31T00:00:00Z")
+
+
+def test_verified_diff_returns_none_when_not_verified(tmp_path) -> None:
+    store = _store_ready_for_gate(tmp_path, verified=False)
+    assert gate.verified_diff(store, "o/r", 1) is None
+
+
+def test_verified_diff_returns_none_when_self_review_did_not_advance(tmp_path) -> None:
+    store = _store_ready_for_gate(tmp_path, advance=False)
+    assert gate.verified_diff(store, "o/r", 1) is None
 
 
 # --------------------------------------------------------------------- CLI ordering
