@@ -373,11 +373,22 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the mandatory human checkpoint — nothing reaches upstream vLLM without a person seeing the full evidence bundle and approving (reputation safety).
   - **e.g.:** `engineer --candidate d` prints the bundle; only `--approve` triggers `gh pr create --draft`.
   - **Test:** `tests/test_gate.py` — unapproved ⇒ `gh` never called; approved ⇒ `gh` invoked (subprocess mocked). **HARD: nothing reaches upstream without approval.**
-- [ ] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
+- [x] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
   - **Why:** the project's first actual upstream deliverable — proves the whole pipeline end-to-end on a low-risk change before attempting harder fixes.
   - **e.g.:** a docs/typing fix flows repro→patch→verify→self-review→approve→ a real draft PR URL on vllm-project/vllm.
   - **Test:** manual/`integration` — **draft PR URL pasted here**; checked only then.
-  - **Note:** PR URL = …
+  - **Note:** PR URL = https://github.com/vllm-project/vllm/pull/47645 — test-only candidate
+    (vllm-project/vllm#21948), not a bug fix: repro found the issue's suspected "LLMEngine +
+    CUMULATIVE" bug does *not* reproduce on current main, so the patch adds the missing
+    parametrized test coverage instead (asserting monotonic cumulative growth, the exact
+    property that would fail if the suspected bug were real). Self-review: 4/5 approve. Known
+    gaps surfaced by this real run (not fixed retroactively here, see follow-up PRs): (1) the
+    repro→engineer schema assumes "bug reproduces → patch flips it," which doesn't fit a
+    test-coverage-only candidate — its KB `stage="repro"` record needed `reproduced=False`
+    (honest) which the standard bundle template renders as a blank Repro section; (2)
+    `gate._create_draft_pr` didn't account for a fork/cross-repo `--head owner:branch` — the
+    automatic `gh pr create` failed and the PR above was opened with a manual corrected
+    invocation instead.
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
