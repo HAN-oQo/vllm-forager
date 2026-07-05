@@ -50,6 +50,7 @@ Known limitations, not fixed here:
 from __future__ import annotations
 
 import dataclasses
+import shlex
 import sys
 from datetime import datetime, timezone
 
@@ -149,10 +150,23 @@ def synthesize_patch(title: str, body: str, failing_log: str) -> str | None:
     return patch.strip() if isinstance(patch, str) and patch.strip() else None
 
 
-def _verify_command(branch: str, patch: str, repro_command: str, *, base_ref: str) -> str:
+def _verify_command(
+    branch: str, patch: str, repro_command: str, *, base_ref: str, repo_dir: str | None = None
+) -> str:
     """One remote shell **script** (not a single `&&`-chain — see below): reset `branch` to a
     clean `base_ref`, apply `patch` via a heredoc, commit it, then re-run `repro_command` — the
     exact command T3.2 originally captured a failing signal from.
+
+    `repo_dir`, if given, is `cd`'d into right after `set -e` (not before — a `cd` that runs
+    before `set -e` takes effect can fail without aborting the script, silently leaving every
+    later git operation running in the ssh session's default directory instead; verified
+    directly: `bash -c "cd /no-such-dir; set -e; echo reached"` prints "reached" and exits 0)
+    — per :mod:`~src.runner`'s own documented contract ("a caller that needs `command` to run
+    inside a specific checkout composes that itself"), plain `ssh host command` lands in the ssh
+    session's default directory, not necessarily the checkout; nothing below this line works
+    otherwise. Quoted via :func:`shlex.quote` since a real checkout path is not guaranteed to be
+    free of spaces/shell metacharacters. Left `None` (default) to preserve prior behavior: assume
+    the ssh session's own default directory is already the checkout.
 
     Uses ``set -e`` plus one statement per line, not `cmd1 && cmd2 <<'EOF' ... EOF && cmd3`: a
     heredoc's closing delimiter must be alone on its own line, which ends the *enclosing*
@@ -174,6 +188,7 @@ def _verify_command(branch: str, patch: str, repro_command: str, *, base_ref: st
     return "\n".join(
         [
             "set -e",
+            *([f"cd {shlex.quote(repo_dir)}"] if repo_dir else []),
             f"git checkout -B {branch} {base_ref}",
             "git clean -fd",
             f"git apply <<'{_PATCH_HEREDOC_DELIMITER}'",
@@ -193,11 +208,17 @@ def run_engineer(
     host: str,
     *,
     base_ref: str = DEFAULT_BASE_REF,
+    repo_dir: str | None = None,
     timeout: float = DEFAULT_ENGINEER_TIMEOUT_S,
     now: datetime | None = None,
 ) -> EngineerResult | None:
     """Synthesize a patch for (`repo`, `number`), apply and rebuild/test it on `host`, record
     the result to `store`, and return it.
+
+    `repo_dir`, if given, is the checkout's actual absolute path on `host` — passed through to
+    :func:`_verify_command` so its git operations land inside the real checkout instead of
+    whichever directory the ssh session happens to default to (see that function's own
+    docstring). Left `None` (default) to preserve prior behavior.
 
     Returns:
         `None` if there's no reproduced T3.2 baseline run for (`repo`, `number`), `store` has
@@ -226,7 +247,9 @@ def run_engineer(
         return None
 
     branch = _branch_name(repo, number)
-    command = _verify_command(branch, patch, baseline.get("command") or "", base_ref=base_ref)
+    command = _verify_command(
+        branch, patch, baseline.get("command") or "", base_ref=base_ref, repo_dir=repo_dir
+    )
     result = runner.run(host, command, timeout=timeout)
     when = now or datetime.now(timezone.utc)
     engineer_result = EngineerResult(
