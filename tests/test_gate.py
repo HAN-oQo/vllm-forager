@@ -82,6 +82,15 @@ def _fail_if_gh_called(*a, **k):
     raise AssertionError("gh (subprocess.run) should not be called")
 
 
+def _approve_then_submit(store, repo, number, **kwargs):
+    """T3.7's `draft_is_new` check requires the draft to already exist from an earlier, separate
+    call before `submit=True` actually submits (see `gate.py`'s own module docstring) -- do the
+    required first bare `approve=True` call (creates the draft) and return the second call's
+    result (the draft already exists by then, so this one actually attempts submission)."""
+    gate.run_gate(store, repo, number, approve=True)
+    return gate.run_gate(store, repo, number, approve=True, submit=True, **kwargs)
+
+
 @pytest.fixture(autouse=True)
 def _mock_risk_score(monkeypatch: pytest.MonkeyPatch):
     """Isolate every test from the real LLM call `_risk_badge` makes (scout's own `_score`) --
@@ -128,7 +137,7 @@ def test_approved_and_submitted_calls_gh(tmp_path, monkeypatch: pytest.MonkeyPat
 
     monkeypatch.setattr(gate.subprocess, "run", _fake_run)
 
-    result = gate.run_gate(store, "o/r", 1, approve=True, submit=True)
+    result = _approve_then_submit(store, "o/r", 1)
 
     assert result is not None
     assert result.approved is True
@@ -139,6 +148,51 @@ def test_approved_and_submitted_calls_gh(tmp_path, monkeypatch: pytest.MonkeyPat
     assert cmd[:4] == ["gh", "pr", "create", "--draft"]
     assert "--repo" in cmd and "o/r" in cmd
     assert "--head" in cmd and "forager/o-r-1" in cmd
+
+
+def test_approve_and_submit_together_on_first_call_does_not_submit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The core residual gap a code-review finding raised on this very fix: two required flags
+    checked in one function call are still just as easy to pass together on a single command
+    line as the one flag they replaced. `submit=True` must be inert the first time a candidate
+    is ever approved -- the draft has to exist from an *earlier*, separate call first."""
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    result = gate.run_gate(store, "o/r", 1, approve=True, submit=True)
+
+    assert result is not None
+    assert result.approved is True
+    assert result.submitted is False
+    assert result.pr_url is None
+    assert result.draft_is_new is True
+    assert result.draft_path is not None
+    assert result.draft_path.exists()
+
+
+def test_approve_and_submit_on_a_later_call_does_submit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Once a draft already exists from an earlier call, a later approve+submit call actually
+    submits -- the fix requires a temporal gap between the two, not a permanent block."""
+    store = _store_ready_for_gate(tmp_path)
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/o/r/pull/99\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run)
+
+    gate.run_gate(store, "o/r", 1, approve=True)  # first call: writes the draft only
+    result = gate.run_gate(store, "o/r", 1, approve=True, submit=True)  # second: submits
+
+    assert result is not None
+    assert result.submitted is True
+    assert result.draft_is_new is False
+    assert result.pr_url == "https://github.com/o/r/pull/99"
+    assert len(calls) == 1
 
 
 def test_approved_without_submit_never_calls_gh_but_writes_draft(
@@ -207,7 +261,7 @@ def test_approved_with_fork_owner_prefixes_head(tmp_path, monkeypatch: pytest.Mo
 
     monkeypatch.setattr(gate.subprocess, "run", _fake_run)
 
-    result = gate.run_gate(store, "o/r", 1, approve=True, submit=True, fork_owner="HAN-oQo")
+    result = _approve_then_submit(store, "o/r", 1, fork_owner="HAN-oQo")
 
     assert result is not None
     assert result.pr_url == "https://github.com/o/r/pull/99"
@@ -230,7 +284,7 @@ def test_approved_without_fork_owner_leaves_head_unprefixed(
 
     monkeypatch.setattr(gate.subprocess, "run", _fake_run)
 
-    gate.run_gate(store, "o/r", 1, approve=True, submit=True)
+    _approve_then_submit(store, "o/r", 1)
 
     cmd = calls[0]
     assert cmd[cmd.index("--head") + 1] == "forager/o-r-1"
@@ -246,7 +300,7 @@ def test_gh_failure_still_returns_result_with_no_pr_url(
 
     monkeypatch.setattr(gate.subprocess, "run", _raise)
 
-    result = gate.run_gate(store, "o/r", 1, approve=True, submit=True)
+    result = _approve_then_submit(store, "o/r", 1)
 
     assert result is not None
     assert result.approved is True
@@ -280,14 +334,14 @@ def test_run_gate_records_its_own_outcome(tmp_path, monkeypatch: pytest.MonkeyPa
         lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
     )
 
-    gate.run_gate(store, "o/r", 1, approve=True, submit=True)
+    _approve_then_submit(store, "o/r", 1)
 
     gate_runs = store.list_runs(repo="o/r", number=1, stage="gate")
-    assert len(gate_runs) == 1
-    assert gate_runs[0]["approved"] is True
-    assert gate_runs[0]["submitted"] is True
-    assert gate_runs[0]["pr_url"] == "https://x/pull/1"
-    assert gate_runs[0]["draft_path"] is not None
+    assert len(gate_runs) == 2  # one per call: first approve-only, then approve+submit
+    assert gate_runs[-1]["approved"] is True
+    assert gate_runs[-1]["submitted"] is True
+    assert gate_runs[-1]["pr_url"] == "https://x/pull/1"
+    assert gate_runs[-1]["draft_path"] is not None
 
 
 def test_run_gate_records_fork_owner_in_its_own_outcome(
@@ -503,18 +557,37 @@ def test_critique_missing_reason_does_not_crash_format(
 # --------------------------------------------------------------------- CLI ordering
 
 
+def test_cli_first_approve_submit_together_does_not_submit(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """The CLI-level version of the core T3.7 residual-gap fix: `--approve --submit` together
+    on the very first invocation for a candidate must not open a PR."""
+    _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    rc = gate.main(["--candidate", "o/r#1", "--approve", "--submit", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "NOT submitted" in out
+    assert "first time" in out
+
+
 def test_cli_prints_bundle_before_opening_pr(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
     """Regression: CLAUDE.md's word is 'seeing' -- the bundle must appear in the human's
-    terminal before any PR exists, even on a single `--candidate X --approve --submit`
-    invocation."""
+    terminal before any PR exists. Requires two separate invocations now (see
+    `test_cli_first_approve_submit_together_does_not_submit`): the first creates the draft,
+    the second (this test's actual assertion) submits it."""
     _store_ready_for_gate(tmp_path)  # populates the JsonlStore the CLI itself will open
     monkeypatch.setattr(
         gate.subprocess,
         "run",
         lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
     )
+    gate.main(["--candidate", "o/r#1", "--approve", "--data-dir", str(tmp_path)])
+    capsys.readouterr()  # discard the first call's output
 
     rc = gate.main(["--candidate", "o/r#1", "--approve", "--submit", "--data-dir", str(tmp_path)])
 
@@ -570,6 +643,7 @@ def test_cli_fork_owner_flag_prefixes_head(tmp_path, monkeypatch: pytest.MonkeyP
 
     monkeypatch.setattr(gate.subprocess, "run", _fake_run)
 
+    gate.main(["--candidate", "o/r#1", "--approve", "--data-dir", str(tmp_path)])
     gate.main(
         [
             "--candidate",

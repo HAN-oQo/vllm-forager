@@ -18,7 +18,15 @@ second, unambiguous decision, distinct from "this candidate looks correct."
   code path in this whole codebase that opens a PR against an upstream repo. Checked as `approve
   is True and submit is True` (not plain truthiness — see below), so a caller passing anything
   other than the literal `True` for either flag never submits, regardless of what a future caller
-  passes.
+  passes. **`submit` only takes effect if a draft for this exact candidate already existed
+  *before* this call** (`GateResult.draft_is_new` reports which) — a review finding on this very
+  fix pointed out that two required flags checked in one function call are still just as easy to
+  pass together, out of habit, on a single command line as the one flag they replaced. Requiring
+  the draft to predate the submit call forces at least two *separate* invocations: one that
+  writes the draft (nothing to review yet — `submit` is silently inert on this first call even
+  if passed), and a later one, after a human has had the chance to actually open and read the
+  file, that submits it. This still can't verify anyone *did* read it — no code-only mechanism
+  can — but it closes the specific gap of "both flags, one command, no real gap in between."
 - `approve=False`: no draft, no submission, regardless of `submit` — matches CLAUDE.md's mandatory
   human checkpoint (**HARD requirement: nothing reaches upstream without a person seeing the full
   evidence bundle and approving**). The CLI's own `main()` still prints the bundle *before* ever
@@ -88,8 +96,11 @@ _DEFAULT_GH_TIMEOUT_S = 60.0
 
 # Where approved-but-not-yet-submitted PR bodies land -- a real file a human can open and read
 # at leisure, not just fast-scrolling terminal output (see module docstring's own incident note
-# on why "seeing the bundle" print alone wasn't a strong enough safeguard).
-_PR_DRAFTS_DIR = config.DATA_DIR / "pr_drafts"
+# on why "seeing the bundle" print alone wasn't a strong enough safeguard). A single named
+# constant, not a literal repeated at both the default (below) and the CLI's --data-dir override
+# (in main()), so the two can't drift out of sync.
+_PR_DRAFTS_SUBDIR = "pr_drafts"
+_PR_DRAFTS_DIR = config.DATA_DIR / _PR_DRAFTS_SUBDIR
 
 
 @dataclass(frozen=True)
@@ -139,9 +150,13 @@ class EvidenceBundle:
 class GateResult:
     """The outcome of one :func:`run_gate` call.
 
-    `submitted` (`approved and submit is True`) is the only condition under which `pr_url` can be
-    non-`None` — `approved` alone means only `draft_path` was written, no PR was opened (see
-    module docstring for why these are two separate flags). `fork_owner` records what was
+    `submitted` means submission was *attempted* (`approved`, `submit is True`, and the draft
+    already existed from an earlier call — see module docstring) — it does **not** mean `gh pr
+    create` succeeded; check `pr_url` for that (`submitted=True, pr_url=None` is exactly the
+    "gh call failed" case). `approved` alone (`submitted=False`) means only `draft_path` was
+    written, no PR was opened. `draft_is_new` is `True` when *this* call is the one that wrote
+    the candidate's draft file for the first time — the reason `submitted` came back `False`
+    even though `submit=True` was passed is almost always this. `fork_owner` records what was
     actually passed (or `None`) — the KB's own audit trail for a cross-repo PR should show which
     fork the head branch was addressed against, not just that approval happened."""
 
@@ -153,6 +168,7 @@ class GateResult:
     pr_url: str | None = None
     fork_owner: str | None = None
     draft_path: Path | None = None
+    draft_is_new: bool = False
 
 
 def _risk_badge(title: str, body: str) -> tuple[str | None, str | None, str | None]:
@@ -226,28 +242,34 @@ def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | No
 def _pr_draft_path(repo: str, number: int, *, drafts_dir: Path | None = None) -> Path:
     """Where :func:`_write_pr_draft` puts (and a human can find) one candidate's draft — matches
     :func:`~src.engineer._branch_name`'s own ``repo.replace("/", "-")`` convention so the two are
-    trivially correlated by eye. `drafts_dir` left `None` (default) looks up `_PR_DRAFTS_DIR`
-    (`config.DATA_DIR`'s own location) *at call time*, not `def`-time, specifically so tests can
-    monkeypatch the module-level constant — every caller that already knows a specific data dir
-    (the CLI's own `--data-dir`) should pass its own explicitly, though, since a caller pointed
-    at a test/alternate store would otherwise still have its drafts land in the real shared
-    `config.DATA_DIR` (this was a real bug caught by this module's own Demo run)."""
+    trivially correlated by eye. `drafts_dir` left `None` (default) re-reads the module-level
+    `_PR_DRAFTS_DIR` attribute (itself `config.DATA_DIR`'s value at `gate.py` import time) at
+    call time rather than binding it into this function's own signature at `def`-time —
+    specifically so tests can `monkeypatch.setattr(gate, "_PR_DRAFTS_DIR", ...)`. Every caller
+    that already knows a specific data dir (the CLI's own `--data-dir`) should still pass its own
+    explicitly, though: a caller pointed at a test/alternate store would otherwise have its
+    drafts land in the real shared `config.DATA_DIR` regardless (this was a real bug caught by
+    this module's own Demo run)."""
     return (drafts_dir or _PR_DRAFTS_DIR) / f"{repo.replace('/', '-')}-{number}.md"
 
 
-def _write_pr_draft(bundle: EvidenceBundle, *, drafts_dir: Path | None = None) -> Path:
-    """Write `bundle.format()` to disk and return the path — the artifact a human reviews (at
-    their own pace, in their own editor) before ever running `--submit`. Content is identical to
-    what the CLI already prints; raising the bar on the *content* itself (structured problem /
-    root-cause / repro sections, not a raw evidence dump) is M3.5's T3.9, not this fix."""
+def _write_pr_draft(bundle: EvidenceBundle, body: str, *, drafts_dir: Path | None = None) -> Path:
+    """Write `body` (`bundle.format()`, rendered once by the caller — see `_finalize`) to disk
+    and return the path — the artifact a human reviews (at their own pace, in their own editor)
+    before ever running `--submit`. Content is identical to what the CLI already prints; raising
+    the bar on the *content* itself (structured problem / root-cause / repro sections, not a raw
+    evidence dump) is M3.5's T3.9, not this fix."""
     path = _pr_draft_path(bundle.repo, bundle.number, drafts_dir=drafts_dir)
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(bundle.format())
+    path.write_text(body)
     return path
 
 
-def _create_draft_pr(bundle: EvidenceBundle, *, fork_owner: str | None = None) -> str | None:
-    """`gh pr create --draft` for `bundle`'s branch — the PR URL `gh` prints on success, or
+def _create_draft_pr(
+    bundle: EvidenceBundle, body: str, *, fork_owner: str | None = None
+) -> str | None:
+    """`gh pr create --draft` for `bundle`'s branch, with `body` (`bundle.format()`, rendered
+    once by the caller — see `_finalize`) as the PR body — the PR URL `gh` prints on success, or
     `None` if the call failed (logged, not raised: the evidence bundle was still validly
     assembled and approved, only the PR creation step itself failed).
 
@@ -270,7 +292,7 @@ def _create_draft_pr(bundle: EvidenceBundle, *, fork_owner: str | None = None) -
         "--title",
         f"[vllm-forager] Fix for {bundle.repo}#{bundle.number}",
         "--body",
-        bundle.format(),
+        body,
     ]
     try:
         result = subprocess.run(
@@ -299,12 +321,16 @@ def _finalize(
     pr_drafts_dir: Path | None = None,
     now: datetime | None = None,
 ) -> GateResult:
-    """Approve-or-not `bundle`, submit-or-not the approved draft (`approve is True and submit is
-    True` is the only thing that ever opens a real PR — see module docstring for why these are
-    two separate, both-required flags), record the `stage="gate"` outcome, and return the
-    result. Shared by :func:`run_gate` (assemble+decide in one call) and `main` (which prints
-    `bundle` in between assembling and calling this, so the human sees it before any decision is
-    acted on).
+    """Approve-or-not `bundle`, submit-or-not the approved draft, record the `stage="gate"`
+    outcome, and return the result. Shared by :func:`run_gate` (assemble+decide in one call) and
+    `main` (which prints `bundle` in between assembling and calling this, so the human sees it
+    before any decision is acted on).
+
+    Opening a real PR (:func:`_create_draft_pr`) requires **three** things, not two: `approve is
+    True`, `submit is True`, AND the candidate's draft file already existing *before* this call
+    (i.e. written by an earlier, separate call) — see module docstring for why the third
+    condition exists. `GateResult.draft_is_new` reports whether this call was the one that
+    created it, which is almost always why `submit=True` didn't actually submit.
 
     `fork_owner` is passed straight through to :func:`_create_draft_pr` — see its own docstring
     — and persisted in the `stage="gate"` record too, so the KB's own audit trail for a
@@ -313,9 +339,19 @@ def _finalize(
     alternate store (the CLI's `--data-dir`) should pass its own, see `_pr_draft_path`'s own
     docstring for why."""
     approved = approve is True
-    submitted = approved and submit is True
-    draft_path = _write_pr_draft(bundle, drafts_dir=pr_drafts_dir) if approved else None
-    pr_url = _create_draft_pr(bundle, fork_owner=fork_owner) if submitted else None
+    draft_is_new = False
+    draft_path = None
+    body = None
+    if approved:
+        body = bundle.format()
+        target_path = _pr_draft_path(repo, number, drafts_dir=pr_drafts_dir)
+        draft_is_new = not target_path.exists()
+        draft_path = _write_pr_draft(bundle, body, drafts_dir=pr_drafts_dir)
+    submitted = approved and submit is True and not draft_is_new
+    pr_url = None
+    if submitted:
+        assert body is not None  # submitted implies approved implies body was set above
+        pr_url = _create_draft_pr(bundle, body, fork_owner=fork_owner)
 
     when = now or datetime.now(timezone.utc)
     record_run_best_effort(
@@ -329,6 +365,7 @@ def _finalize(
             "pr_url": pr_url,
             "fork_owner": fork_owner,
             "draft_path": str(draft_path) if draft_path else None,
+            "draft_is_new": draft_is_new,
             "recorded_at": when.strftime(TS_FORMAT),
         },
         stage="gate",
@@ -344,6 +381,7 @@ def _finalize(
         pr_url=pr_url,
         fork_owner=fork_owner,
         draft_path=draft_path,
+        draft_is_new=draft_is_new,
     )
 
 
@@ -359,9 +397,10 @@ def run_gate(
     now: datetime | None = None,
 ) -> GateResult | None:
     """Assemble the evidence bundle for (`repo`, `number`); if `approve` is the literal `True`,
-    write a local PR-draft file; **only if both `approve` and `submit` are the literal `True`**,
-    additionally open a real PR against `repo`. Records the outcome as a `stage="gate"` run
-    regardless (see module docstring for why these are two separate, both-required flags).
+    write a local PR-draft file; **only if `approve` and `submit` are both the literal `True`
+    AND the draft already existed from an earlier, separate call**, additionally open a real PR
+    against `repo`. Records the outcome as a `stage="gate"` run regardless (see module docstring
+    for why submission needs a third, temporal condition on top of the two flags).
 
     `fork_owner`, if given (e.g. `"HAN-oQo"`), tells `gh` the branch lives on that fork rather
     than `repo` itself — see :func:`_create_draft_pr`'s own docstring for why this is required
@@ -371,9 +410,10 @@ def run_gate(
 
     Returns:
         `None` if the candidate isn't ready for the gate (see :func:`assemble_bundle`; skipped,
-        not raised). Otherwise a :class:`GateResult` — `pr_url` is `None` whenever `approve` and
-        `submit` aren't both `True` (by construction: :func:`_create_draft_pr` is only ever
-        called in that branch) or if the `gh` call itself failed.
+        not raised). Otherwise a :class:`GateResult` — check `submitted` (not just `approve`/
+        `submit`, the arguments) for whether submission was actually attempted, and `pr_url` for
+        whether it actually succeeded; `draft_is_new` explains a `submitted=False` despite
+        `submit=True`.
     """
     bundle = assemble_bundle(store, repo, number)
     if bundle is None:
@@ -463,10 +503,17 @@ def main(argv: list[str] | None = None) -> int:
         approve=args.approve,
         submit=args.submit,
         fork_owner=args.fork_owner,
-        pr_drafts_dir=resolved_data_dir / "pr_drafts",
+        pr_drafts_dir=resolved_data_dir / _PR_DRAFTS_SUBDIR,
     )
     if result.submitted:
         print(f"\nOpened PR: {result.pr_url}" if result.pr_url else "\ngh pr create failed.")
+    elif result.approved and args.submit and result.draft_is_new:
+        print(f"\nWrote PR draft (first time): {result.draft_path}")
+        print(
+            "NOT submitted: this is the first time this candidate's draft was written, so "
+            "there's been no chance to actually review it yet. Read the file, then re-run "
+            "this same command (--approve --submit) again to open the real PR."
+        )
     elif result.approved:
         print(f"\nWrote PR draft: {result.draft_path}")
         print("(pass --submit too, once you've reviewed it, to open a real PR)")
