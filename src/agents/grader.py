@@ -66,6 +66,11 @@ from .reporter import repo_number_label
 
 _GRADE_KEY_PREFIX = "grade@"
 
+# Public — also referenced by :mod:`~src.agents.policy_update` (T2.2), which needs to know
+# whether a category has any "predicted true" grade at all (this same threshold) before
+# treating its precision as meaningful, without duplicating the literal 0.5 in a second module.
+DEFAULT_THRESHOLD = 0.5
+
 _RESOLUTION_SCHEMA = {
     "type": "object",
     "properties": {"outcome": {"type": "boolean"}},
@@ -83,8 +88,12 @@ class GradeError(RuntimeError):
     """A prediction couldn't be resolved: a malformed LLM reply, or a corrupt KB grade record."""
 
 
-def _parse_repo_number(url: str) -> tuple[str, int] | None:
-    """`url` -> `(repo, number)`, or `None` if it isn't a recognized GitHub issue/PR URL."""
+def parse_repo_number(url: str) -> tuple[str, int] | None:
+    """`url` -> `(repo, number)`, or `None` if it isn't a recognized GitHub issue/PR URL.
+
+    Public — also used by :mod:`~src.agents.policy_update` (T2.2) to resolve a graded
+    prediction's evidence back to its item's ``category`` for per-category precision.
+    """
     match = _GITHUB_URL_RE.match(url.strip())
     if not match:
         return None
@@ -177,6 +186,39 @@ def _resolution_prompt(prediction: Prediction, items: list[dict]) -> str:
     )
 
 
+def resolve_evidence_items(
+    prediction: Prediction,
+    store: Store,
+    *,
+    item_cache: dict[tuple[str, int], dict | None] | None = None,
+) -> list[dict]:
+    """Every evidence URL of `prediction` that resolves to a real stored item.
+
+    Public — shared by :func:`resolve_prediction` here and
+    :func:`~src.agents.policy_update.grade_category` (T2.2), which both need "the item(s) this
+    prediction is about," not just its raw URLs. `item_cache`, keyed ``(repo, number)``, is
+    optional: a caller resolving many predictions in one pass (e.g. T2.2's ``group_by_category``,
+    over every historical grade) can share one dict across calls so a repo whose items are
+    cited by multiple predictions is only read once per :class:`~src.store.jsonl_store.
+    JsonlStore` call, not once per citation — a single :func:`resolve_prediction` call (always
+    one-shot, never batched) has no reuse to gain and passes `None`.
+    """
+    items = []
+    for url in prediction.evidence:
+        parsed = parse_repo_number(url)
+        if parsed is None:
+            continue
+        if item_cache is not None and parsed in item_cache:
+            item = item_cache[parsed]
+        else:
+            item = store.get_item(*parsed)
+            if item_cache is not None:
+                item_cache[parsed] = item
+        if item is not None:
+            items.append(item)
+    return items
+
+
 def resolve_prediction(
     prediction: Prediction, store: Store, *, now: datetime | None = None
 ) -> Grade | None:
@@ -189,14 +231,7 @@ def resolve_prediction(
     when = now or datetime.now(timezone.utc)
     if not is_matured(prediction, now=when):
         return None
-    items = []
-    for url in prediction.evidence:
-        parsed = _parse_repo_number(url)
-        if parsed is None:
-            continue
-        item = store.get_item(*parsed)
-        if item is not None:
-            items.append(item)
+    items = resolve_evidence_items(prediction, store)
     reply = llm.complete(_resolution_prompt(prediction, items), json_schema=_RESOLUTION_SCHEMA)
     if not isinstance(reply, dict) or not isinstance(reply.get("outcome"), bool):
         raise GradeError(f"expected a boolean `outcome` reply, got {reply!r}")
@@ -257,7 +292,7 @@ class GradeMetrics:
     n: int
 
 
-def compute_metrics(grades: list[Grade], *, threshold: float = 0.5) -> GradeMetrics:
+def compute_metrics(grades: list[Grade], *, threshold: float = DEFAULT_THRESHOLD) -> GradeMetrics:
     """Precision/recall (each prediction's `prob` thresholded at `threshold` as "predicted
     true") plus the Brier score (mean squared error between `prob` and the actual outcome)
     over `grades`.
