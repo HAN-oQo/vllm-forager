@@ -73,6 +73,23 @@ def test_propose_retirements_flags_inactive_and_spares_active(tmp_path) -> None:
     assert proposals[0].weeks_inactive >= 8
 
 
+def test_propose_retirements_evidence_cites_last_active_item(tmp_path) -> None:
+    """Regression: a retirement claim used to carry no source link at all — the evidence
+    principle requires a human be able to check the claim against something concrete."""
+    store = JsonlStore(tmp_path)
+    taxonomy.create_taxonomy(store, ["quantization"])
+    store.upsert_items(
+        [
+            _item("o/r", 1, category="quantization", created_at="2026-01-02T00:00:00Z"),
+            _item("o/r", 2, category="quantization", created_at="2026-01-09T00:00:00Z"),
+        ]
+    )
+
+    proposals = curator.propose_retirements(store, inactive_weeks=8, now=_NOW)
+
+    assert proposals[0].evidence == "https://github.com/o/r/issues/2"  # the LATER of the two
+
+
 def test_propose_retirements_never_active_category_flagged(tmp_path) -> None:
     store = JsonlStore(tmp_path)
     taxonomy.create_taxonomy(store, ["build", "never-used"])
@@ -82,6 +99,13 @@ def test_propose_retirements_never_active_category_flagged(tmp_path) -> None:
 
     assert [p.category for p in proposals] == ["never-used"]
     assert proposals[0].weeks_inactive == float("inf")
+    assert proposals[0].evidence is None
+
+
+def test_propose_retirements_raises_if_no_taxonomy_exists(tmp_path) -> None:
+    store = JsonlStore(tmp_path)
+    with pytest.raises(taxonomy.TaxonomyError, match="no taxonomy exists yet"):
+        curator.propose_retirements(store, inactive_weeks=8, now=_NOW)
 
 
 def test_propose_retirements_none_when_all_active(tmp_path) -> None:
@@ -134,6 +158,30 @@ def test_propose_new_categories_names_large_cluster(
     assert proposals[0].name == "structured-output"
     assert proposals[0].size == 5
     assert len(proposals[0].evidence) == 5
+
+
+def test_propose_new_categories_llm_failure_skips_only_that_cluster(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: one cluster's naming failure used to abort propose_new_categories entirely,
+    discarding every other cluster's already-computed proposal in the same call."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items(
+        _other_cluster(5, theme="constrained decoding json schema grammar", repo="o/a")
+    )
+    store.upsert_items(_other_cluster(5, theme="power throttle bios firmware voltage", repo="o/b"))
+
+    def flaky_complete(prompt: str, **kwargs) -> dict:
+        if "constrained decoding" in prompt:
+            raise llm.LLMError("simulated transient failure")
+        return {"name": "power-management"}
+
+    monkeypatch.setattr(llm, "complete", flaky_complete)
+
+    proposals = curator.propose_new_categories(store, min_cluster_size=5)
+
+    assert len(proposals) == 1
+    assert proposals[0].name == "power-management"
 
 
 def test_propose_new_categories_skips_cluster_below_min_size(
