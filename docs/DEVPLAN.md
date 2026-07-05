@@ -357,7 +357,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** the CPU agent needs hands on the GPU box — every repro/build/verify step is a command executed on MI250 with its output captured.
   - **e.g.:** `run("mi250-051", "pytest test_rocm.py")` → streams logs, returns `{exit: 1, artifacts: […]}`.
   - **Test:** `tests/test_runner.py` — mock subprocess/ssh → correct command composed + result parsed. Real ssh = `integration` (runs only when `MI250_HOST` set).
-- [ ] **T3.2 Repro harness** — given a candidate, run repro on MI250, capture failing signal → KB `runs`.
+- [x] **T3.2 Repro harness** — given a candidate, run repro on MI250, capture failing signal → KB `runs`.
   - **Why:** a fix is only credible if the bug was first *reproduced on real hardware* — the failing signal is the "before" half of the proof.
   - **e.g.:** candidate #d → run its repro on mi250-051 → capture the failing assertion/log as the baseline signal.
   - **Test:** `tests/test_repro.py` — mock runner returns a failing log → failing signal recorded.

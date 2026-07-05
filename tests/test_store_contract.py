@@ -192,3 +192,42 @@ def test_state_roundtrip(store):
     store.set_state("o/s", "2025-02-02T00:00:00Z")
     assert store.get_state("o/r") == "2025-01-01T00:00:00Z"
     assert store.get_state("o/s") == "2025-02-02T00:00:00Z"
+
+
+# ------------------------------------------------------------------------- runs (T3.2+)
+
+
+def test_list_runs_empty_store(store):
+    assert store.list_runs() == []
+
+
+def test_record_run_and_list_runs(store):
+    store.record_run({"repo": "o/r", "number": 1, "stage": "repro", "exit_code": 1})
+    store.record_run({"repo": "o/r", "number": 1, "stage": "repro", "exit_code": 0})
+    store.record_run({"repo": "o/s", "number": 2, "stage": "repro", "exit_code": 1})
+
+    assert len(store.list_runs()) == 3
+    assert len(store.list_runs(repo="o/r")) == 2
+    assert len(store.list_runs(repo="o/r", number=1)) == 2
+    assert len(store.list_runs(repo="o/s", number=2)) == 1
+    assert store.list_runs(repo="o/s", number=999) == []
+
+
+def test_record_run_never_merges_into_a_prior_one(store):
+    """Unlike upsert_items, two runs for the same (repo, number) are two separate records --
+    a run is a historical log entry, not mutable candidate state."""
+    store.record_run({"repo": "o/r", "number": 1, "exit_code": 1})
+    store.record_run({"repo": "o/r", "number": 1, "exit_code": 0})
+
+    exit_codes = sorted(run["exit_code"] for run in store.list_runs(repo="o/r", number=1))
+    assert exit_codes == [0, 1]
+
+
+def test_list_runs_filters_by_stage(store):
+    store.record_run({"repo": "o/r", "number": 1, "stage": "repro", "exit_code": 1})
+    store.record_run({"repo": "o/r", "number": 1, "stage": "verify", "exit_code": 0})
+
+    assert len(store.list_runs(repo="o/r", number=1, stage="repro")) == 1
+    assert len(store.list_runs(repo="o/r", number=1, stage="verify")) == 1
+    assert len(store.list_runs(repo="o/r", number=1)) == 2
+    assert store.list_runs(repo="o/r", number=1, stage="nonexistent") == []
