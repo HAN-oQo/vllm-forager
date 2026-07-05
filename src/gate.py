@@ -123,13 +123,18 @@ class EvidenceBundle:
 
 @dataclass(frozen=True)
 class GateResult:
-    """The outcome of one :func:`run_gate` call."""
+    """The outcome of one :func:`run_gate` call.
+
+    `fork_owner` records what was actually passed (or `None`) — the KB's own audit trail for a
+    cross-repo PR should show which fork the head branch was addressed against, not just that
+    approval happened (see :func:`_create_draft_pr`'s docstring for why this matters)."""
 
     repo: str
     number: int
     bundle: EvidenceBundle
     approved: bool
     pr_url: str | None
+    fork_owner: str | None = None
 
 
 def _risk_badge(title: str, body: str) -> tuple[str | None, str | None, str | None]:
@@ -256,7 +261,10 @@ def _finalize(
     :func:`run_gate` (assemble+decide in one call) and `main` (which prints `bundle` in between
     assembling and calling this, so the human sees it before any PR exists).
 
-    `fork_owner` is passed straight through to :func:`_create_draft_pr` — see its own docstring."""
+    `fork_owner` is passed straight through to :func:`_create_draft_pr` — see its own docstring
+    — and persisted in the `stage="gate"` record too, so the KB's own audit trail for a
+    cross-repo PR shows which fork (if any) the head branch was addressed against, not just
+    that approval happened."""
     approved = approve is True
     pr_url = _create_draft_pr(bundle, fork_owner=fork_owner) if approved else None
 
@@ -269,13 +277,21 @@ def _finalize(
             "stage": "gate",
             "approved": approved,
             "pr_url": pr_url,
+            "fork_owner": fork_owner,
             "recorded_at": when.strftime(TS_FORMAT),
         },
         stage="gate",
         repo=repo,
         number=number,
     )
-    return GateResult(repo=repo, number=number, bundle=bundle, approved=approved, pr_url=pr_url)
+    return GateResult(
+        repo=repo,
+        number=number,
+        bundle=bundle,
+        approved=approved,
+        pr_url=pr_url,
+        fork_owner=fork_owner,
+    )
 
 
 def run_gate(
