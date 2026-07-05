@@ -5,6 +5,13 @@ matured, not-yet-graded prediction is resolved and the result appended to the KB
 then aggregate precision/recall/Brier over *every* recorded grade (not just this run's new
 ones — the self-evolution signal is the running total, not one run's delta) is printed.
 Mirrors :mod:`src.forecast`'s (T1.5) store-selection pattern.
+
+T2.2: when this run actually graded something new, it also proposes and applies a policy
+update (:func:`~src.agents.policy_update.update_policy_from_grades`) — grading is only a
+diagnostic unless it feeds back into the policy driving the next round. Skipped when nothing
+matured this run (an unchanged grade log would just churn out an identical policy version) —
+not skipped, and left to raise loudly, if no policy has ever been created yet (a bootstrapping
+gap to notice and fix, not silently paper over).
 """
 
 from __future__ import annotations
@@ -12,7 +19,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
-from .agents import grader
+from .agents import grader, policy_update
 from .store import resolve_store
 
 
@@ -47,6 +54,11 @@ def main(argv: list[str] | None = None) -> int:
         f"overall: n={metrics.n} precision={metrics.precision:.2f} "
         f"recall={metrics.recall:.2f} brier={metrics.brier:.2f}"
     )
+
+    if new_grades:
+        updated = policy_update.update_policy_from_grades(store)
+        if updated is not None:
+            print(f"policy@{updated.version} active (scoring_weights updated from new grades)")
     return 0
 
 

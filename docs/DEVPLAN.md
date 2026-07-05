@@ -319,7 +319,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** grading its own past predictions is *the* self-evolution signal — without it the agent can't tell if its judgment is any good.
   - **e.g.:** a Q3 forecast "X will merge" is now merged → scored a hit; aggregate → precision 0.68, Brier 0.19.
   - **Test:** `tests/test_grader.py` — synthetic predictions + outcomes → known metric values.
-- [ ] **T2.2 Policy update from grades** — propose `policy@vN+1` from grading results.
+- [x] **T2.2 Policy update from grades** — propose `policy@vN+1` from grading results.
   - **Why:** closes the loop — grading is useless unless the scores actually reweight the policy that drives the next round.
   - **e.g.:** a category with 0.3 precision → its scoring weight drops in `policy@v+1`; a reliable one gains.
   - **Test:** `tests/test_policy_update.py` — a low-precision category → its weight decreases in the new version.

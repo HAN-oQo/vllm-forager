@@ -83,8 +83,12 @@ class GradeError(RuntimeError):
     """A prediction couldn't be resolved: a malformed LLM reply, or a corrupt KB grade record."""
 
 
-def _parse_repo_number(url: str) -> tuple[str, int] | None:
-    """`url` -> `(repo, number)`, or `None` if it isn't a recognized GitHub issue/PR URL."""
+def parse_repo_number(url: str) -> tuple[str, int] | None:
+    """`url` -> `(repo, number)`, or `None` if it isn't a recognized GitHub issue/PR URL.
+
+    Public — also used by :mod:`~src.agents.policy_update` (T2.2) to resolve a graded
+    prediction's evidence back to its item's ``category`` for per-category precision.
+    """
     match = _GITHUB_URL_RE.match(url.strip())
     if not match:
         return None
@@ -191,7 +195,7 @@ def resolve_prediction(
         return None
     items = []
     for url in prediction.evidence:
-        parsed = _parse_repo_number(url)
+        parsed = parse_repo_number(url)
         if parsed is None:
             continue
         item = store.get_item(*parsed)
