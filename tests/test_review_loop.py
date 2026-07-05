@@ -392,6 +392,220 @@ def test_current_gh_login_returns_the_login(monkeypatch: pytest.MonkeyPatch) -> 
     assert review_loop._current_gh_login() == "forager-bot"
 
 
+# --------------------------------------------------------------------- fail-safe behavior
+
+
+def test_run_review_loop_fails_closed_when_login_lookup_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: if the bot can't resolve its own gh identity, it must compose NOTHING rather
+    than risk treating its own past replies as new maintainer comments (fail closed, not open)."""
+    store = _store_with_item(tmp_path)
+
+    def _run(cmd, **kwargs):
+        if cmd[2] == "user":
+            raise subprocess.CalledProcessError(1, cmd)
+        import json
+
+        return subprocess.CompletedProcess(
+            cmd, 0, stdout=json.dumps([_gh_comment(1, "maintainer", "Please add a test")])
+        )
+
+    monkeypatch.setattr(review_loop.subprocess, "run", _run)
+    monkeypatch.setattr(llm, "complete", _fail_if_llm_called)
+
+    assert review_loop.run_review_loop(store, "o/r", 1) == ()
+
+
+def test_run_review_loop_skips_a_malformed_comment_without_crashing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A comment with a non-dict `user` field (a malformed/unexpected API response) must be
+    skipped, not crash the whole batch -- the other, well-formed comment still gets a reply."""
+    store = _store_with_item(tmp_path)
+    monkeypatch.setattr(
+        review_loop.subprocess,
+        "run",
+        _fake_gh(
+            comments=[
+                {"id": 1, "user": "not-a-dict", "body": "malformed"},
+                _gh_comment(2, "maintainer", "Please add a test"),
+            ]
+        ),
+    )
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"reply": "ok", "proposed_diff": None})
+
+    responses = review_loop.run_review_loop(store, "o/r", 1, now=_NOW)
+
+    assert len(responses) == 1
+    assert responses[0].comment_id == 2
+
+
+def test_run_review_loop_uses_verified_diff_not_assemble_bundle(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: must use the cheaper gate.verified_diff (no risk-badge LLM call), not
+    gate.assemble_bundle, matching pr_quality.py's own established fix for the identical
+    'just need the diff' need."""
+    store = _store_with_item(tmp_path)
+    monkeypatch.setattr(
+        review_loop.subprocess,
+        "run",
+        _fake_gh(comments=[_gh_comment(1, "maintainer", "Please add a test")]),
+    )
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"reply": "ok", "proposed_diff": None})
+
+    def _fail_if_assemble_bundle_called(*a, **k):
+        raise AssertionError("gate.assemble_bundle should not be called")
+
+    monkeypatch.setattr(gate, "assemble_bundle", _fail_if_assemble_bundle_called)
+
+    responses = review_loop.run_review_loop(store, "o/r", 1, now=_NOW)
+
+    assert len(responses) == 1
+
+
+# --------------------------------------------------------------------- post_reply: idempotency
+
+
+def test_post_reply_refuses_to_post_twice(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
+    store = _store_with_item(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "review_response",
+            "comment_id": 1,
+            "reply": "ok",
+            "recorded_at": "2025-12-31T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "review_post",
+            "comment_id": 1,
+            "posted": True,
+            "posted_comment_url": "https://x/c1",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(review_loop.subprocess, "run", _fail_if_gh_called)
+
+    result = review_loop.post_reply(store, "o/r", 1, 1, post=True)
+
+    assert result is not None
+    assert result.posted is False
+    assert result.posted_comment_url == "https://x/c1"
+
+
+def test_post_reply_allows_posting_after_a_failed_prior_attempt(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A prior review_post record with posted=False (the gh call failed) must not block a
+    later, real retry."""
+    store = _store_with_item(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "review_response",
+            "comment_id": 1,
+            "reply": "ok",
+            "recorded_at": "2025-12-31T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "review_post",
+            "comment_id": 1,
+            "posted": False,
+            "posted_comment_url": None,
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(
+        review_loop.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/c2\n"),
+    )
+
+    result = review_loop.post_reply(store, "o/r", 1, 1, post=True)
+
+    assert result.posted is True
+    assert result.posted_comment_url == "https://x/c2"
+
+
+# --------------------------------------------------------------------- post_reply: draft-file edits
+
+
+def test_post_reply_posts_a_hand_edited_draft_file(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a human editing the on-disk draft's '## Proposed reply' section must have
+    that edit actually posted, not the original, unedited KB record text."""
+    store = _store_with_item(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "review_response",
+            "comment_id": 1,
+            "reply": "original LLM-composed reply",
+            "recorded_at": "2025-12-31T00:00:00Z",
+        }
+    )
+    drafts_dir = tmp_path / "drafts"
+    drafts_dir.mkdir()
+    path = review_loop._draft_path("o/r", 1, 1, drafts_dir=drafts_dir)
+    path.write_text(
+        "# Reply to maintainer's comment on o/r#1\n\n"
+        "## Their comment\nPlease add a test\n\n"
+        "## Proposed reply\nHand-edited reply text.\n"
+    )
+    calls = []
+    monkeypatch.setattr(
+        review_loop.subprocess,
+        "run",
+        lambda cmd, **k: (calls.append(cmd), subprocess.CompletedProcess(cmd, 0, stdout="u\n"))[1],
+    )
+
+    review_loop.post_reply(store, "o/r", 1, 1, post=True, drafts_dir=drafts_dir)
+
+    assert "body=Hand-edited reply text." in calls[0]
+
+
+def test_post_reply_falls_back_to_kb_record_when_no_draft_file(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_with_item(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "review_response",
+            "comment_id": 1,
+            "reply": "original LLM-composed reply",
+            "recorded_at": "2025-12-31T00:00:00Z",
+        }
+    )
+    calls = []
+    monkeypatch.setattr(
+        review_loop.subprocess,
+        "run",
+        lambda cmd, **k: (calls.append(cmd), subprocess.CompletedProcess(cmd, 0, stdout="u\n"))[1],
+    )
+
+    review_loop.post_reply(
+        store, "o/r", 1, 1, post=True, drafts_dir=tmp_path / "nonexistent_drafts"
+    )
+
+    assert "body=original LLM-composed reply" in calls[0]
+
+
 # --------------------------------------------------------------------- CLI
 
 

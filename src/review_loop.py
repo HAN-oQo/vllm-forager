@@ -14,8 +14,21 @@ passed together on one command line out of habit), there is no single call site 
 "compose" and "post" could accidentally happen together. `run_review_loop` never touches `gh`
 for posting; it only reads comments and writes a local draft (mirroring `gate.py`'s own
 `_write_pr_draft` pattern) plus a `stage="review_response"` KB record. `post_reply` requires that
-KB record to already exist — it is structurally impossible to post a reply this module never
-composed and persisted in an earlier, separate invocation.
+KB record (and the draft file it wrote alongside it) to already exist. **Honesty check on that
+claim** (a code-review finding on this very module): being two separate calls does NOT mean a
+human necessarily read the draft in between — a scripted `compose && post --post` one-liner can
+still chain them with no human involved, exactly like `gate.py`'s own `--approve && --approve
+--submit` can. Neither module's docstring should claim more than that: both close the narrower,
+concretely-incident-causing gap ("both flags, one command"), not the broader "verify a human
+actually read it" problem, which `gate.py`'s own docstring already admits no code-only mechanism
+can solve. `post_reply` posts whatever is on disk in the draft file *at post time* (see its own
+docstring) specifically so a human's in-place edit to that file — the realistic way a human
+`compose && review && post`s by hand — is what actually gets posted, not a frozen copy from the
+moment of composition.
+
+`post_reply` also refuses to post twice for the same `comment_id`: it checks for a prior
+`stage="review_post"` record with `posted=True` before calling `gh` again, mirroring `gate.py`'s
+own T3.10.6 idempotency check for the analogous "don't open a second real PR" problem.
 
 **Deliberately does not push a follow-up commit, even when it drafts a `proposed_diff`.** A
 diff suggested here is composed by the same LLM that wrote the reply — it has not been through
@@ -56,7 +69,6 @@ from .stages import complete_or_none, get_item_or_skip, latest_run, record_run_b
 from .store import resolve_store
 from .store.base import Store
 
-_DEFAULT_GH_TIMEOUT_S = 60.0
 _DIFF_CONTEXT_CHARS = 4000
 _COMMENT_CONTEXT_CHARS = 4000
 
@@ -110,13 +122,18 @@ class ReviewResponse:
 
 @dataclasses.dataclass(frozen=True)
 class ReviewPostResult:
-    """The outcome of one :func:`post_reply` call."""
+    """The outcome of one :func:`post_reply` call.
+
+    `recorded_at` lets :func:`post_reply`'s own idempotency check pick the most recent attempt
+    for a `comment_id` via :func:`~src.stages.latest_run`, the same way every sibling stage's
+    run history is ordered."""
 
     repo: str
     number: int
     comment_id: int
     posted: bool
     posted_comment_url: str | None = None
+    recorded_at: str = ""
 
 
 def _current_gh_login() -> str | None:
@@ -128,9 +145,12 @@ def _current_gh_login() -> str | None:
             capture_output=True,
             text=True,
             check=True,
-            timeout=_DEFAULT_GH_TIMEOUT_S,
+            timeout=gate._DEFAULT_GH_TIMEOUT_S,
         )
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
+        print(f"review_loop: `gh` not found on PATH: {exc}", file=sys.stderr)
+        return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"review_loop: failed to resolve the authenticated gh user: {exc}", file=sys.stderr)
         return None
     login = result.stdout.strip()
@@ -144,9 +164,12 @@ def _fetch_comments(repo: str, number: int) -> list[dict] | None:
     cmd = ["gh", "api", f"repos/{repo}/issues/{number}/comments"]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, check=True, timeout=_DEFAULT_GH_TIMEOUT_S
+            cmd, capture_output=True, text=True, check=True, timeout=gate._DEFAULT_GH_TIMEOUT_S
         )
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
+        print(f"review_loop: `gh` not found on PATH: {exc}", file=sys.stderr)
+        return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"review_loop: failed to fetch comments for {repo}#{number}: {exc}", file=sys.stderr)
         return None
     try:
@@ -212,7 +235,9 @@ def run_review_loop(
     persist + draft-file each result. Never posts anything -- see module docstring.
 
     Returns the newly-composed responses (empty if there's nothing new, the item doesn't exist,
-    or the `gh` fetch failed -- all skip, logged, not raised).
+    the `gh` fetch failed, or the bot's own `gh` identity couldn't be resolved -- all skip,
+    logged, not raised). The last of these fails *closed*: if we can't tell which comments are
+    our own, we compose nothing rather than risk drafting a reply to ourselves.
     """
     item = get_item_or_skip(store, repo, number, stage="review_loop")
     if item is None:
@@ -223,23 +248,39 @@ def run_review_loop(
         return ()
 
     self_login = _current_gh_login()
+    if self_login is None:
+        print(
+            f"review_loop: could not resolve the bot's own gh identity for {repo}#{number} -- "
+            "skipping this pass rather than risk replying to our own comments",
+            file=sys.stderr,
+        )
+        return ()
+
     already_answered = {
         r.get("comment_id")
         for r in store.list_runs(repo=repo, number=number, stage="review_response")
     }
 
-    bundle = gate.assemble_bundle(store, repo, number)
-    diff = bundle.diff if bundle is not None else ""
+    diff = ""
+    verified = gate.verified_diff(store, repo, number)
+    if verified is not None:
+        diff, _verify_recorded_at = verified
     title = item.get("title") or ""
 
     when = now or datetime.now(timezone.utc)
     responses = []
     for comment in comments:
+        if not isinstance(comment, dict) or not isinstance(comment.get("user"), dict):
+            print(
+                f"review_loop: skipping a malformed comment entry for {repo}#{number}",
+                file=sys.stderr,
+            )
+            continue
         comment_id = comment.get("id")
-        author = (comment.get("user") or {}).get("login")
+        author = comment["user"].get("login")
         if comment_id is None or comment_id in already_answered:
             continue
-        if self_login is not None and author == self_login:
+        if author == self_login:
             continue
         composed = _compose_response(comment.get("body") or "", title, diff)
         if composed is None:
@@ -256,12 +297,15 @@ def run_review_loop(
             proposed_diff=proposed_diff,
             recorded_at=when.strftime(TS_FORMAT),
         )
-        record_run_best_effort(
-            store, response.to_run_record(), stage="review_response", repo=repo, number=number
-        )
+        # Write the draft file BEFORE persisting the KB record: if the write fails, the
+        # comment must NOT be marked "already answered" (which would permanently prevent a
+        # draft from ever being (re)created for it on a later, retried pass).
         path = _draft_path(repo, number, comment_id, drafts_dir=drafts_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(response.format())
+        record_run_best_effort(
+            store, response.to_run_record(), stage="review_response", repo=repo, number=number
+        )
         responses.append(response)
 
     return tuple(responses)
@@ -281,23 +325,58 @@ def _post_comment(repo: str, number: int, body: str) -> str | None:
     ]
     try:
         result = subprocess.run(
-            cmd, capture_output=True, text=True, check=True, timeout=_DEFAULT_GH_TIMEOUT_S
+            cmd, capture_output=True, text=True, check=True, timeout=gate._DEFAULT_GH_TIMEOUT_S
         )
-    except (FileNotFoundError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
+    except FileNotFoundError as exc:
+        print(f"review_loop: `gh` not found on PATH: {exc}", file=sys.stderr)
+        return None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired) as exc:
         print(f"review_loop: failed to post reply on {repo}#{number}: {exc}", file=sys.stderr)
         return None
     return result.stdout.strip() or None
 
 
+_REPLY_SECTION_HEADER = "## Proposed reply\n"
+
+
+def _reply_text_for_post(
+    repo: str, number: int, comment_id: int, response_run: dict, *, drafts_dir: Path | None = None
+) -> str:
+    """The reply text to actually post: the on-disk draft file's "## Proposed reply" section if
+    the file exists and still contains that section (so a human's in-place edit to the file --
+    the realistic way someone reviews-then-approves a draft -- is what gets posted), else the
+    original composed `reply` from the KB record as a fallback (e.g. the draft file was moved or
+    deleted after composition)."""
+    path = _draft_path(repo, number, comment_id, drafts_dir=drafts_dir)
+    if path.exists():
+        text = path.read_text()
+        if _REPLY_SECTION_HEADER in text:
+            after = text.split(_REPLY_SECTION_HEADER, 1)[1]
+            reply = after.split("\n## ", 1)[0].strip()
+            if reply:
+                return reply
+    return response_run.get("reply") or ""
+
+
 def post_reply(
-    store: Store, repo: str, number: int, comment_id: int, *, post: bool = False
+    store: Store,
+    repo: str,
+    number: int,
+    comment_id: int,
+    *,
+    post: bool = False,
+    drafts_dir: Path | None = None,
 ) -> ReviewPostResult | None:
     """Post the already-composed reply for (`repo`, `number`, `comment_id`) as a real PR
     comment, but ONLY if `post` is the literal `True` (matching `gate.py`'s own "not plain
     truthiness" convention). Requires a `stage="review_response"` record for this exact
     `comment_id` to already exist — composed by an earlier, separate :func:`run_review_loop`
-    call; there is no code path that composes and posts in the same call (see module
-    docstring).
+    call. Posts whatever is currently on disk in the draft file (see :func:`_reply_text_for_post`
+    and the module docstring's honesty note on what "separate call" does and doesn't guarantee).
+
+    Refuses to post a second time for a `comment_id` that already has a prior
+    `stage="review_post"` record with `posted=True` — the same idempotency principle as
+    `gate.py`'s T3.10.6 fix for "don't open a second real PR."
 
     Returns `None` if no composed response exists for this `comment_id` yet (skip, logged).
     """
@@ -315,18 +394,43 @@ def post_reply(
         )
         return None
 
+    prior_posts = [
+        r
+        for r in store.list_runs(repo=repo, number=number, stage="review_post")
+        if r.get("comment_id") == comment_id and r.get("posted")
+    ]
+    already_posted = latest_run(prior_posts)
+    if already_posted is not None:
+        print(
+            f"review_loop: comment {comment_id} on {repo}#{number} was already answered "
+            f"({already_posted.get('posted_comment_url')}) -- refusing to post again",
+            file=sys.stderr,
+        )
+        return ReviewPostResult(
+            repo=repo,
+            number=number,
+            comment_id=comment_id,
+            posted=False,
+            posted_comment_url=already_posted.get("posted_comment_url"),
+        )
+
     posted = False
     posted_url = None
     if post is True:
-        posted_url = _post_comment(repo, number, response_run.get("reply") or "")
+        reply_text = _reply_text_for_post(
+            repo, number, comment_id, response_run, drafts_dir=drafts_dir
+        )
+        posted_url = _post_comment(repo, number, reply_text)
         posted = posted_url is not None
 
+    when = datetime.now(timezone.utc)
     result = ReviewPostResult(
         repo=repo,
         number=number,
         comment_id=comment_id,
         posted=posted,
         posted_comment_url=posted_url,
+        recorded_at=when.strftime(TS_FORMAT),
     )
     record_run_best_effort(
         store,
@@ -376,7 +480,8 @@ def main(argv: list[str] | None = None) -> int:
             )
         return 0
 
-    result = post_reply(store, repo, number, args.comment_id, post=args.post)
+    drafts_dir = resolved_data_dir / _REVIEW_DRAFTS_SUBDIR
+    result = post_reply(store, repo, number, args.comment_id, post=args.post, drafts_dir=drafts_dir)
     if result is None:
         print(f"No composed response for {repo}#{number} comment {args.comment_id}.")
         return 1
