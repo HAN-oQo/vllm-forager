@@ -45,12 +45,18 @@ Known limitation, not fixed here: `engineer.py`'s patch is committed to a branch
 host's own local checkout, not pushed to the real GitHub remote — `gh pr create --draft --head
 <branch>` requires that branch to already exist on the remote. Pushing it there (from the MI250
 host, since that's where the commit physically lives) is a prerequisite this module doesn't
-perform itself; DEVPLAN's own T3.5 test bullet scopes this module to "gh invoked" (mocked), not
-to the push step, and guessing at that integration's shape now — before T3.6's first real PR
-actually exercises it — would be premature. Also not fixed: `approve` records no approver
-identity, only that *an* approval happened and when — acceptable for a single-operator project
-(the person with shell access on `ce-master`), but a real gap if this ever runs with more than
-one person able to invoke it.
+perform itself.
+
+T3.6's first real run (against `vllm-project/vllm`) *did* exercise the push+PR step for real and
+found `--head <branch>` alone insufficient for a fork-hosted branch — `gh` looks for it inside
+`--repo` itself and fails ("No commits between main and <branch>"). `_create_draft_pr`'s
+`fork_owner` parameter fixes this (`--head {fork_owner}:{branch}`); still not automated: this
+module doesn't push `engineer.py`'s branch to the fork itself, and doesn't derive `fork_owner`
+from anything (a caller must know and pass it).
+
+Also not fixed: `approve` records no approver identity, only that *an* approval happened and
+when — acceptable for a single-operator project (the person with shell access on `ce-master`),
+but a real gap if this ever runs with more than one person able to invoke it.
 """
 
 from __future__ import annotations
@@ -194,10 +200,18 @@ def assemble_bundle(store: Store, repo: str, number: int) -> EvidenceBundle | No
     )
 
 
-def _create_draft_pr(bundle: EvidenceBundle) -> str | None:
+def _create_draft_pr(bundle: EvidenceBundle, *, fork_owner: str | None = None) -> str | None:
     """`gh pr create --draft` for `bundle`'s branch — the PR URL `gh` prints on success, or
     `None` if the call failed (logged, not raised: the evidence bundle was still validly
-    assembled and approved, only the PR creation step itself failed)."""
+    assembled and approved, only the PR creation step itself failed).
+
+    `fork_owner`, if given, is prefixed onto `--head` as `{fork_owner}:{branch}` — `gh`'s
+    required form when the branch lives on a fork rather than `bundle.repo` itself (T3.6's own
+    real run discovered this the hard way: `--head <branch>` alone makes `gh` look for that
+    branch *inside* `bundle.repo`, failing with "No commits between main and <branch>" / "Head
+    ref must be a branch" for a fork-hosted branch that's never existed there). Left `None`
+    (default) to preserve prior behavior for a same-repo head."""
+    head = f"{fork_owner}:{bundle.branch}" if fork_owner else bundle.branch
     cmd = [
         "gh",
         "pr",
@@ -206,7 +220,7 @@ def _create_draft_pr(bundle: EvidenceBundle) -> str | None:
         "--repo",
         bundle.repo,
         "--head",
-        bundle.branch,
+        head,
         "--title",
         f"[vllm-forager] Fix for {bundle.repo}#{bundle.number}",
         "--body",
@@ -234,14 +248,17 @@ def _finalize(
     bundle: EvidenceBundle,
     *,
     approve: bool,
+    fork_owner: str | None = None,
     now: datetime | None = None,
 ) -> GateResult:
     """Approve-or-not `bundle` (`approve is True` is the only thing that ever opens a PR — see
     module docstring), record the `stage="gate"` outcome, and return the result. Shared by
     :func:`run_gate` (assemble+decide in one call) and `main` (which prints `bundle` in between
-    assembling and calling this, so the human sees it before any PR exists)."""
+    assembling and calling this, so the human sees it before any PR exists).
+
+    `fork_owner` is passed straight through to :func:`_create_draft_pr` — see its own docstring."""
     approved = approve is True
-    pr_url = _create_draft_pr(bundle) if approved else None
+    pr_url = _create_draft_pr(bundle, fork_owner=fork_owner) if approved else None
 
     when = now or datetime.now(timezone.utc)
     record_run_best_effort(
@@ -267,11 +284,16 @@ def run_gate(
     number: int,
     *,
     approve: bool = False,
+    fork_owner: str | None = None,
     now: datetime | None = None,
 ) -> GateResult | None:
     """Assemble the evidence bundle for (`repo`, `number`) and, **only if `approve` is the
     literal `True`**, open a draft PR for it. Records the outcome as a `stage="gate"` run
     regardless (see module docstring).
+
+    `fork_owner`, if given (e.g. `"HAN-oQo"`), tells `gh` the branch lives on that fork rather
+    than `repo` itself — see :func:`_create_draft_pr`'s own docstring for why this is required
+    for any real cross-repo PR. Left `None` (default) for a same-repo head.
 
     Returns:
         `None` if the candidate isn't ready for the gate (see :func:`assemble_bundle`; skipped,
@@ -282,7 +304,7 @@ def run_gate(
     bundle = assemble_bundle(store, repo, number)
     if bundle is None:
         return None
-    return _finalize(store, repo, number, bundle, approve=approve, now=now)
+    return _finalize(store, repo, number, bundle, approve=approve, fork_owner=fork_owner, now=now)
 
 
 def _parse_candidate(raw: str) -> tuple[str, int]:
@@ -306,6 +328,15 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--candidate", required=True, type=_parse_candidate, help="owner/repo#number")
     ap.add_argument("--approve", action="store_true", help="open a draft PR (default: print only)")
     ap.add_argument(
+        "--fork-owner",
+        default=None,
+        help=(
+            "GitHub owner of the fork the candidate branch actually lives on (e.g. "
+            "'HAN-oQo') -- required for --repo to be a real upstream repo like "
+            "vllm-project/vllm rather than the fork itself; see _create_draft_pr's docstring."
+        ),
+    )
+    ap.add_argument(
         "--data-dir",
         type=Path,
         default=None,
@@ -325,7 +356,9 @@ def main(argv: list[str] | None = None) -> int:
 
     print(bundle.format())
 
-    result = _finalize(store, repo, number, bundle, approve=args.approve)
+    result = _finalize(
+        store, repo, number, bundle, approve=args.approve, fork_owner=args.fork_owner
+    )
     if args.approve:
         print(f"\nOpened draft PR: {result.pr_url}" if result.pr_url else "\ngh pr create failed.")
     else:
