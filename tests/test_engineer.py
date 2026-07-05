@@ -5,6 +5,7 @@ fail->patch->fail => verified=False and no PR (this module never creates a PR at
 T3.5's job once T3.4's ensemble review has looked at a verified=True result).
 """
 
+import subprocess
 from datetime import datetime, timezone
 
 import pytest
@@ -201,12 +202,50 @@ def test_run_engineer_returns_result_even_if_record_run_fails(
 # --------------------------------------------------------------------- command composition
 
 
-def test_verify_command_includes_branch_and_patch() -> None:
-    command = engineer._verify_command("forager/candidate-1", "--- a\n+++ b\n", "pytest test_x.py")
+def test_verify_command_includes_branch_base_ref_and_patch() -> None:
+    command = engineer._verify_command(
+        "forager/o-r-1", "--- a\n+++ b\n", "pytest test_x.py", base_ref="main"
+    )
 
-    assert "git checkout -B forager/candidate-1" in command
+    assert "git checkout -B forager/o-r-1 main" in command
     assert "--- a\n+++ b" in command
     assert "pytest test_x.py" in command
+
+
+def test_verify_command_is_syntactically_valid_shell() -> None:
+    """Regression: the original `cmd1 && cmd2 <<'EOF' ... EOF && cmd3` composition was a real
+    bash syntax error (a heredoc's closing delimiter ends the enclosing command; `&&` on the
+    next line has nothing to attach to) that every mocked test here was blind to. This pins the
+    fix by actually asking a real shell to parse the composed script (`bash -n`, syntax check
+    only -- no execution, no git/network needed)."""
+    command = engineer._verify_command(
+        "forager/o-r-1",
+        "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-old\n+new\n",
+        "pytest test_x.py",
+        base_ref="main",
+    )
+
+    result = subprocess.run(
+        ["bash", "-n", "-c", command], capture_output=True, text=True, timeout=5
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_verify_command_stays_valid_shell_when_patch_contains_ampersand_lines() -> None:
+    """The heredoc quoting must survive patch content that itself looks like shell syntax."""
+    tricky_patch = "--- a\n+++ b\n@@ -1 +1 @@\n-old && rm -rf /\n+new || true\n"
+    command = engineer._verify_command("forager/o-r-1", tricky_patch, "pytest x", base_ref="main")
+
+    result = subprocess.run(
+        ["bash", "-n", "-c", command], capture_output=True, text=True, timeout=5
+    )
+
+    assert result.returncode == 0, result.stderr
+
+
+def test_branch_name_includes_repo_to_avoid_cross_repo_collision() -> None:
+    assert engineer._branch_name("vllm-project/vllm", 42) != engineer._branch_name("ROCm/vllm", 42)
 
 
 def test_run_engineer_uses_baseline_command_to_rerun(
