@@ -124,8 +124,8 @@ def test_judge_malformed_reply_fails_open(monkeypatch: pytest.MonkeyPatch) -> No
 def test_most_similar_picks_best_match_among_several(monkeypatch: pytest.MonkeyPatch) -> None:
     title, body = "Add speculative decoding support", ""
     candidate_text = novelty._candidate_text(title, body)
-    near = PriorAttempt(title="Add speculative decoding", body="")
-    far = PriorAttempt(title="Unrelated memory leak fix", body="")
+    near = PriorAttempt(title="Add speculative decoding", body="", evidence="https://x/2")
+    far = PriorAttempt(title="Unrelated memory leak fix", body="", evidence="https://x/3")
     vectors = {
         candidate_text: [1.0, 0.0],
         novelty._candidate_text(near.title, near.body): [1.0, 0.0],
@@ -142,3 +142,101 @@ def test_most_similar_picks_best_match_among_several(monkeypatch: pytest.MonkeyP
 def test_similarity_threshold_out_of_range_raises() -> None:
     with pytest.raises(NoveltyError, match=r"similarity_threshold must be in \[0, 1\]"):
         check_novelty("x", "", [_PRIOR], similarity_threshold=1.5)
+
+
+# --------------------------------------------------------------------- evidence principle
+
+
+def test_prior_attempt_without_evidence_is_never_used_for_rejection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a caller-supplied PriorAttempt with no evidence must not be able to drive a
+    rejection a human couldn't trace to a source (CLAUDE.md evidence principle) — even if it's
+    a byte-for-byte embedding match."""
+    unevidenced = PriorAttempt(title="Port fp8 KV cache", body="")  # evidence="" (default)
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("no evidenced prior attempts -- embedding/judge shouldn't run")
+
+    monkeypatch.setattr(novelty.embed, "embed_texts", _fail_if_called)
+    monkeypatch.setattr(llm, "complete", _fail_if_called)
+
+    verdict = check_novelty("Port fp8 KV cache", "", [unevidenced])
+
+    assert verdict.is_novel is True
+    assert verdict.similar_to is None
+
+
+def test_evidenced_prior_used_even_when_mixed_with_unevidenced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    title, body = "Port fp8 KV cache", ""
+    candidate_text = novelty._candidate_text(title, body)
+    unevidenced = PriorAttempt(title="Port fp8 KV cache", body="")
+    _mock_embeddings(monkeypatch, candidate_text=candidate_text, similarity="near")
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("judge should not be called when embedding already rejects")
+
+    monkeypatch.setattr(llm, "complete", _fail_if_called)
+
+    verdict = check_novelty(title, body, [unevidenced, _PRIOR])
+
+    assert verdict.is_novel is False
+    assert verdict.similar_to == _PRIOR
+
+
+# --------------------------------------------------------------------- fail-open on backend errors
+
+
+def test_embedding_failure_fails_open(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _raise(*a: object, **k: object) -> None:
+        raise novelty.embed.EmbedError("backend unavailable")
+
+    monkeypatch.setattr(novelty.embed, "embed_texts", _raise)
+
+    def _fail_if_called(*a: object, **k: object) -> None:
+        raise AssertionError("judge should not run when the embedding call itself failed")
+
+    monkeypatch.setattr(llm, "complete", _fail_if_called)
+
+    verdict = check_novelty("Anything", "", [_PRIOR])
+
+    assert verdict.is_novel is True
+    assert verdict.similar_to is None
+
+
+def test_judge_unavailable_reason_distinguishes_from_confirmed_novel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    title, body = "Port fp8 KV cache (reworded)", ""
+    candidate_text = novelty._candidate_text(title, body)
+    _mock_embeddings(monkeypatch, candidate_text=candidate_text, similarity="far")
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"unexpected": "shape"})
+
+    verdict = check_novelty(title, body, [_PRIOR])
+
+    assert verdict.is_novel is True
+    assert verdict.reason != "novel"
+    assert "judge unavailable" in verdict.reason
+
+
+# --------------------------------------------------------------------- None body
+
+
+def test_none_body_does_not_crash(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Regression: a real GitHub issue/PR body is routinely None; every sibling agent
+    normalizes with `item.get("body") or ""` at its own boundary, and this module must survive
+    a caller that forwards None straight through instead."""
+    prior = PriorAttempt(title="Port fp8 KV cache", body=None, evidence="https://x/1")  # type: ignore[arg-type]
+    candidate_text = novelty._candidate_text("Add speculative decoding", None)  # type: ignore[arg-type]
+    vectors = {
+        candidate_text: [1.0, 0.0],
+        novelty._candidate_text(prior.title, prior.body): [0.0, 1.0],
+    }
+    monkeypatch.setattr(novelty.embed, "embed_texts", _fake_embed_texts(vectors))
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"redundant": False})
+
+    verdict = check_novelty("Add speculative decoding", None, [prior])  # type: ignore[arg-type]
+
+    assert verdict.is_novel is True
