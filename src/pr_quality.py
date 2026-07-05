@@ -51,9 +51,11 @@ Known limitations, not fixed here:
   `total_votes == 0` and `passes` is `False` (fails safe, same rule `self_review.py` documents).
 - The DEVPLAN's "sends it back to T3.9" isn't automated here — there is no M4 orchestrator yet to
   re-invoke `pr_author.run_pr_author` on a `passes=False` verdict (the same "not wired into the
-  pipeline yet" gap T3.7/T3.9 already left for their own downstream steps). `gate.py`'s
-  approve/submit path also doesn't yet require a passing `pr_quality` run before proceeding —
-  wiring that gate is left to M4's orchestrator too.
+  pipeline yet" gap T3.7/T3.9 already left for their own downstream steps). T3.10.5 wired
+  `gate.py`'s `--submit` to require a passing `pr_quality` run for the *current* narrative (it
+  reads this module's persisted KB record, not a live call — see `gate.py`'s own docstring), but
+  nothing automatically re-invokes T3.9 on failure; a human still has to run `python -m
+  src.pr_author` again after fixing whatever the judges flagged.
 - Judges see `RepoProfile` context but this module doesn't itself re-derive
   `profile.title_pattern`/`requires_dco` compliance in code (unlike, say, a regex check) — it
   relies entirely on the judges noticing a mismatch, the same "advisory context, not a coded
@@ -66,9 +68,11 @@ Known limitations, not fixed here:
 
 from __future__ import annotations
 
+import argparse
 import dataclasses
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 
 from . import gate
 from .agents.forecaster import TS_FORMAT
@@ -76,6 +80,7 @@ from .pr_author import _DIFF_CONTEXT_CHARS, _profile_context
 from .pr_profile import RepoProfile, get_profile
 from .self_review import DEFAULT_VOTES, SUPERMAJORITY_THRESHOLD
 from .stages import complete_or_none, latest_run, record_run_best_effort
+from .store import resolve_store
 from .store.base import Store
 
 _VOTE_SCHEMA = {
@@ -246,3 +251,37 @@ def run_pr_quality(
         store, result.to_run_record(), stage="pr_quality", repo=repo, number=number
     )
     return result
+
+
+def main(argv: list[str] | None = None) -> int:
+    """CLI entry point: judge `--candidate`'s most recently composed PR narrative and print the
+    verdict. Exit code is `0` only when the ensemble passed -- so this is scriptable as a gate
+    (`python -m src.pr_quality --candidate ... && python -m src.gate --candidate ... --submit`),
+    though `gate.py` itself reads the persisted verdict directly rather than relying on this
+    process's exit code (see `gate.py`'s own docstring)."""
+    ap = argparse.ArgumentParser(
+        prog="python -m src.pr_quality",
+        description="Judge a gate-ready candidate's most recently composed PR narrative (T3.9).",
+    )
+    ap.add_argument(
+        "--candidate", required=True, type=gate._parse_candidate, help="owner/repo#number"
+    )
+    ap.add_argument("--data-dir", type=Path, default=None)
+    args = ap.parse_args(argv)
+    repo, number = args.candidate
+
+    store, _ = resolve_store(args.data_dir)
+    result = run_pr_quality(store, repo, number)
+    if result is None:
+        print(f"{repo}#{number} is not ready for quality judging (see stderr for why).")
+        return 1
+
+    verdict = "PASSED" if result.passes else "FAILED"
+    print(f"{verdict}: {result.approve_count}/{result.total_votes} acceptable")
+    for vote in result.votes:
+        print(f"  - {'✅' if vote.acceptable else '❌'} {vote.reason}")
+    return 0 if result.passes else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

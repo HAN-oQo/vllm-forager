@@ -78,17 +78,58 @@ def _store_ready_for_gate(
     return store
 
 
+def _add_passing_narrative(
+    store,
+    *,
+    repo="o/r",
+    number=1,
+    body="composed body",
+    pr_author_recorded_at="2026-01-02T00:00:00Z",
+):
+    """Add a `stage=\"pr_author\"` run plus a matching, passing `stage=\"pr_quality\"` run --
+    what `gate.main()`'s `_current_narrative` needs to use `body` and allow `--submit`."""
+    store.record_run(
+        {
+            "repo": repo,
+            "number": number,
+            "stage": "pr_author",
+            "title": "[Bugfix] composed title",
+            "body": body,
+            "verify_recorded_at": "2025-12-31T00:00:00Z",
+            "recorded_at": pr_author_recorded_at,
+        }
+    )
+    store.record_run(
+        {
+            "repo": repo,
+            "number": number,
+            "stage": "pr_quality",
+            "votes": [{"acceptable": True, "reason": "ok"}],
+            "approve_count": 1,
+            "total_votes": 1,
+            "passes": True,
+            "pr_author_recorded_at": pr_author_recorded_at,
+            "recorded_at": "2026-01-03T00:00:00Z",
+        }
+    )
+
+
 def _fail_if_gh_called(*a, **k):
     raise AssertionError("gh (subprocess.run) should not be called")
 
 
-def _approve_then_submit(store, repo, number, **kwargs):
+def _approve_then_submit(store, repo, number, *, quality_passed=True, **kwargs):
     """T3.7's `draft_is_new` check requires the draft to already exist from an earlier, separate
     call before `submit=True` actually submits (see `gate.py`'s own module docstring) -- do the
     required first bare `approve=True` call (creates the draft) and return the second call's
-    result (the draft already exists by then, so this one actually attempts submission)."""
+    result (the draft already exists by then, so this one actually attempts submission).
+    `quality_passed=True` by default (T3.10.5's own required condition) so every existing
+    "submission succeeds" test doesn't have to know about it; tests of that condition itself
+    override it."""
     gate.run_gate(store, repo, number, approve=True)
-    return gate.run_gate(store, repo, number, approve=True, submit=True, **kwargs)
+    return gate.run_gate(
+        store, repo, number, approve=True, submit=True, quality_passed=quality_passed, **kwargs
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -186,7 +227,9 @@ def test_approve_and_submit_on_a_later_call_does_submit(
     monkeypatch.setattr(gate.subprocess, "run", _fake_run)
 
     gate.run_gate(store, "o/r", 1, approve=True)  # first call: writes the draft only
-    result = gate.run_gate(store, "o/r", 1, approve=True, submit=True)  # second: submits
+    result = gate.run_gate(
+        store, "o/r", 1, approve=True, submit=True, quality_passed=True
+    )  # second: submits
 
     assert result is not None
     assert result.submitted is True
@@ -583,6 +626,279 @@ def test_verified_diff_returns_none_when_self_review_did_not_advance(tmp_path) -
     assert gate.verified_diff(store, "o/r", 1) is None
 
 
+# --------------------------------------------------------------------- T3.10.5: pr_body/quality
+
+
+def test_finalize_uses_composed_pr_body_when_given(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(
+        gate, "_score", lambda *a, **k: {"risk": "low", "effort": "low", "impact": "medium"}
+    )
+    bundle = gate.assemble_bundle(store, "o/r", 1)
+    assert bundle is not None
+
+    result = gate._finalize(store, "o/r", 1, bundle, approve=True, pr_body="composed body")
+
+    assert result.draft_path is not None
+    assert result.draft_path.read_text() == "composed body"
+
+
+def test_finalize_falls_back_to_bundle_format_when_no_pr_body_given(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(
+        gate, "_score", lambda *a, **k: {"risk": "low", "effort": "low", "impact": "medium"}
+    )
+    bundle = gate.assemble_bundle(store, "o/r", 1)
+    assert bundle is not None
+
+    result = gate._finalize(store, "o/r", 1, bundle, approve=True)
+
+    assert result.draft_path is not None
+    assert result.draft_path.read_text() == bundle.format()
+
+
+def test_draft_is_new_when_content_changed_even_though_a_file_already_existed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `draft_is_new` must be content-based, not just file-existence-based -- a
+    narrative recomposed (T3.9 rerun) between the required `--approve` and `--approve --submit`
+    calls must force a fresh read, not silently submit the new content under the old
+    'draft already existed' assumption."""
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+    store = _store_ready_for_gate(tmp_path)
+
+    gate.run_gate(store, "o/r", 1, approve=True, pr_body="narrative A")
+    # A recomposition landed between the two calls -- different content, same candidate.
+    result = gate.run_gate(
+        store, "o/r", 1, approve=True, submit=True, pr_body="narrative B", quality_passed=True
+    )
+
+    assert result.draft_is_new is True  # forces a fresh read cycle, not a silent submit
+    assert result.submitted is False
+    assert result.draft_path.read_text() == "narrative B"
+
+
+def test_draft_is_new_false_when_content_is_unchanged(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    monkeypatch.setattr(
+        gate.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 0, stdout="https://x/pull/1\n"),
+    )
+    gate.run_gate(store, "o/r", 1, approve=True, pr_body="same narrative")
+    result = gate.run_gate(
+        store,
+        "o/r",
+        1,
+        approve=True,
+        submit=True,
+        pr_body="same narrative",
+        quality_passed=True,
+    )
+    assert result.draft_is_new is False
+    assert result.submitted is True
+
+
+def test_submit_stays_inert_when_quality_passed_is_false_on_a_later_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+    store = _store_ready_for_gate(tmp_path)
+
+    result = _approve_then_submit(store, "o/r", 1, quality_passed=False)
+
+    assert result.submitted is False
+    assert result.draft_is_new is False
+    assert result.quality_passed is False
+
+
+def test_submit_stays_inert_when_quality_passed_is_none_on_a_later_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+    store = _store_ready_for_gate(tmp_path)
+
+    result = _approve_then_submit(store, "o/r", 1, quality_passed=None)
+
+    assert result.submitted is False
+    assert result.quality_passed is None
+
+
+_CURRENT_VERIFY_RECORDED_AT = "2025-12-31T00:00:00Z"  # matches _store_ready_for_gate's verify run
+
+
+def test_current_narrative_returns_none_body_when_no_pr_author_run(tmp_path) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    assert gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    ) == (None, None)
+
+
+def test_current_narrative_returns_body_and_none_quality_when_no_pr_quality_run(
+    tmp_path,
+) -> None:
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "t",
+            "body": "composed body",
+            "verify_recorded_at": _CURRENT_VERIFY_RECORDED_AT,
+            "recorded_at": "2026-01-02T00:00:00Z",
+        }
+    )
+    assert gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    ) == ("composed body", None)
+
+
+def test_current_narrative_ignores_a_stale_pr_quality_verdict(tmp_path) -> None:
+    """A pr_quality run judging an OLDER pr_author run must not be read as covering the
+    current (newer) one."""
+    store = _store_ready_for_gate(tmp_path)
+    _add_passing_narrative(store, pr_author_recorded_at="2025-01-01T00:00:00Z")  # stale verdict
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "t",
+            "body": "newer composed body",
+            "verify_recorded_at": _CURRENT_VERIFY_RECORDED_AT,
+            "recorded_at": "2026-06-01T00:00:00Z",
+        }
+    )
+
+    pr_body, quality_passed = gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    )
+
+    assert pr_body == "newer composed body"
+    assert quality_passed is None
+
+
+def test_current_narrative_reads_kb_records_not_live_calls(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `_current_narrative` must never invoke `pr_author`/`pr_quality`'s actual LLM
+    calls (it isn't even allowed to import those modules -- see module docstring) -- it only
+    reads already-persisted KB records."""
+    store = _store_ready_for_gate(tmp_path)
+    _add_passing_narrative(store, body="composed body")
+    monkeypatch.setattr(gate, "_score", _fail_if_gh_called)
+
+    assert gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    ) == ("composed body", True)
+
+
+def test_current_narrative_returns_none_when_narrative_composed_against_older_verify_run(
+    tmp_path,
+) -> None:
+    """TOCTOU regression: a candidate re-verified (a new verify run landed) after T3.9/T3.10
+    already ran must not have its stale narrative/verdict used -- neither the body nor the
+    quality verdict describe the diff that's actually current now."""
+    store = _store_ready_for_gate(tmp_path)
+    _add_passing_narrative(store)  # composed against _CURRENT_VERIFY_RECORDED_AT
+
+    pr_body, quality_passed = gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at="2026-06-01T00:00:00Z"  # a newer verify run
+    )
+
+    assert pr_body is None
+    assert quality_passed is None
+
+
+def test_current_narrative_returns_none_when_pr_author_recorded_at_missing(tmp_path) -> None:
+    """Defense-in-depth: a malformed pr_author record missing `recorded_at` must not be treated
+    as usable, even if it happens to have a body -- there's nothing to correlate a quality
+    verdict against."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "t",
+            "body": "composed body",
+            "verify_recorded_at": _CURRENT_VERIFY_RECORDED_AT,
+            "recorded_at": "",
+        }
+    )
+    assert gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    ) == (None, None)
+
+
+def test_current_narrative_returns_none_when_body_missing(tmp_path) -> None:
+    """A pr_author record with a matching, valid recorded_at but an empty body must not report
+    a body OR a quality verdict -- the two must never be independently valid."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "t",
+            "body": "",
+            "verify_recorded_at": _CURRENT_VERIFY_RECORDED_AT,
+            "recorded_at": "2026-01-02T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_quality",
+            "passes": True,
+            "pr_author_recorded_at": "2026-01-02T00:00:00Z",
+            "recorded_at": "2026-01-03T00:00:00Z",
+        }
+    )
+    assert gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    ) == (None, None)
+
+
+def test_current_narrative_does_not_coerce_a_truthy_non_bool_passes_value(tmp_path) -> None:
+    """`is True`, not `bool(...)` -- a malformed store value like the string "False" is truthy
+    in Python but must never be read as an accidental pass."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "t",
+            "body": "composed body",
+            "verify_recorded_at": _CURRENT_VERIFY_RECORDED_AT,
+            "recorded_at": "2026-01-02T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_quality",
+            "passes": "False",  # malformed: a non-empty (truthy) string, not the bool False
+            "pr_author_recorded_at": "2026-01-02T00:00:00Z",
+            "recorded_at": "2026-01-03T00:00:00Z",
+        }
+    )
+    _, quality_passed = gate._current_narrative(
+        store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
+    )
+    assert quality_passed is False
+
+
 # --------------------------------------------------------------------- CLI ordering
 
 
@@ -609,7 +925,8 @@ def test_cli_prints_bundle_before_opening_pr(
     terminal before any PR exists. Requires two separate invocations now (see
     `test_cli_first_approve_submit_together_does_not_submit`): the first creates the draft,
     the second (this test's actual assertion) submits it."""
-    _store_ready_for_gate(tmp_path)  # populates the JsonlStore the CLI itself will open
+    store = _store_ready_for_gate(tmp_path)  # populates the JsonlStore the CLI itself will open
+    _add_passing_narrative(store)
     monkeypatch.setattr(
         gate.subprocess,
         "run",
@@ -643,6 +960,46 @@ def test_cli_approve_without_submit_never_calls_gh_and_prints_draft_path(
     assert "--submit" in out
 
 
+def test_cli_submit_blocked_when_quality_gate_not_passed(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """CLI-level regression for the quality-gate branch itself (not just the underlying
+    run_gate() behavior) -- a narrative exists but its pr_quality verdict is passes=False, so a
+    later --approve --submit call must print why and never call gh."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "t",
+            "body": "composed body",
+            "verify_recorded_at": "2025-12-31T00:00:00Z",
+            "recorded_at": "2026-01-02T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_quality",
+            "passes": False,
+            "pr_author_recorded_at": "2026-01-02T00:00:00Z",
+            "recorded_at": "2026-01-03T00:00:00Z",
+        }
+    )
+    monkeypatch.setattr(gate.subprocess, "run", _fail_if_gh_called)
+
+    gate.main(["--candidate", "o/r#1", "--approve", "--data-dir", str(tmp_path)])
+    capsys.readouterr()
+    rc = gate.main(["--candidate", "o/r#1", "--approve", "--submit", "--data-dir", str(tmp_path)])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PR-quality gate (T3.10): NOT PASSED" in out
+    assert "NOT submitted: no passing T3.10 PR-quality verdict" in out
+
+
 def test_cli_writes_draft_under_the_given_data_dir_not_configs_default(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -663,7 +1020,8 @@ def test_cli_writes_draft_under_the_given_data_dir_not_configs_default(
 def test_cli_fork_owner_flag_prefixes_head(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`--fork-owner` on the CLI reaches `gh pr create`'s `--head` the same way the
     programmatic `run_gate(..., fork_owner=...)` path does."""
-    _store_ready_for_gate(tmp_path)
+    store = _store_ready_for_gate(tmp_path)
+    _add_passing_narrative(store)
     calls = []
 
     def _fake_run(cmd, **k):

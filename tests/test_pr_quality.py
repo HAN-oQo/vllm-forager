@@ -334,3 +334,44 @@ def test_profile_context_includes_profile_fields() -> None:
     context = pr_quality._profile_context(profile)
     assert "DCO/Signed-off-by required: True" in context
     assert "Please sign your commits per our DCO policy." in context
+
+
+# --------------------------------------------------------------------- CLI
+
+
+def test_cli_prints_verdict_and_returns_zero_on_pass(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    store = _store_ready_for_quality(tmp_path)
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, True, True))
+    monkeypatch.setattr(pr_quality, "resolve_store", lambda data_dir: (store, tmp_path))
+
+    rc = pr_quality.main(["--candidate", "o/r#1"])
+
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "PASSED" in out
+    assert "5/5 acceptable" in out
+
+
+def test_cli_returns_nonzero_on_fail(tmp_path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
+    store = _store_ready_for_quality(tmp_path)
+    monkeypatch.setattr(llm, "complete", _votes(False, False, False, False, False))
+    monkeypatch.setattr(pr_quality, "resolve_store", lambda data_dir: (store, tmp_path))
+
+    rc = pr_quality.main(["--candidate", "o/r#1"])
+
+    assert rc == 1
+    assert "FAILED" in capsys.readouterr().out
+
+
+def test_cli_returns_nonzero_when_not_ready(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    store = JsonlStore(tmp_path)
+    monkeypatch.setattr(pr_quality, "resolve_store", lambda data_dir: (store, tmp_path))
+
+    rc = pr_quality.main(["--candidate", "o/r#1"])
+
+    assert rc == 1
+    assert "not ready for quality judging" in capsys.readouterr().out
