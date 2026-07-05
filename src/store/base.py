@@ -11,6 +11,13 @@ callers only ever pass `repo` + `number`.
 
 State is a small key → string map kept separate from items — the incremental collection
 cursor lives here, keyed by repo slug.
+
+Runs (T3.2+) are a third, append-only kind of record — one MI250 repro/build/verify attempt
+each — kept separate from items because they don't have items' (repo, number)-keyed
+identity: several runs can (and do) exist for the same candidate over time, so a run is never
+merged into a prior one the way :func:`merge_record` merges item upserts. A run record's shape
+beyond ``repo``/``number`` (used only for filtering, not identity) is caller-defined — this
+module doesn't fix a schema, the same way ``upsert_items`` doesn't fix one for items.
 """
 
 from __future__ import annotations
@@ -86,3 +93,13 @@ class Store(ABC):
     @abstractmethod
     def set_state(self, key: str, value: str) -> None:
         """Set (and immediately persist) the state value for `key`."""
+
+    @abstractmethod
+    def record_run(self, run: dict) -> None:
+        """Append `run` to the KB's `runs` collection (see module docstring) — never merged
+        into a prior record, unlike :meth:`upsert_items`; each call adds a new one."""
+
+    @abstractmethod
+    def list_runs(self, *, repo: str | None = None, number: int | None = None) -> list[dict]:
+        """Return every recorded run matching the given filters (AND; omitted filters don't
+        constrain), in the order they were recorded."""

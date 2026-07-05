@@ -113,6 +113,7 @@ class JsonlStore(Store):
     def __init__(self, data_dir: Path) -> None:
         self.data_dir = Path(data_dir)
         self.state_path = self.data_dir / "state.json"
+        self.runs_path = self.data_dir / "runs.jsonl"
 
     def _path_for(self, repo: str) -> Path:
         """``data_dir/{owner}__{repo}.jsonl`` for a repo slug."""
@@ -167,3 +168,32 @@ class JsonlStore(Store):
         state = load_state(self.state_path)
         state[key] = value
         save_state(self.state_path, state)
+
+    # -- runs -------------------------------------------------------------------
+    def record_run(self, run: dict) -> None:
+        """Append `run` as one line to ``runs.jsonl`` — never rewrites existing lines, so
+        (unlike item writes) this doesn't need the temp-file-plus-rename atomicity dance;
+        a crash mid-append can only corrupt the last, in-flight line, which :meth:`list_runs`
+        tolerates the same way item reads tolerate a corrupt item line."""
+        self.data_dir.mkdir(parents=True, exist_ok=True)
+        with self.runs_path.open("a") as f:
+            f.write(json.dumps(run, ensure_ascii=False) + "\n")
+
+    def list_runs(self, *, repo: str | None = None, number: int | None = None) -> list[dict]:
+        if not self.runs_path.exists():
+            return []
+        out: list[dict] = []
+        for lineno, line in enumerate(self.runs_path.read_text().split("\n"), 1):
+            if not line.strip():
+                continue
+            try:
+                rec = json.loads(line)
+            except json.JSONDecodeError as exc:
+                print(f"  !! runs.jsonl:{lineno} skipping corrupt line ({exc})", file=sys.stderr)
+                continue
+            if repo is not None and rec.get("repo") != repo:
+                continue
+            if number is not None and rec.get("number") != number:
+                continue
+            out.append(rec)
+        return out
