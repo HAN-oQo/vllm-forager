@@ -145,6 +145,18 @@ def evidence_url(item: dict) -> str:
     return url
 
 
+def is_merged(item: dict) -> bool:
+    """Whether `item` counts as a merged PR.
+
+    ``type == "pr"`` and ``state == "closed"`` — the collector doesn't capture GitHub's own
+    ``merged``/``merged_at`` flag, so "closed" is treated as "merged" until it does (a
+    closed-without-merging PR would be misread as merged). Shared by
+    :mod:`dashboard.render`'s PR-state chip and :mod:`~src.parity`'s "did this capability
+    ship" check, so a future collector fix only needs to update this one place.
+    """
+    return item.get("type") == "pr" and item.get("state") == "closed"
+
+
 def repo_number_label(item: dict) -> str:
     """``repo#number`` for `item`, ``?`` for a missing or present-but-``None`` field.
 

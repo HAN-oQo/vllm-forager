@@ -33,7 +33,7 @@ from __future__ import annotations
 from html import escape
 
 from src.agents.forecaster import Prediction, list_predictions
-from src.agents.reporter import repo_number_label
+from src.agents.reporter import is_merged, repo_number_label
 from src.agents.reporter_v1 import TreeNode, tree_from_store
 from src.store.base import Store
 from src.trends import trends_from_store
@@ -80,7 +80,7 @@ def _state_chip(pr: dict) -> tuple[str, str]:
     """
     if pr.get("type") != "pr":
         return "issue", "issue"
-    if pr.get("state") == "closed":
+    if is_merged(pr):
         return "merged", "merged"
     return "open", "open pr"
 

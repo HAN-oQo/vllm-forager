@@ -93,6 +93,42 @@ def test_build_matrix_one_cell_per_engine_capability_pair() -> None:
     assert cells[("vllm-project/vllm", "fp8-kv-cache")].present is False
 
 
+def test_build_matrix_evidence_prefers_most_recently_shipped_item() -> None:
+    items = [
+        _item("ROCm/vllm", 1, "fp8-kv-cache", created_at="2026-01-01T00:00:00Z"),
+        _item("ROCm/vllm", 2, "fp8-kv-cache", created_at="2026-06-01T00:00:00Z"),
+    ]
+
+    cells = parity.build_matrix(items)
+
+    assert cells[0].evidence == "https://github.com/ROCm/vllm/pull/2"
+
+
+def test_build_matrix_evidence_falls_back_when_newest_has_no_resolvable_url() -> None:
+    """Regression: evidence used to be taken from the first shipped item unconditionally,
+    reporting no evidence at all when that one happened to be unresolvable even though an
+    older shipped item in the same cell had a perfectly good URL."""
+    newest_unresolvable = _item("ROCm/vllm", 1, "fp8-kv-cache", created_at="2026-06-01T00:00:00Z")
+    del newest_unresolvable["url"]
+    del newest_unresolvable["number"]  # repo stays -- needed for bucketing into the same cell
+    older_resolvable = _item("ROCm/vllm", 2, "fp8-kv-cache", created_at="2026-01-01T00:00:00Z")
+
+    cells = parity.build_matrix([newest_unresolvable, older_resolvable])
+
+    assert cells[0].evidence == "https://github.com/ROCm/vllm/pull/2"
+
+
+# --------------------------------------------------------------------- _default_engine
+
+
+def test_default_engine_raises_clear_error_for_unknown_role(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(parity.config, "REPOS", [{"slug": "o/r", "role": "primary"}])
+    with pytest.raises(parity.ParityError, match="no config.REPOS entry has role 'fork'"):
+        parity.find_gaps([])
+
+
 # --------------------------------------------------------------------- find_gaps
 
 
