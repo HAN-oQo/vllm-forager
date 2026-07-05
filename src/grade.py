@@ -6,12 +6,14 @@ then aggregate precision/recall/Brier over *every* recorded grade (not just this
 ones — the self-evolution signal is the running total, not one run's delta) is printed.
 Mirrors :mod:`src.forecast`'s (T1.5) store-selection pattern.
 
-T2.2: when this run actually graded something new, it also proposes and applies a policy
-update (:func:`~src.agents.policy_update.update_policy_from_grades`) — grading is only a
-diagnostic unless it feeds back into the policy driving the next round. Skipped when nothing
-matured this run (an unchanged grade log would just churn out an identical policy version) —
-not skipped, and left to raise loudly, if no policy has ever been created yet (a bootstrapping
-gap to notice and fix, not silently paper over).
+T2.2: every run also proposes and applies a policy update
+(:func:`~src.agents.policy_update.update_policy_from_grades`) — grading is only a diagnostic
+unless it feeds back into the policy driving the next round. Run unconditionally, not gated on
+this run having graded anything new: it's idempotent (a no-op re-run never bumps the policy
+version — see that function's own docstring) and a backlog of already-graded-but-never-applied
+predictions shouldn't have to wait for an unrelated new one to mature before it's ever
+reflected. Left to raise loudly if no policy has ever been created yet (a bootstrapping gap to
+notice and fix on the very first run, not silently paper over).
 """
 
 from __future__ import annotations
@@ -49,16 +51,16 @@ def main(argv: list[str] | None = None) -> int:
     new_grades = grader.grade_store(store)
     print(f"graded {len(new_grades)} newly-matured prediction(s)")
 
-    metrics = grader.compute_metrics(grader.list_grades(store))
+    all_grades = grader.list_grades(store)
+    metrics = grader.compute_metrics(all_grades)
     print(
         f"overall: n={metrics.n} precision={metrics.precision:.2f} "
         f"recall={metrics.recall:.2f} brier={metrics.brier:.2f}"
     )
 
-    if new_grades:
-        updated = policy_update.update_policy_from_grades(store)
-        if updated is not None:
-            print(f"policy@{updated.version} active (scoring_weights updated from new grades)")
+    updated = policy_update.update_policy_from_grades(store, all_grades)
+    if updated is not None:
+        print(f"policy@{updated.version} active (scoring_weights updated)")
     return 0
 
 
