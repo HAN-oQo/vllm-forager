@@ -15,11 +15,22 @@ shipped, and this risk is sharpest for a *sparse* cell (a capability with only o
 items total) where a single such PR can flip the whole cell — not just a diffuse aggregate
 risk, directionally right only until the collector captures the real flag.
 
-:func:`find_gaps` is the sharp end: every capability shipped on the **fork**
-(:data:`~src.config.REPOS`'s ``role: "fork"`` entry, i.e. ROCm/vllm) but not shipped upstream
-(``role: "primary"``, i.e. vllm-project/vllm) — exactly the port-candidate signal T2.5's Scout
-will rank. "Not shipped upstream" covers both "no evidence at all" and "discussed upstream but
-never merged" — either way there's nothing to point at upstream yet.
+:func:`find_gaps` is the sharp end: every capability shipped on **any** tracked engine but not
+shipped on a given ``target_engine`` (one of :data:`~src.config.REPOS`'s ``role: "primary"``
+entries — a real contribution target) — exactly the port-candidate signal T2.5's Scout will
+rank. "Not shipped on the target" covers both "no evidence at all" and "discussed there but
+never merged" — either way there's nothing to point at that target yet.
+
+**Generalized off fork-vs-upstream (T3.14):** this used to compare exactly two hardcoded
+engines — the retired ``ROCm/vllm`` fork (``role: "fork"``) against ``vllm-project/vllm``
+(``role: "primary"``). Now that the fork is retired and the target set is multi-domain (three
+``"primary"`` contribution targets — vllm, vllm-omni, vime — each surrounded by its own
+ecosystem of ``"parity"``/``"source"``/``"radar"`` repos), a gap can come from *any* tracked
+engine, not one designated fork, and there's more than one target to check it against. Use
+:func:`find_gaps` for one specific target, or :func:`find_gaps_for_all_targets` to check every
+``"primary"`` target at once — the latter is what :mod:`~src.agents.scout` actually uses, since
+a capability upstream ships but vllm-omni or vime is missing is just as real a port candidate
+as one from an external engine.
 
 Known limitations, not fixed here:
 - A capability's key is its *exact* flattened ``category`` string, not its hierarchical
@@ -63,9 +74,12 @@ class ParityCell:
 
 @dataclass(frozen=True)
 class Gap:
-    """`capability` is shipped on the fork but not upstream — a port candidate."""
+    """`capability` is shipped on `source_engine` but not on `target_engine` — a port
+    candidate into `target_engine`."""
 
     capability: str
+    target_engine: str
+    source_engine: str
     evidence: str | None
 
 
@@ -115,33 +129,79 @@ def build_matrix(items: list[dict]) -> list[ParityCell]:
     return cells
 
 
+def _engines_with_role(role: str) -> list[str]:
+    """Every :data:`~src.config.REPOS` slug with `role`, in file order."""
+    return [repo["slug"] for repo in config.REPOS if repo["role"] == role]
+
+
 def _default_engine(role: str) -> str:
-    for repo in config.REPOS:
-        if repo["role"] == role:
-            return repo["slug"]
-    raise ParityError(f"no config.REPOS entry has role {role!r}")
+    engines = _engines_with_role(role)
+    if not engines:
+        raise ParityError(f"no config.REPOS entry has role {role!r}")
+    return engines[0]
 
 
 def find_gaps(
-    cells: list[ParityCell], *, fork_engine: str | None = None, upstream_engine: str | None = None
+    cells: list[ParityCell],
+    *,
+    target_engine: str | None = None,
+    source_engines: list[str] | None = None,
 ) -> list[Gap]:
-    """Every capability shipped on `fork_engine` but not on `upstream_engine`.
+    """Every capability shipped on a source engine but not on `target_engine` — a port
+    candidate into `target_engine`, citing the first source engine (in `source_engines` order)
+    that shipped it.
 
-    `fork_engine`/`upstream_engine` default to :data:`~src.config.REPOS`'s ``"fork"``/
-    ``"primary"``-role entries (ROCm/vllm, vllm-project/vllm) — this project's real fork and
-    contribution target — overridable for tests or a future multi-fork setup.
+    `target_engine` defaults to :data:`~src.config.REPOS`'s first ``"primary"``-role entry (a
+    real contribution target). `source_engines` defaults to every OTHER tracked engine in
+    :data:`~src.config.REPOS`, of any role — generalized off the old hardcoded ``"fork"``-role
+    default (T3.14, ROCm/vllm retired): any tracked engine can supply a capability a target is
+    missing, not just one designated fork. A source or target engine with no cell at all
+    (nothing shipped or even classified yet) is treated like any other "not present" case, not
+    an error — overridable for tests or to scope a check to specific engines.
 
     Raises:
-        ParityError: a default was needed and no :data:`~src.config.REPOS` entry has that role.
+        ParityError: `target_engine` was defaulted and no :data:`~src.config.REPOS` entry has
+            role ``"primary"``.
     """
-    fork_engine = fork_engine or _default_engine("fork")
-    upstream_engine = upstream_engine or _default_engine("primary")
-    upstream_cells = {cell.capability: cell for cell in cells if cell.engine == upstream_engine}
-    gaps = []
+    target_engine = target_engine or _default_engine("primary")
+    if source_engines is None:
+        source_engines = [repo["slug"] for repo in config.REPOS if repo["slug"] != target_engine]
+
+    by_engine: dict[str, dict[str, ParityCell]] = defaultdict(dict)
     for cell in cells:
-        if cell.engine != fork_engine or not cell.present:
-            continue
-        upstream_cell = upstream_cells.get(cell.capability)
-        if upstream_cell is None or not upstream_cell.present:
-            gaps.append(Gap(capability=cell.capability, evidence=cell.evidence))
+        by_engine[cell.engine][cell.capability] = cell
+    target_cells = by_engine.get(target_engine, {})
+
+    gaps: dict[str, Gap] = {}
+    for source_engine in source_engines:
+        for capability, cell in by_engine.get(source_engine, {}).items():
+            if not cell.present or capability in gaps:
+                continue
+            target_cell = target_cells.get(capability)
+            if target_cell is not None and target_cell.present:
+                continue
+            gaps[capability] = Gap(
+                capability=capability,
+                target_engine=target_engine,
+                source_engine=source_engine,
+                evidence=cell.evidence,
+            )
+    return list(gaps.values())
+
+
+def find_gaps_for_all_targets(cells: list[ParityCell]) -> list[Gap]:
+    """:func:`find_gaps` for every :data:`~src.config.REPOS` ``"primary"``-role engine — this
+    project now has multiple contribution targets (vllm, vllm-omni, vime), not one, so a gap
+    check against a single default target would silently miss capabilities the other targets
+    are missing.
+
+    Raises:
+        ParityError: no :data:`~src.config.REPOS` entry has role ``"primary"``.
+    """
+    targets = _engines_with_role("primary")
+    if not targets:
+        raise ParityError("no config.REPOS entry has role 'primary'")
+    gaps: list[Gap] = []
+    for target in targets:
+        gaps.extend(find_gaps(cells, target_engine=target))
     return gaps

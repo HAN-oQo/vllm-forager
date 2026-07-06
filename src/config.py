@@ -24,8 +24,11 @@ STATE_PATH = DATA_DIR / "state.json"
 # Each entry: slug + role + domain.
 #   role:   primary = contribution target (where PRs go) · parity = perf/feature comparison ·
 #           source = ecosystem trend/parity source (watched, not contributed to) · radar = trends
-#           only · fork = retired downstream fork (kept until parity is generalized — DEVPLAN).
+#           only.
 #   domain: engine · speech · rl · omni — groups a target with the ecosystem watched around it.
+# `src.parity.find_gaps` compares any tracked engine (of any role) against a `primary` target --
+# there's no dedicated "fork" role anymore (ROCm/vllm retired upstream; T3.14 generalized parity
+# off the old fork-vs-upstream premise before this list dropped it).
 # Note: collection treats all repos equally; role/domain are hints for the M2 ranking/parity.
 # ⚠ Some source repos are large (verl, diffusers, OpenRLHF, slime) — see DEVPLAN for tuning
 #   collection per role (shorter window / issues-only) so the KB isn't swamped.
@@ -50,11 +53,6 @@ REPOS = [
     },  # ROCm parity baseline + omni
     {"slug": "ai-dynamo/dynamo", "role": "radar", "domain": "engine"},
     {"slug": "llm-d/llm-d", "role": "radar", "domain": "engine"},
-    {
-        "slug": "ROCm/vllm",
-        "role": "fork",
-        "domain": "engine",
-    },  # retired fork — kept until parity generalized (DEVPLAN)
     # ── RL / post-training ecosystem (watch around vime) ──
     {"slug": "verl-project/verl", "role": "source", "domain": "rl"},
     {"slug": "OpenRLHF/OpenRLHF", "role": "source", "domain": "rl"},

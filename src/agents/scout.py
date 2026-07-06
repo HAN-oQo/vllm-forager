@@ -9,11 +9,13 @@ tells you whether something is schedulable soon or someday.
 
 Three candidate sources, per the DEVPLAN spec:
 
-- **parity gap** (:func:`~src.parity.find_gaps`) — a capability shipped on the ROCm fork but
-  missing upstream; the clearest, already-evidenced port candidate. A gap with no resolvable
-  evidence (:attr:`~src.parity.Gap.evidence` is `None` — see that module's own docstring for
-  when) is skipped, not surfaced with a fabricated-empty citation: the evidence principle means
-  a candidate a human can't check a source for isn't a candidate worth ranking.
+- **parity gap** (:func:`~src.parity.find_gaps_for_all_targets`) — a capability shipped on any
+  tracked engine but missing on one of this project's ``"primary"`` contribution targets
+  (vllm, vllm-omni, vime — T3.14 generalized this off the old hardcoded ROCm-fork-vs-upstream
+  premise); the clearest, already-evidenced port candidate. A gap with no resolvable evidence
+  (:attr:`~src.parity.Gap.evidence` is `None` — see that module's own docstring for when) is
+  skipped, not surfaced with a fabricated-empty citation: the evidence principle means a
+  candidate a human can't check a source for isn't a candidate worth ranking.
 - **good-first-issue** — an open issue labeled ``"good first issue"`` (a real, common GitHub
   label — matched with hyphens/underscores normalized to spaces first, since repos spell this
   inconsistently: ``"good-first-issue"``, ``"Good First Issue"``, etc.) on any tracked repo.
@@ -47,11 +49,12 @@ Known limitations, not fixed here:
   scan, :func:`~src.parity.build_matrix`, and this module's own discovery loop), with no
   persistence of what a human already picked up, and no dedup against a near-duplicate
   candidate seen before (T2.7's job).
-- :func:`discover_from_store` computes parity gaps via :func:`~src.parity.find_gaps`'s own
-  ``config.REPOS``-derived defaults; if no entry has a ``"fork"``/``"primary"`` role,
-  :class:`~src.parity.ParityError` is caught and logged here rather than left to crash the
-  whole run — unlike T2.2's policy-missing case, a parity misconfiguration shouldn't take down
-  the two GitHub-signal sources that don't depend on it at all.
+- :func:`discover_from_store` computes parity gaps via
+  :func:`~src.parity.find_gaps_for_all_targets`'s own ``config.REPOS``-derived defaults; if no
+  entry has a ``"primary"`` role, :class:`~src.parity.ParityError` is caught and logged here
+  rather than left to crash the whole run — unlike T2.2's policy-missing case, a parity
+  misconfiguration shouldn't take down the two GitHub-signal sources that don't depend on it at
+  all.
 """
 
 from __future__ import annotations
@@ -175,7 +178,7 @@ def discover_candidates(
     (open issues only for the latter two — a PR isn't something to "reproduce and fix"),
     scored and ranked by :attr:`Candidate.priority`, highest first.
 
-    `gaps` (typically :func:`~src.parity.find_gaps` over `items`' own
+    `gaps` (typically :func:`~src.parity.find_gaps_for_all_targets` over `items`' own
     :func:`~src.parity.build_matrix`) is accepted as a parameter rather than recomputed here,
     so a caller that already has it (e.g. :func:`discover_from_store`) doesn't pay for it
     twice.
@@ -186,7 +189,7 @@ def discover_candidates(
     for gap in gaps or []:
         if not gap.evidence:
             continue
-        title = f"Port to upstream: {gap.capability}"
+        title = f"Port to {gap.target_engine}: {gap.capability} (shipped in {gap.source_engine})"
         _try_score_and_append(
             candidates, title=title, body="", source="parity-gap", evidence=gap.evidence
         )
@@ -220,7 +223,7 @@ def discover_from_store(store: Store) -> list[Candidate]:
     """
     items = store.query()
     try:
-        gaps = parity_module.find_gaps(parity_module.build_matrix(items))
+        gaps = parity_module.find_gaps_for_all_targets(parity_module.build_matrix(items))
     except parity_module.ParityError as exc:
         print(f"scout: skipping parity gaps: {exc}", file=sys.stderr)
         gaps = []
