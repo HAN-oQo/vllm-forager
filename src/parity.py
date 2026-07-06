@@ -35,7 +35,7 @@ as one from an external engine.
 Known limitations, not fixed here:
 - A capability's key is its *exact* flattened ``category`` string, not its hierarchical
   ``path``. Two items describing the same real capability can land at different depths
-  (:func:`~src.agents.analyst._canonical_path` returns a shorter path when the model is only
+  (:func:`~src.agents.analyst._validated_subpath` returns a shorter path when the model is only
   confident about the higher levels) — e.g. a source engine's PR classified all the way to
   ``"quantization > FP8 > kv-cache"`` while the target's equivalent only validated to
   ``"quantization > FP8"``. These become two different, non-matching capability keys, which
