@@ -374,7 +374,7 @@ def _write_pr_draft(bundle: EvidenceBundle, body: str, *, drafts_dir: Path | Non
 
 
 def _create_draft_pr(
-    bundle: EvidenceBundle, body: str, *, fork_owner: str | None = None
+    bundle: EvidenceBundle, body: str, *, fork_owner: str | None = None, title: str | None = None
 ) -> str | None:
     """`gh pr create --draft` for `bundle`'s branch, with `body` (`bundle.format()`, rendered
     once by the caller — see `_finalize`) as the PR body — the PR URL `gh` prints on success, or
@@ -386,7 +386,13 @@ def _create_draft_pr(
     real run discovered this the hard way: `--head <branch>` alone makes `gh` look for that
     branch *inside* `bundle.repo`, failing with "No commits between main and <branch>" / "Head
     ref must be a branch" for a fork-hosted branch that's never existed there). Left `None`
-    (default) to preserve prior behavior for a same-repo head."""
+    (default) to preserve prior behavior for a same-repo head.
+
+    `title`, if given (T3.9's composed title), is used instead of a generic
+    `"[vllm-forager] Fix for {repo}#{number}"` fallback — T3.6's own real run discovered this
+    gap too: `_finalize` already threads T3.9's composed `body` through, but nothing threaded
+    the composed *title*, so a real upstream PR would have opened with a generic, un-maintainer-
+    grade title even when a real `pr_author` narrative existed."""
     head = f"{fork_owner}:{bundle.branch}" if fork_owner else bundle.branch
     cmd = [
         "gh",
@@ -398,7 +404,7 @@ def _create_draft_pr(
         "--head",
         head,
         "--title",
-        f"[vllm-forager] Fix for {bundle.repo}#{bundle.number}",
+        title if title is not None else f"[vllm-forager] Fix for {bundle.repo}#{bundle.number}",
         "--body",
         body,
     ]
@@ -429,6 +435,7 @@ def _finalize(
     pr_drafts_dir: Path | None = None,
     now: datetime | None = None,
     pr_body: str | None = None,
+    pr_title: str | None = None,
     quality_passed: bool | None = None,
 ) -> GateResult:
     """Approve-or-not `bundle`, submit-or-not the approved draft, record the `stage="gate"`
@@ -446,6 +453,8 @@ def _finalize(
     `pr_body`, if given (T3.9's composed narrative), is written/submitted instead of
     `bundle.format()`'s raw evidence-dump rendering — the draft a human reviews and the PR that
     gets opened are always the same document either way, just a better one when `pr_body` exists.
+    `pr_title`, similarly, is T3.9's composed title, passed through to :func:`_create_draft_pr`
+    instead of falling back to its generic `"[vllm-forager] Fix for ..."` title.
 
     `fork_owner` is passed straight through to :func:`_create_draft_pr` — see its own docstring
     — and persisted in the `stage="gate"` record too, so the KB's own audit trail for a
@@ -481,7 +490,7 @@ def _finalize(
     pr_url = None
     if submitted:
         assert body is not None  # submitted implies approved implies body was set above
-        pr_url = _create_draft_pr(bundle, body, fork_owner=fork_owner)
+        pr_url = _create_draft_pr(bundle, body, fork_owner=fork_owner, title=pr_title)
 
     when = now or datetime.now(timezone.utc)
     record_run_best_effort(
@@ -529,6 +538,7 @@ def run_gate(
     pr_drafts_dir: Path | None = None,
     now: datetime | None = None,
     pr_body: str | None = None,
+    pr_title: str | None = None,
     quality_passed: bool | None = None,
 ) -> GateResult | None:
     """Assemble the evidence bundle for (`repo`, `number`); if `approve` is the literal `True`,
@@ -538,9 +548,10 @@ def run_gate(
     additionally open a real PR against `repo`. Records the outcome as a `stage="gate"` run
     regardless (see module docstring for why submission needs conditions beyond the two flags).
 
-    `pr_body`/`quality_passed` are plain values, not looked up here — this function doesn't
-    import `pr_author`/`pr_quality` (see module docstring for why); a caller (`main()`) that
-    wants T3.9/T3.10 in the loop reads their latest KB records itself and passes the results in.
+    `pr_body`/`pr_title`/`quality_passed` are plain values, not looked up here — this function
+    doesn't import `pr_author`/`pr_quality` (see module docstring for why); a caller (`main()`)
+    that wants T3.9/T3.10 in the loop reads their latest KB records itself and passes the
+    results in.
 
     `fork_owner`, if given (e.g. `"HAN-oQo"`), tells `gh` the branch lives on that fork rather
     than `repo` itself — see :func:`_create_draft_pr`'s own docstring for why this is required
@@ -569,15 +580,16 @@ def run_gate(
         pr_drafts_dir=pr_drafts_dir,
         now=now,
         pr_body=pr_body,
+        pr_title=pr_title,
         quality_passed=quality_passed,
     )
 
 
 def _current_narrative(
     store: Store, repo: str, number: int, *, current_verify_recorded_at: str
-) -> tuple[str | None, bool | None]:
-    """`(pr_body, quality_passed)` for (`repo`, `number`), read directly from the latest
-    persisted `stage="pr_author"`/`stage="pr_quality"` KB records — never by calling into
+) -> tuple[str | None, str | None, bool | None]:
+    """`(pr_title, pr_body, quality_passed)` for (`repo`, `number`), read directly from the
+    latest persisted `stage="pr_author"`/`stage="pr_quality"` KB records — never by calling into
     `pr_author.py`/`pr_quality.py` themselves (see module docstring for why: a circular import,
     and re-running composition here could produce a body different from the one already written
     to a draft file).
@@ -588,11 +600,11 @@ def _current_narrative(
     *live* verify run: a candidate re-verified (e.g. a follow-up fix landing a new patch) after
     its narrative was composed and judged could still have that stale narrative submitted against
     the new, different diff `bundle.branch` actually points to. If the `pr_author` run's own
-    `verify_recorded_at` doesn't match, neither `pr_body` nor `quality_passed` is usable — both
-    return `None` (falls back to `bundle.format()`, submission blocked) rather than showing a
+    `verify_recorded_at` doesn't match, none of the three is usable — all return `None` (falls
+    back to `bundle.format()`/a generic title, submission blocked) rather than showing a
     narrative that describes a diff no longer being submitted.
 
-    Both return values are `None` together whenever there's nothing valid to use — including a
+    `pr_title`/`pr_body` are `None` together whenever there's nothing valid to use — including a
     `pr_author` run with a missing/malformed `recorded_at`, or an empty/missing `body` — so a
     caller can never see `quality_passed=True` paired with a `pr_body` that doesn't actually
     correspond to a real, verified narrative (a review finding on this fix: the two were
@@ -601,25 +613,30 @@ def _current_narrative(
     `pr_quality` run exists yet, or the latest one's `pr_author_recorded_at` doesn't match the
     `pr_author` run being used — a verdict for a superseded narrative must never be read as
     covering the current one. `passes` is read via `is True` (not `bool(...)`), so a malformed
-    non-bool value in the store can never be coerced into an accidental pass."""
+    non-bool value in the store can never be coerced into an accidental pass. `pr_title` falling
+    back to an empty/missing value doesn't itself block `pr_body`/`quality_passed` from being
+    usable — a composed body with a blank title is still a real improvement over the generic
+    fallback for the body, even though `_create_draft_pr` will fall back to its own generic
+    title for that one field."""
     pr_author_run = latest_run(store.list_runs(repo=repo, number=number, stage="pr_author"))
     if pr_author_run is None:
-        return None, None
+        return None, None, None
     pr_author_recorded_at = pr_author_run.get("recorded_at")
     if not pr_author_recorded_at:
-        return None, None
+        return None, None, None
     if pr_author_run.get("verify_recorded_at") != current_verify_recorded_at:
-        return None, None
+        return None, None, None
     pr_body = pr_author_run.get("body") or None
     if pr_body is None:
-        return None, None
+        return None, None, None
+    pr_title = pr_author_run.get("title") or None
 
     pr_quality_run = latest_run(store.list_runs(repo=repo, number=number, stage="pr_quality"))
     if pr_quality_run is None:
-        return pr_body, None
+        return pr_title, pr_body, None
     if pr_quality_run.get("pr_author_recorded_at") != pr_author_recorded_at:
-        return pr_body, None
-    return pr_body, pr_quality_run.get("passes") is True
+        return pr_title, pr_body, None
+    return pr_title, pr_body, pr_quality_run.get("passes") is True
 
 
 def _parse_candidate(raw: str) -> tuple[str, int]:
@@ -686,7 +703,7 @@ def main(argv: list[str] | None = None) -> int:
 
     print(bundle.format())
 
-    pr_body, quality_passed = _current_narrative(
+    pr_title, pr_body, quality_passed = _current_narrative(
         store, repo, number, current_verify_recorded_at=bundle.verify_recorded_at
     )
     if pr_body is None:
@@ -714,6 +731,7 @@ def main(argv: list[str] | None = None) -> int:
         fork_owner=args.fork_owner,
         pr_drafts_dir=resolved_data_dir / _PR_DRAFTS_SUBDIR,
         pr_body=pr_body,
+        pr_title=pr_title,
         quality_passed=quality_passed,
     )
     if result.submitted:
