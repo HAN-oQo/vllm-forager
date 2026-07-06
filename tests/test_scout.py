@@ -217,11 +217,11 @@ def test_discover_candidates_rocm_speech_outranks_non_matching(
     ]
 
 
-def test_discover_candidates_rocm_speech_boost_needs_priority_repo(
+def test_discover_candidates_rocm_speech_boost_needs_speech_domain_repo(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """The ROCm∩speech boost only applies on a `"primary"`/`"speech"` repo (vllm) -- the same
-    matching text on an untracked repo gets no boost."""
+    """The ROCm∩speech boost only applies on a tracked `"speech"`-domain repo (vllm) -- the
+    same matching text on an untracked repo gets no boost."""
     monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
     items = [_item("o/r", 1, title="[ROCm] whisper decode is broken on gfx90a")]
 
@@ -266,6 +266,74 @@ def test_discover_candidates_merge_velocity_affects_order(
     ]
 
 
+def test_discover_candidates_merge_velocity_needs_at_least_two_repos(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a single repo's mean merge time is trivially its own median, so it must not
+    win the merge-velocity boost by default -- even a genuinely slow, lone repo shouldn't look
+    'faster than typical' just because there's nothing else in the batch to compare it to."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    items = [
+        _item(
+            "only/repo",
+            1,
+            type="pr",
+            state="closed",
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2025-01-01T00:00:00Z",  # a full year to merge -- unambiguously slow
+        ),
+        _item("only/repo", 2, title="hipBLAS bug on gfx90a"),
+    ]
+
+    candidates = scout.discover_candidates(items)
+
+    assert len(candidates) == 1
+    assert candidates[0].boost == 0
+
+
+def test_merge_velocity_by_repo_skips_unparseable_timestamps() -> None:
+    """Regression: a non-str `created_at`/`updated_at` (e.g. a malformed record) must be
+    skipped, not raise -- this used to crash `_parse_ts` with an uncaught AttributeError."""
+    items = [
+        _item(
+            "o/r",
+            1,
+            type="pr",
+            state="closed",
+            created_at=1700000000,
+            updated_at="2024-01-01T00:00:00Z",
+        ),
+        _item(
+            "o/r",
+            2,
+            type="pr",
+            state="closed",
+            created_at="not-a-timestamp",
+            updated_at="2024-01-01T00:00:00Z",
+        ),
+    ]
+
+    assert scout._merge_velocity_by_repo(items) == {}
+
+
+def test_merge_velocity_by_repo_treats_naive_timestamp_as_utc() -> None:
+    """Regression: a `created_at`/`updated_at` pair where one has a `Z` suffix and the other
+    doesn't used to raise `TypeError` on subtraction (naive vs. aware datetimes) -- both must
+    parse as UTC so the pair can still be subtracted."""
+    items = [
+        _item(
+            "o/r",
+            1,
+            type="pr",
+            state="closed",
+            created_at="2024-01-01T00:00:00",  # no "Z"
+            updated_at="2024-01-02T00:00:00Z",
+        )
+    ]
+
+    assert scout._merge_velocity_by_repo(items) == {"o/r": 1.0}
+
+
 # --------------------------------------------------------------------- Candidate/priority
 
 
@@ -285,6 +353,33 @@ def test_priority_low_risk_low_impact_never_outranks_medium_risk_high_impact() -
             title="b", source="x", risk="medium", effort=effort, impact="high", evidence=""
         )
         assert medium_high.priority > low.priority
+
+
+def test_priority_boost_never_lets_low_impact_outrank_medium_risk_high_impact() -> None:
+    """Regression: `boost` is a pure tiebreak between identically-scored candidates, not a
+    lever that can flip a genuine risk/effort/impact difference -- this held even at boost's
+    current maximum (+4) on the low side against boost=0 on the medium-risk/high-impact side,
+    which a naive `+ self.boost` (rather than scaling risk/effort/impact first) did not."""
+    low = scout.Candidate(
+        title="a", source="x", risk="low", effort="low", impact="low", evidence="", boost=4
+    )
+    for effort in ("low", "medium", "high"):
+        medium_high = scout.Candidate(
+            title="b", source="x", risk="medium", effort=effort, impact="high", evidence="", boost=0
+        )
+        assert medium_high.priority > low.priority
+
+
+def test_priority_boost_breaks_ties_between_identical_risk_effort_impact() -> None:
+    """`boost` still does its job: among two candidates with the identical risk/effort/impact
+    combination, the higher-boosted one ranks first."""
+    plain = scout.Candidate(
+        title="a", source="x", risk="low", effort="low", impact="medium", evidence="", boost=0
+    )
+    boosted = scout.Candidate(
+        title="b", source="x", risk="low", effort="low", impact="medium", evidence="", boost=2
+    )
+    assert boosted.priority > plain.priority
 
 
 # --------------------------------------------------------------------- discover_from_store
