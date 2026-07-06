@@ -21,73 +21,18 @@ ROOT = Path(__file__).resolve().parent.parent
 DATA_DIR = Path(os.getenv("FORAGER_DATA_DIR") or (ROOT / "data"))
 STATE_PATH = DATA_DIR / "state.json"
 
-# Each entry: slug + role + domain.
-#   role:   primary = contribution target (where PRs go) · parity = perf/feature comparison ·
-#           source = ecosystem trend/parity source (watched, not contributed to) · radar = trends
-#           only · fork = retired downstream fork (kept until parity is generalized — DEVPLAN).
-#   domain: engine · speech · rl · omni — groups a target with the ecosystem watched around it.
-# Note: collection treats all repos equally; role/domain are hints for the M2 ranking/parity.
-# ⚠ Some source repos are large (verl, diffusers, OpenRLHF, slime) — see DEVPLAN for tuning
-#   collection per role (shorter window / issues-only) so the KB isn't swamped.
+# role: primary = main target / where PRs are submitted; fork = downstream fork;
+#       parity = performance comparison; radar = trends only.
 REPOS = [
-    # ── contribution targets ──
-    {
-        "slug": "vllm-project/vllm",
-        "role": "primary",
-        "domain": "speech",
-    },  # upstream; ROCm SPEECH is the current priority
-    {
-        "slug": "vllm-project/vllm-omni",
-        "role": "primary",
-        "domain": "omni",
-    },  # omni-modality (has a ROCm roadmap)
-    {"slug": "vllm-project/vime", "role": "primary", "domain": "rl"},  # RL post-training
-    # ── core inference engines (parity / trend) ──
-    {
-        "slug": "sgl-project/sglang",
-        "role": "parity",
-        "domain": "engine",
-    },  # ROCm parity baseline + omni
-    {"slug": "ai-dynamo/dynamo", "role": "radar", "domain": "engine"},
-    {"slug": "llm-d/llm-d", "role": "radar", "domain": "engine"},
-    {
-        "slug": "ROCm/vllm",
-        "role": "fork",
-        "domain": "engine",
-    },  # retired fork — kept until parity generalized (DEVPLAN)
-    # ── RL / post-training ecosystem (watch around vime) ──
-    {"slug": "verl-project/verl", "role": "source", "domain": "rl"},
-    {"slug": "OpenRLHF/OpenRLHF", "role": "source", "domain": "rl"},
-    {"slug": "NVIDIA-NeMo/RL", "role": "source", "domain": "rl"},
-    {"slug": "THUDM/slime", "role": "source", "domain": "rl"},
-    {"slug": "NovaSky-AI/SkyRL", "role": "source", "domain": "rl"},
-    {"slug": "PrimeIntellect-ai/prime-rl", "role": "source", "domain": "rl"},
-    # ── omni / multimodal / diffusion-video ecosystem (watch around vllm-omni) ──
-    {"slug": "huggingface/diffusers", "role": "source", "domain": "omni"},
-    {"slug": "xdit-project/xDiT", "role": "source", "domain": "omni"},
-    {"slug": "hao-ai-lab/FastVideo", "role": "source", "domain": "omni"},
-    {"slug": "vipshop/cache-dit", "role": "source", "domain": "omni"},
+    {"slug": "vllm-project/vllm", "role": "primary"},
+    {"slug": "ROCm/vllm", "role": "fork"},
+    {"slug": "sgl-project/sglang", "role": "parity"},
+    {"slug": "ai-dynamo/dynamo", "role": "radar"},
+    {"slug": "llm-d/llm-d", "role": "radar"},
 ]
 
 # Labels/keywords that boost the ROCm-relevance signal (to be used in M2 ranking)
 ROCM_HINTS = ["rocm", "amd", "hip", "mi250", "mi300", "gfx", "hipblas", "instinct"]
-
-# Speech/audio-domain keywords. vLLM's ROCm SPEECH work is the current top priority, so the M2
-# ranking boosts vllm-project/vllm items matching SPEECH_HINTS (especially ∩ ROCM_HINTS).
-SPEECH_HINTS = [
-    "speech",
-    "asr",
-    "tts",
-    "audio",
-    "whisper",
-    "wav2vec",
-    "voice",
-    "vocoder",
-    "transcrib",
-    "phoneme",
-    "diarization",
-    "mel",
-]
 
 # Collection parameters
 PER_PAGE = 100
