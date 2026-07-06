@@ -569,7 +569,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **e.g.:** a list of worked issues with 🟢/🔴 → click → the full T3.12 attempt report rendered.
   - **Test:** `tests/test_dashboard_attempts.py` — seeded attempt reports → the tab lists them with outcome + renders all 3 sections.
   - **Note (added during T3.6's first real attempt):** for a 🟢 verified attempt, don't just link the raw draft file — render the same rich title/body/diff-stats/evidence view T3.12's note now requires directly in this tab, with the T5.6 patch-review approve action wired to it, so a human can go straight from "browsing attempts" to "approving this one" without leaving the console.
-- [ ] **T5.12 Tabbed console shell** — unify the panels into one **tabbed** nav: **Issues** (tree, M1.5) · **Reports/Trends** (T5.9) · **Candidates** (select, T5.10) · **Attempts** (T5.11) · **Agents/Ops** (running · problems · cost — T5.8/T5.7/T5.13). Read-only except the T5.10 selection and T5.6 review actions.
+- [ ] **T5.12 Tabbed console shell** — unify the panels into one **tabbed** nav: **Issues** (tree, M1.5) · **Reports/Trends** (T5.9) · **Candidates** (select, T5.10) · **Attempts** (T5.11) · **Upstream PRs** (T5.14) · **Agents/Ops** (running · problems · cost — T5.8/T5.7/T5.13). Read-only except the T5.10 selection and T5.6 review actions.
   - **Why:** one operator console for the whole loop instead of scattered CLIs/panels — what the user asked for.
   - **e.g.:** `python -m dashboard` → top-nav tabs, each deep-linkable.
   - **Test:** `tests/test_dashboard_tabs.py` — each tab route renders its panel from seeded data.
@@ -577,6 +577,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** operating the agents = "what's running · what's wrong · **what's it costing**" in one place; cost belongs with health, not with the reports.
   - **e.g.:** a bar per agent ($ today) + a total-vs-budget gauge that turns 🔴 when a budget line is crossed.
   - **Test:** `tests/test_dashboard_cost.py` — seeded cost records → per-agent/day series + a budget-exceeded flag.
+- [ ] **T5.14 Upstream PRs tracker (live review-state sub-view)** — a dedicated tab listing only candidates with a real, currently **open** PR against an upstream repo (`stage="gate"` records with `submitted=True` and a live `pr_url`); for each, shows the maintainer review thread (T3.11's `_fetch_comments`), which comments still need a response (no matching `stage="review_post"` with `posted=True` yet — an "outstanding" count), live CI/check status (`gh pr checks`), and who's involved (comment authors, requested reviewers).
+  - **Why:** requested after T3.6's first real PR (`vllm-project/vllm#47678`) — once the pipeline actually opens real PRs, the operator needs *ongoing* visibility into their review lifecycle (what came back, what's left, who's looking), not just T5.11's static "did this attempt work" snapshot. This is a live-tracking view (re-fetches GitHub state) rather than a KB-only report, since a PR's review state keeps changing after the attempt itself is long done.
+  - **e.g.:** `vllm-project/vllm#47678` today would show: draft, DCO ✅, blocked on the maintainer trust gate (not a real failure — see T3.6's own note), zero review comments yet, zero outstanding. Once a maintainer comments, it'd show the comment, flag it "outstanding" until a `review_post` run with `posted=True` exists for it, and surface the requested reviewer.
+  - **Test:** `tests/test_dashboard_upstream_prs.py` — seeded `stage="gate"` (submitted) + `stage="review_response"`/`review_post` records, `gh` mocked → the tab lists only open real PRs, correctly flags un-responded comments as outstanding, and renders live check status.
+  - **Note:** distinct from T5.11 (all attempts, success or fail, static per-issue report) and from T3.11 itself (compose/post replies) — this is read-only visibility over the subset that's actually live upstream, pulling current GitHub state each time it's viewed rather than a frozen KB snapshot.
 
 ---
 
