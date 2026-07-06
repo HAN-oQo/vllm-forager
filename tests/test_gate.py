@@ -189,6 +189,33 @@ def test_approved_and_submitted_calls_gh(tmp_path, monkeypatch: pytest.MonkeyPat
     assert cmd[:4] == ["gh", "pr", "create", "--draft"]
     assert "--repo" in cmd and "o/r" in cmd
     assert "--head" in cmd and "forager/o-r-1" in cmd
+    title_idx = cmd.index("--title")
+    assert cmd[title_idx + 1] == "[vllm-forager] Fix for o/r#1"  # no pr_title given -> fallback
+
+
+def test_approved_and_submitted_uses_the_composed_title_when_given(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: T3.6's own real run discovered `_create_draft_pr` accepted a composed `body`
+    (T3.9) but always used a generic `"[vllm-forager] Fix for ..."` title regardless -- a real
+    upstream PR opened with a maintainer-grade body and a bot-generated title. `pr_title`, once
+    threaded through, must reach `gh pr create --title` exactly, not just the fallback."""
+    store = _store_ready_for_gate(tmp_path)
+    calls = []
+
+    def _fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, 0, stdout="https://github.com/o/r/pull/99\n")
+
+    monkeypatch.setattr(gate.subprocess, "run", _fake_run)
+
+    result = _approve_then_submit(store, "o/r", 1, pr_title="[Bugfix] composed title")
+
+    assert result is not None
+    assert result.submitted is True
+    cmd = calls[0]
+    title_idx = cmd.index("--title")
+    assert cmd[title_idx + 1] == "[Bugfix] composed title"
 
 
 def test_approve_and_submit_together_on_first_call_does_not_submit(
@@ -876,7 +903,7 @@ def test_current_narrative_returns_none_body_when_no_pr_author_run(tmp_path) -> 
     store = _store_ready_for_gate(tmp_path)
     assert gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
-    ) == (None, None)
+    ) == (None, None, None)
 
 
 def test_current_narrative_returns_body_and_none_quality_when_no_pr_quality_run(
@@ -896,7 +923,7 @@ def test_current_narrative_returns_body_and_none_quality_when_no_pr_quality_run(
     )
     assert gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
-    ) == ("composed body", None)
+    ) == ("t", "composed body", None)
 
 
 def test_current_narrative_ignores_a_stale_pr_quality_verdict(tmp_path) -> None:
@@ -916,10 +943,11 @@ def test_current_narrative_ignores_a_stale_pr_quality_verdict(tmp_path) -> None:
         }
     )
 
-    pr_body, quality_passed = gate._current_narrative(
+    pr_title, pr_body, quality_passed = gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
     )
 
+    assert pr_title == "t"
     assert pr_body == "newer composed body"
     assert quality_passed is None
 
@@ -936,7 +964,7 @@ def test_current_narrative_reads_kb_records_not_live_calls(
 
     assert gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
-    ) == ("composed body", True)
+    ) == ("[Bugfix] composed title", "composed body", True)
 
 
 def test_current_narrative_returns_none_when_narrative_composed_against_older_verify_run(
@@ -948,10 +976,11 @@ def test_current_narrative_returns_none_when_narrative_composed_against_older_ve
     store = _store_ready_for_gate(tmp_path)
     _add_passing_narrative(store)  # composed against _CURRENT_VERIFY_RECORDED_AT
 
-    pr_body, quality_passed = gate._current_narrative(
+    pr_title, pr_body, quality_passed = gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at="2026-06-01T00:00:00Z"  # a newer verify run
     )
 
+    assert pr_title is None
     assert pr_body is None
     assert quality_passed is None
 
@@ -974,7 +1003,7 @@ def test_current_narrative_returns_none_when_pr_author_recorded_at_missing(tmp_p
     )
     assert gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
-    ) == (None, None)
+    ) == (None, None, None)
 
 
 def test_current_narrative_returns_none_when_body_missing(tmp_path) -> None:
@@ -1004,7 +1033,7 @@ def test_current_narrative_returns_none_when_body_missing(tmp_path) -> None:
     )
     assert gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
-    ) == (None, None)
+    ) == (None, None, None)
 
 
 def test_current_narrative_does_not_coerce_a_truthy_non_bool_passes_value(tmp_path) -> None:
@@ -1032,7 +1061,7 @@ def test_current_narrative_does_not_coerce_a_truthy_non_bool_passes_value(tmp_pa
             "recorded_at": "2026-01-03T00:00:00Z",
         }
     )
-    _, quality_passed = gate._current_narrative(
+    _, _, quality_passed = gate._current_narrative(
         store, "o/r", 1, current_verify_recorded_at=_CURRENT_VERIFY_RECORDED_AT
     )
     assert quality_passed is False
@@ -1185,3 +1214,4 @@ def test_cli_fork_owner_flag_prefixes_head(tmp_path, monkeypatch: pytest.MonkeyP
 
     cmd = calls[0]
     assert cmd[cmd.index("--head") + 1] == "HAN-oQo:forager/o-r-1"
+    assert cmd[cmd.index("--title") + 1] == "[Bugfix] composed title"  # CLI wires pr_title too
