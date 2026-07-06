@@ -51,6 +51,18 @@ Known limitations, not fixed here:
   compliance (see above: that's T3.10's job) — `_escape_markdown_structure` only guards against
   the model's prose corrupting this module's own template structure, not against it ignoring the
   target repo's conventions.
+- `_template_sections` (T3.10.7) only ever recognizes three fixed concepts (purpose/test-plan/
+  test-result) via an English keyword list — verified to correctly match `vllm-project/vllm`'s
+  own real template, but a repo whose template needs a genuinely different or larger set of
+  sections (or one phrased in another language) won't match and silently falls back to this
+  module's fixed shape, reproducing the exact off-template mismatch T3.10.7 exists to prevent,
+  just for a different repo than the one this was verified against (a code-review finding).
+- `pr_quality.py` resolves its own fresh `RepoProfile` at judging time, independent of whichever
+  profile this module actually used to compose the body being judged — unlike `verify_recorded_at`
+  (which guards the analogous diff/verify-run pairing), there's no persisted record of which
+  template headers a given `stage="pr_author"` run was composed against, so a profile refreshed
+  between composing and judging could fail a body against headers it was never composed to use
+  (a code-review finding on T3.10.7, not fixed here).
 """
 
 from __future__ import annotations
@@ -95,6 +107,113 @@ _GIT_CONFIG_TIMEOUT_S = 5.0
 # Matches a line that would render as a Markdown heading (`#`..`######`) or list/checklist item
 # (`- `) once spliced into the body -- see `_escape_markdown_structure`.
 _STRUCTURAL_LINE = re.compile(r"^(\s*)(#{1,6}\s|-\s)")
+
+# A `##`-level heading line, used to read the target repo's own required section names out of
+# `RepoProfile.pr_template` (T3.8) -- see `_template_sections`.
+_TEMPLATE_HEADER_RE = re.compile(r"^##\s+(.+?)\s*$", re.MULTILINE)
+# Most PR templates put their own fill-in-the-checklist boilerplate after a bare `---` divider
+# (vLLM's own does exactly this). Some templates instead use `---` as a plain horizontal rule
+# between *every* section -- `_extract_template_headers` takes the *last* match, not the first,
+# so only a trailing checklist block is excluded; per-section dividers earlier in the template
+# don't truncate real sections (a code-review finding on this very function: an earlier version
+# used the first match and silently lost every section after the first divider).
+_TEMPLATE_DIVIDER_RE = re.compile(r"^---\s*$", re.MULTILINE)
+
+# Matched with a leading word boundary (see `_match_header`) -- e.g. "purpose" as a substring
+# would also match "repurpose", so every keyword here is checked as its own token, not a bare
+# substring (a code-review finding: the original substring-only version let "## Test Description"
+# match `_PURPOSE_HEADER_KEYWORDS` via "description").
+_PURPOSE_HEADER_KEYWORDS = ("purpose", "summary", "problem", "description")
+_TEST_PLAN_HEADER_KEYWORDS = (
+    "test plan",
+    "testing",
+    "how tested",
+    "how to test",
+    "how has this been tested",
+    "how was this tested",
+)
+_TEST_RESULT_HEADER_KEYWORDS = ("test result", "results", "verification", "evidence")
+
+
+@dataclasses.dataclass(frozen=True)
+class TemplateSections:
+    """The target repo's own header names for the three concepts this module always has
+    evidence for -- see `_template_sections`."""
+
+    purpose: str
+    test_plan: str
+    test_result: str
+
+
+def _extract_template_headers(pr_template: str) -> list[str]:
+    """Every `## heading` in `pr_template` that appears before its own trailing checklist/
+    instructions divider (the *last* bare `---` line), in order -- see module-level regex
+    docstring for why the last match, not the first."""
+    dividers = list(_TEMPLATE_DIVIDER_RE.finditer(pr_template))
+    body = pr_template[: dividers[-1].start()] if dividers else pr_template
+    return [m.group(1) for m in _TEMPLATE_HEADER_RE.finditer(body)]
+
+
+def _compile_keyword_pattern(keywords: tuple[str, ...]) -> re.Pattern[str]:
+    """Case-insensitive alternation matching a keyword at a word boundary -- the same
+    word-boundary-safe convention `src/agents/reporter.py`'s `_compile` already uses for the
+    identical "keyword present in text" problem (a code-review finding: the original version
+    here used a bare substring check, so "## Test Description" matched the purpose bucket via
+    "description")."""
+    alternation = "|".join(re.escape(kw) for kw in keywords)
+    return re.compile(rf"\b(?:{alternation})", re.IGNORECASE)
+
+
+_PURPOSE_HEADER_PATTERN = _compile_keyword_pattern(_PURPOSE_HEADER_KEYWORDS)
+_TEST_PLAN_HEADER_PATTERN = _compile_keyword_pattern(_TEST_PLAN_HEADER_KEYWORDS)
+_TEST_RESULT_HEADER_PATTERN = _compile_keyword_pattern(_TEST_RESULT_HEADER_KEYWORDS)
+
+
+def _match_header(headers: list[str], pattern: re.Pattern[str], claimed: set[str]) -> str | None:
+    """The first of `headers` matching `pattern` that isn't already in `claimed`, or `None`.
+
+    `claimed` enforces that one header can satisfy at most one of purpose/test-plan/test-result
+    (a code-review finding: without this, a header like "Test Plan and Results" could match
+    both the test-plan and test-result keyword sets, and `_render_templated_body` would then
+    emit the same heading twice)."""
+    for header in headers:
+        if header not in claimed and pattern.search(header):
+            return header
+    return None
+
+
+def _template_sections(profile: RepoProfile | None) -> TemplateSections | None:
+    """`profile.pr_template`'s own header names for purpose/test-plan/test-result, or `None` if
+    there's no template, or its headers don't include a recognizable one of each -- the signal
+    to fall back to this module's fixed Problem/Root cause/Fix rationale/... shape instead of
+    guessing at a partial match. Found by hand during T3.6's first real attempt
+    (`vllm-project/vllm#47600`): this module fetched and stored `pr_template` (T3.8) but only
+    ever handed it to the LLM as loose prompt context, so a real submission used entirely
+    different section names than the repo's own template required.
+
+    Matched in purpose -> test-plan -> test-result order so an earlier match "claims" its
+    header before a later, looser keyword set gets a chance to also match it (see `_match_header`
+    for why one header can't satisfy two of the three concepts).
+
+    Known limitation, not fixed here: this only ever recognizes these three specific concepts
+    via a fixed English keyword list -- a template requiring a genuinely different or larger
+    set of sections (or one in another language) won't match and falls back to the fixed shape,
+    silently reproducing the very off-template mismatch T3.10.7 exists to prevent, just for a
+    different repo than the one (`vllm-project/vllm`) this was verified against."""
+    if profile is None or not profile.pr_template:
+        return None
+    headers = _extract_template_headers(profile.pr_template)
+    claimed: set[str] = set()
+    purpose = _match_header(headers, _PURPOSE_HEADER_PATTERN, claimed)
+    if purpose is not None:
+        claimed.add(purpose)
+    test_plan = _match_header(headers, _TEST_PLAN_HEADER_PATTERN, claimed)
+    if test_plan is not None:
+        claimed.add(test_plan)
+    test_result = _match_header(headers, _TEST_RESULT_HEADER_PATTERN, claimed)
+    if purpose is None or test_plan is None or test_result is None:
+        return None
+    return TemplateSections(purpose=purpose, test_plan=test_plan, test_result=test_result)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -226,10 +345,89 @@ def _render_verify_section(bundle: gate.EvidenceBundle) -> str:
     return f"```\n{bundle.verify_log[-_LOG_CONTEXT_CHARS:]}\n```"
 
 
-def _render_body(bundle: gate.EvidenceBundle, fields: dict[str, str], signoff: str | None) -> str:
+def _test_plan_repro_step(bundle: gate.EvidenceBundle) -> str:
+    """The Test Plan section's reproduction step: the same "before the fix" command
+    `_render_repro_section` shows, minus the log output (Test Plan lists what was run; Test
+    Result shows what happened) -- and the *same* fallback wording as `_render_repro_section`
+    for a candidate with no captured repro at all, so Test Plan and Test Result never describe
+    the identical missing-evidence state two different ways (a code-review finding: the
+    original version always showed "$ (command not captured)" here, even when nothing was
+    captured at all, while Test Result honestly said "no captured pre-fix reproduction")."""
+    if not bundle.repro_command and not bundle.repro_log:
+        return "(no captured pre-fix reproduction for this candidate)"
+    command_line = (
+        f"$ {bundle.repro_command}" if bundle.repro_command else "$ (command not captured)"
+    )
+    return f"```\n{command_line}\n```"
+
+
+def _render_templated_body(
+    bundle: gate.EvidenceBundle,
+    fields: dict[str, str],
+    signoff: str | None,
+    sections_map: TemplateSections,
+) -> str:
+    """Assemble the body using the target repo's own section headers (`sections_map`) instead
+    of this module's fixed shape: `purpose` gets the problem/root-cause/fix-rationale narrative
+    plus `Fixes #`, `test_plan` gets the repro command as the reproduction step, and
+    `test_result` gets the actual before/after evidence — the same restructuring done by hand
+    for `vllm-project/vllm#47600` (see `_template_sections`'s docstring), now automatic.
+
+    Still appends a `## Checklist` after the template's own sections (a code-review finding on
+    an earlier version: this path dropped it entirely, silently losing the fixed-shape path's
+    only visible signal for whether a DCO sign-off is present) -- extra content beyond the
+    template's own required headers doesn't violate "use the template's exact headers" the way
+    *missing* one of them would."""
+    purpose_body = (
+        f"{fields['problem']}\n\nFixes #{bundle.number}\n\n"
+        f"{fields['root_cause']}\n\n{fields['fix_rationale']}"
+    )
+    test_plan_body = f"Before the fix:\n{_test_plan_repro_step(bundle)}"
+    test_result_body = (
+        f"Before the fix:\n{_render_repro_section(bundle)}\n\n"
+        f"After the fix:\n{_render_verify_section(bundle)}"
+    )
+    has_repro = bool(bundle.repro_command or bundle.repro_log)
+    has_verify_log = bool(bundle.verify_log)
+    checklist = [
+        f"- [{'x' if has_repro else ' '}] Reproduced the reported failure before the fix",
+        f"- [{'x' if has_verify_log else ' '}] Verified the fix on MI250",
+        f"- [x] Self-reviewed by an independent ensemble "
+        f"({bundle.approve_count}/{bundle.total_votes} approve)",
+        f"- [{'x' if signoff else ' '}] Includes a DCO sign-off below",
+    ]
+    sections = [
+        f"## {sections_map.purpose}\n{purpose_body}",
+        f"## {sections_map.test_plan}\n{test_plan_body}",
+        f"## {sections_map.test_result}\n{test_result_body}",
+        f"## Limitations\n{fields['limitations']}",
+        "## Checklist\n" + "\n".join(checklist),
+    ]
+    body = "\n\n".join(sections)
+    if signoff:
+        body += f"\n\n{signoff}"
+    return body
+
+
+def _render_body(
+    bundle: gate.EvidenceBundle,
+    fields: dict[str, str],
+    signoff: str | None,
+    profile: RepoProfile | None = None,
+) -> str:
     """Assemble the final markdown body: `fields`' narrative prose around the repro/verify/
     checklist/sign-off sections, which are built here from `bundle`/`signoff` directly rather
-    than from anything the model returned — see module docstring."""
+    than from anything the model returned — see module docstring.
+
+    Uses `profile.pr_template`'s own section headers via `_render_templated_body` when
+    `_template_sections` can confidently match one — the fixed Problem/Root cause/Fix
+    rationale/Reproduction/MI250 verification/Checklist shape below is the fallback for a
+    profile with no template, or one whose headers don't include a recognizable purpose/
+    test-plan/test-result set (T3.10.7)."""
+    sections_map = _template_sections(profile)
+    if sections_map is not None:
+        return _render_templated_body(bundle, fields, signoff, sections_map)
+
     has_repro = bool(bundle.repro_command or bundle.repro_log)
     has_verify_log = bool(bundle.verify_log)
     checklist = [
@@ -286,7 +484,7 @@ def compose_pr_body(
     for key in ("problem", "root_cause", "fix_rationale", "limitations"):
         fields[key] = _escape_markdown_structure(fields[key])
     resolved_signoff = signoff if signoff is not None else _default_signoff()
-    body = _render_body(bundle, fields, resolved_signoff)
+    body = _render_body(bundle, fields, resolved_signoff, profile)
     return PRBody(title=fields["title"], body=body)
 
 

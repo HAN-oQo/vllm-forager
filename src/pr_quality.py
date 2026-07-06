@@ -76,7 +76,7 @@ from pathlib import Path
 
 from . import gate
 from .agents.forecaster import TS_FORMAT
-from .pr_author import _DIFF_CONTEXT_CHARS, _profile_context
+from .pr_author import _DIFF_CONTEXT_CHARS, TemplateSections, _profile_context, _template_sections
 from .pr_profile import RepoProfile, get_profile
 from .self_review import DEFAULT_VOTES, SUPERMAJORITY_THRESHOLD
 from .stages import complete_or_none, latest_run, record_run_best_effort
@@ -116,8 +116,12 @@ class QualityVote:
 class PRQualityResult:
     """The ensemble's verdict on one composed PR narrative.
 
-    `passes` is `total_votes > 0 and approve_count / total_votes >= threshold` -- zero votes
-    (every judge call failed) never passes, the same fail-safe rule `self_review.py` applies.
+    `passes` is `total_votes > 0 and approve_count / total_votes >= threshold and not
+    missing_template_headers` -- zero votes (every judge call failed) never passes, the same
+    fail-safe rule `self_review.py` applies, and neither does a body missing one of the target
+    repo's own required section headers (T3.10.7), regardless of how the ensemble voted: found
+    by hand during T3.6's first real attempt that judges alone don't reliably catch this (a body
+    using entirely different headers than `vllm-project/vllm`'s own template passed 5/5, twice).
     `pr_author_recorded_at` traces exactly which `stage="pr_author"` run was judged (see module
     docstring).
     """
@@ -127,6 +131,7 @@ class PRQualityResult:
     votes: tuple[QualityVote, ...]
     approve_count: int
     total_votes: int
+    missing_template_headers: tuple[str, ...]
     passes: bool
     pr_author_recorded_at: str
     recorded_at: str
@@ -138,7 +143,36 @@ class PRQualityResult:
         return record
 
 
-def _quality_prompt(title: str, body: str, diff: str, profile: RepoProfile | None) -> str:
+def _missing_template_headers(body: str, sections_map: TemplateSections | None) -> tuple[str, ...]:
+    """Which of `sections_map`'s purpose/test-plan/test-result headers (T3.10.7,
+    `pr_author._template_sections`) are absent from `body` as a `## {header}` line -- empty if
+    there's no template to check against (nothing this module can enforce), or every required
+    header is present. A deterministic, code-level check rather than relying on the judges to
+    notice (see this module's own docstring: they didn't, twice, on a real off-template body).
+
+    Takes the already-computed `sections_map` rather than a `RepoProfile` so a caller
+    (`run_pr_quality`) that also needs `sections_map` for `required_headers` doesn't have to
+    parse the same `pr_template` twice (a code-review finding on an earlier version of this
+    function)."""
+    if sections_map is None:
+        return ()
+    return tuple(
+        header
+        for header in (sections_map.purpose, sections_map.test_plan, sections_map.test_result)
+        if f"## {header}" not in body
+    )
+
+
+def _quality_prompt(
+    title: str, body: str, diff: str, profile: RepoProfile | None, required_headers: tuple[str, ...]
+) -> str:
+    headers_note = (
+        f"This repo's own PR template requires these exact section headers: "
+        f"{', '.join(required_headers)}. Check the body actually uses them (a body organized "
+        f"under different section names is a real defect, not a style nit)."
+        if required_headers
+        else "This repo has no PR template with a detectable required section structure."
+    )
     return (
         "You are a strict vLLM/ROCm maintainer deciding, at a glance, whether to accept the "
         "following pull request narrative -- not whether the underlying code is correct (assume "
@@ -148,24 +182,31 @@ def _quality_prompt(title: str, body: str, diff: str, profile: RepoProfile | Non
         "vague or boilerplate placeholders), claims-backed-by-evidence (any repro or performance "
         "claim cites something concrete -- an actual command, log line, or number -- not just an "
         "assertion), a focused diff (the change matches the stated problem, not an unrelated or "
-        "overly broad edit), and whether the title/DCO follow the repo's own observed "
-        "conventions below. Note: a candidate can legitimately have no captured pre-fix "
-        "reproduction (its Reproduction section says so explicitly, and its Checklist leaves "
-        "that item unticked) -- this is an honest, allowed state, not a completeness defect; do "
-        "not penalize it as vague or incomplete. Reply with `acceptable` (boolean) and `reason` "
-        "(a short, specific explanation -- if rejecting, name the single biggest problem, e.g. "
-        "'the performance claim has no numbers', 'the diff touches unrelated files').\n\n"
+        "overly broad edit), and whether the title/DCO/section headers follow the repo's own "
+        f"observed conventions below. {headers_note} Note: a candidate can legitimately have no "
+        "captured pre-fix reproduction (its Reproduction section says so explicitly, and its "
+        "Checklist leaves that item unticked) -- this is an honest, allowed state, not a "
+        "completeness defect; do not penalize it as vague or incomplete. Reply with `acceptable` "
+        "(boolean) and `reason` (a short, specific explanation -- if rejecting, name the single "
+        "biggest problem, e.g. 'the performance claim has no numbers', 'the diff touches "
+        "unrelated files').\n\n"
         f"Title: {title[:_TITLE_CONTEXT_CHARS]}\n\nBody:\n{body[:_BODY_CONTEXT_CHARS]}\n\n"
         f"Diff:\n{diff[:_DIFF_CONTEXT_CHARS]}\n\n"
         f"Repo contribution norms:\n{_profile_context(profile)}"
     )
 
 
-def _judge(title: str, body: str, diff: str, profile: RepoProfile | None) -> QualityVote | None:
+def _judge(
+    title: str,
+    body: str,
+    diff: str,
+    profile: RepoProfile | None,
+    required_headers: tuple[str, ...] = (),
+) -> QualityVote | None:
     """One independent judge's vote, or `None` if the call failed or the reply didn't shape into
     a usable vote (excluded from the tally, not counted as a reject -- see module docstring)."""
     reply = complete_or_none(
-        _quality_prompt(title, body, diff, profile),
+        _quality_prompt(title, body, diff, profile, required_headers),
         _VOTE_SCHEMA,
         stage="pr_quality",
         subject=title,
@@ -228,13 +269,22 @@ def run_pr_quality(
     resolved_profile = profile if profile is not None else get_profile(repo)
     title = pr_author_run.get("title") or ""
     body = pr_author_run.get("body") or ""
+    sections_map = _template_sections(resolved_profile)
+    missing_headers = _missing_template_headers(body, sections_map)
+    required_headers = (
+        (sections_map.purpose, sections_map.test_plan, sections_map.test_result)
+        if sections_map is not None
+        else ()
+    )
 
     votes = tuple(
-        v for v in (_judge(title, body, diff, resolved_profile) for _ in range(n)) if v is not None
+        v
+        for v in (_judge(title, body, diff, resolved_profile, required_headers) for _ in range(n))
+        if v is not None
     )
     approve_count = sum(1 for v in votes if v.acceptable)
     total_votes = len(votes)
-    passes = total_votes > 0 and (approve_count / total_votes) >= threshold
+    passes = total_votes > 0 and (approve_count / total_votes) >= threshold and not missing_headers
 
     when = now or datetime.now(timezone.utc)
     result = PRQualityResult(
@@ -243,6 +293,7 @@ def run_pr_quality(
         votes=votes,
         approve_count=approve_count,
         total_votes=total_votes,
+        missing_template_headers=missing_headers,
         passes=passes,
         pr_author_recorded_at=pr_author_run.get("recorded_at") or "",
         recorded_at=when.strftime(TS_FORMAT),
@@ -278,6 +329,11 @@ def main(argv: list[str] | None = None) -> int:
 
     verdict = "PASSED" if result.passes else "FAILED"
     print(f"{verdict}: {result.approve_count}/{result.total_votes} acceptable")
+    if result.missing_template_headers:
+        print(
+            "  ❌ missing required section header(s) from the repo's own PR template: "
+            + ", ".join(f"## {h}" for h in result.missing_template_headers)
+        )
     for vote in result.votes:
         print(f"  - {'✅' if vote.acceptable else '❌'} {vote.reason}")
     return 0 if result.passes else 1
