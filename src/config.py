@@ -35,6 +35,7 @@ STATE_PATH = DATA_DIR / "state.json"
 # proportional to what a large watched-only repo (verl, diffusers, OpenRLHF, slime, …) is
 # actually tracked for, not its raw six-month activity volume.
 _VALID_ROLES = frozenset({"primary", "parity", "source", "radar"})
+_VALID_DOMAINS = frozenset({"engine", "speech", "rl", "omni"})
 REPOS = [
     # ── contribution targets ──
     {
@@ -71,26 +72,41 @@ REPOS = [
 ]
 
 
-def _validate_roles(repos: list[dict]) -> None:
-    """Raise `ValueError` if any `repos` entry's `role` isn't one of `_VALID_ROLES`.
+def _validate_repos(repos: list[dict]) -> None:
+    """Raise `ValueError` if any `repos` entry's `role`/`domain` isn't one of the known values,
+    or if any `slug` repeats.
 
-    Loud, not silent (T3.17 review): a typo'd/renamed role (e.g. `"Source"`) would otherwise
-    fall through every role-keyed lookup's default branch unnoticed — `collector.py`'s per-role
-    window tuning, `parity.py`'s engine-role filtering, `scout.py`'s boost logic would all
-    silently pick the wrong behavior for that one entry, with no test or log to catch it.
+    Loud, not silent (T3.17/T3.18 review): a typo'd/renamed role or domain (e.g. `"Source"`,
+    `"RL"`) would otherwise fall through every role/domain-keyed lookup's default branch
+    unnoticed — `collector.py`'s per-role window tuning, `parity.py`'s engine-role/domain
+    filtering, `scout.py`'s boost logic, and `scripts/repos-md.py`'s domain grouping (a hard
+    `repo["domain"]` lookup, unlike everywhere else's defensive `.get`) would all either
+    silently pick the wrong behavior or crash outright for that one entry, with no test or log
+    to catch it beforehand. A repeated `slug` would double-count that repo everywhere the same
+    way (e.g. `scripts/repos-md.py`'s total count, `store.upsert_items`'s per-repo totals).
     """
+    seen_slugs: set[object] = set()
     for repo in repos:
+        slug = repo.get("slug")
+        if slug in seen_slugs:
+            raise ValueError(f"config.REPOS has a duplicate slug: {slug!r}")
+        seen_slugs.add(slug)
         if repo.get("role") not in _VALID_ROLES:
             raise ValueError(
-                f"config.REPOS entry {repo['slug']!r} has invalid role {repo.get('role')!r} "
+                f"config.REPOS entry {slug!r} has invalid role {repo.get('role')!r} "
                 f"(must be one of {sorted(_VALID_ROLES)})"
+            )
+        if repo.get("domain") not in _VALID_DOMAINS:
+            raise ValueError(
+                f"config.REPOS entry {slug!r} has invalid domain {repo.get('domain')!r} "
+                f"(must be one of {sorted(_VALID_DOMAINS)})"
             )
 
 
 # Only re-validates the literal list above, at import time; a test that later
-# `monkeypatch.setattr(config, "REPOS", ...)` with its own informal roles (e.g. `"x"`/`"y"`,
-# common in this codebase's isolated unit tests) is unaffected.
-_validate_roles(REPOS)
+# `monkeypatch.setattr(config, "REPOS", ...)` with its own informal roles/domains (e.g.
+# `"x"`/`"y"`, common in this codebase's isolated unit tests) is unaffected.
+_validate_repos(REPOS)
 
 # Labels/keywords that boost the ROCm-relevance signal (to be used in M2 ranking)
 ROCM_HINTS = ["rocm", "amd", "hip", "mi250", "mi300", "gfx", "hipblas", "instinct"]

@@ -29,6 +29,16 @@ repos:
         language: system
         types: [python]
         exclude: ^tests/
+      - id: repos-md-sync
+        name: sync docs/PLAN.md tracked-repos block (T3.18)
+        # Same auto-fix-then-fail convention as black/ruff above: rewrites the block in place
+        # if `config.REPOS` changed since it was last generated, then exits 1 so the change
+        # gets re-staged — the doc structurally can't go stale past a commit, not just get
+        # caught later by tests/test_repos_md.py.
+        entry: python scripts/repos-md.py --sync
+        language: system
+        pass_filenames: false
+        files: ^(src/config\.py|docs/PLAN\.md|scripts/repos-md\.py)$
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v5.0.0
