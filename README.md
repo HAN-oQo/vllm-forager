@@ -65,36 +65,38 @@ python -m src.collector
 
 ```
 vllm-forager/
-├── README.md
-├── CLAUDE.md          # Auto-loaded context for every Claude session (rules + pointers)
-├── requirements.txt
-├── requirements-dev.txt
-├── pyproject.toml     # black / ruff / mypy config
-├── .pre-commit-config.yaml
-├── pytest.ini         # pytest config + milestone markers (m0…m5)
-├── .env.example
+├── README.md · CLAUDE.md            # CLAUDE.md = auto-loaded rules/pointers for every session
+├── requirements.txt · requirements-dev.txt · pyproject.toml · .pre-commit-config.yaml · pytest.ini · conftest.py · .env.example · setup.sh
 ├── .claude/
-│   └── settings.json  # Shared permissions allowlist (applies to every session)
+│   ├── settings.json                # permissions allowlist (denies `gh pr merge`)
+│   └── commands/                    # dev-loop.md · collect-loop.md  (agent loop skills)
 ├── .github/
-│   ├── workflows/ci.yml          # CI merge gate: pre-commit + pytest
-│   └── PULL_REQUEST_TEMPLATE.md  # PR checklist (test green · pre-commit · /code-review)
+│   ├── workflows/                   # ci.yml (merge gate) · notify-pr.yml (ntfy on PR open/merge)
+│   └── PULL_REQUEST_TEMPLATE.md
 ├── docs/
-│   ├── PLAN.md        # Project plan + architecture (milestones M0-M5)
-│   ├── DEVPLAN.md     # Resumable Milestone → to-do checklist (each todo has a test)
-│   ├── CONTEXT.md     # Design decision log
-│   ├── SURVEY_RSI.md  # Prior-art survey: recursive self-improvement / self-evolving agents
-│   ├── IDEAS.md       # Idea backlog → next-version roadmap
-│   ├── RUNBOOK.md     # How to operate the dev loop (tmux; PR → human merge → poll)
-│   └── CONTRIBUTING.md # Git & code-review rules (PR=one todo; /code-review --comment; human merge)
+│   ├── PLAN.md · DEVPLAN.md · CONTEXT.md · SURVEY_RSI.md · IDEAS.md · RUNBOOK.md · CONTRIBUTING.md
+│   ├── design/                      # report-tree-mockup.html (dashboard design spec)
+│   └── research/                    # cost-tracking.md (per-agent cost tooling research)
 ├── src/
-│   ├── config.py      # Tracked repos + paths + 24h collection cadence
-│   └── collector.py   # GitHub issue/PR incremental collector (M0)
+│   ├── config.py                    # tracked repos (targets + ecosystem, by domain/role) + cadence + hints
+│   ├── llm.py                       # pluggable LLM wrapper (claude_cli / claude_api / local vLLM) + cost meta
+│   ├── collector.py · audit.py                     # data plane: collect + data-quality guardrail
+│   ├── embed.py · taxonomy.py · policy.py          # KB: vectors · versioned taxonomy/policy
+│   ├── trends.py · rag_eval.py                     # trend series · RAG-trust guardrail
+│   ├── parity.py · novelty.py · llm_bandit.py      # parity matrix · dedup · cost-aware provider bandit
+│   ├── runner.py · repro.py · engineer.py          # contribution: MI250 run · repro · patch loop
+│   ├── self_review.py · gate.py                    # ensemble self-review · fork-first human gate
+│   ├── pr_profile.py · pr_author.py · pr_quality.py · review_loop.py   # maintainer-grade PR + review loop
+│   ├── agents/                      # LLM agents: analyst · forecaster · reporter(_v1) · summarizer · grader · policy_update · curator · scout
+│   ├── store/                       # pluggable KB: base · jsonl_store · firestore_store · migrate
+│   └── analyze.py · forecast.py · report.py · grade.py · candidates.py · stats.py   # CLI entrypoints
+├── dashboard/                       # read-only web operator console (render · server · __main__)
 ├── scripts/
-│   ├── wait-merge.sh  # Poll a PR until merged, then sync main (dev-loop primitive)
-│   ├── collect.sh     # Run the collector + record health (cron entrypoint)
-│   └── triage.sh      # On failure: claude -p → fix PR (human-gated self-heal)
-├── tests/             # pytest suite (offline/deterministic)
-└── data/              # Collection output (gitignored)
+│   ├── wait-merge.sh · notify.sh    # poll PR until merged + ntfy phone push
+│   ├── collect.sh · triage.sh       # scheduled collect + human-gated self-heal
+│   └── devplan-link.sh              # SHA-pinned DEVPLAN permalink for PR bodies
+├── tests/                           # 41 offline/deterministic tests (test_<module>.py; live ones integration-marked)
+└── data/                            # collection output + reports/attempts (gitignored)
 ```
 
 ## Next steps
