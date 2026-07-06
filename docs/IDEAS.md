@@ -82,6 +82,22 @@
   reputation risk.
 - **Status:** shaping
 
+### Hybrid dev-loop: cheap-model build + Claude review (2-session split)
+- **What:** split the dev-loop into a **build session** on a cheap coding model (e.g. GLM 5.1 via z.ai's
+  Anthropic-compatible endpoint) that implements todos + opens PRs, and a separate **review session** on Claude
+  that runs `/code-review --comment` on each open PR; ambiguous/"hard" todos use the existing STOP-and-ask seam →
+  handled on Claude.
+- **Why / value:** run the bulk of coding on a much cheaper model while keeping Claude's adversarial review where
+  it matters — best cost/quality. Needed because Claude Code is **one model per session**
+  (`ANTHROPIC_BASE_URL` is process-level), so build vs review **cannot differ inside a single `/dev-loop` run**.
+- **Scope / effort:** M — edit `.claude/commands/dev-loop.md` (drop the in-session `/code-review` step → just open
+  the PR), add a Claude "PR reviewer" flow/skill over open PRs, update `docs/RUNBOOK.md` (two clones/sessions + the
+  env split: build clone = z.ai base URL, review clone = Anthropic), keep the human merge gate.
+- **Depends on / risk:** only worth it once PR volume is high **or** GLM-run `/code-review` proves too weak —
+  today **all-GLM** (human merge + CI are the real gate) or **all-Claude** is simpler. A z.ai base URL **disables
+  Remote Control** on the build session (use Termius there). Relates to `docs/research/cost-tracking.md`.
+- **Status:** shaping / later (deferred by decision — the current dev-loop stays single-model).
+
 ## 🗺️ vNext roadmap (committed for the next version)
 *(the shortlist that will become DEVPLAN milestones/todos next)*
 
