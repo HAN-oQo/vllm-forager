@@ -143,7 +143,7 @@ _TREE_CONTROLS = (
     '<span><span class="dot" style="background:var(--open)"></span>open PR</span>'
     '<span><span class="dot" style="background:var(--issue)"></span>issue</span>'
     '<span><span class="tag-gap" style="border:none;padding:.02rem .3rem">gap</span>'
-    "present in fork, missing upstream</span>"
+    "present on another tracked engine, missing on a contribution target</span>"
     "</div>"
 )
 

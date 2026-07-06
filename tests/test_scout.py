@@ -37,13 +37,18 @@ def _reply(risk="low", effort="low", impact="low") -> dict:
 
 def test_discover_candidates_from_parity_gap(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
-    gap = parity.Gap(capability="fp8-kv-cache", evidence="https://github.com/ROCm/vllm/pull/1")
+    gap = parity.Gap(
+        capability="fp8-kv-cache",
+        target_engine="vllm-project/vllm-omni",
+        source_engine="sgl-project/sglang",
+        evidence="https://github.com/sgl-project/sglang/pull/1",
+    )
 
     candidates = scout.discover_candidates([], [gap])
 
     assert len(candidates) == 1
     assert candidates[0].source == "parity-gap"
-    assert candidates[0].evidence == "https://github.com/ROCm/vllm/pull/1"
+    assert candidates[0].evidence == "https://github.com/sgl-project/sglang/pull/1"
     assert "fp8-kv-cache" in candidates[0].title
 
 
@@ -52,7 +57,12 @@ def test_discover_candidates_skips_gap_with_no_evidence(monkeypatch: pytest.Monk
     item's URL resolves) used to produce a Candidate(evidence="") -- a fabricated-empty
     citation, not real evidence. Such a gap is now skipped instead of ranked."""
     monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
-    gap = parity.Gap(capability="fp8-kv-cache", evidence=None)
+    gap = parity.Gap(
+        capability="fp8-kv-cache",
+        target_engine="vllm-project/vllm-omni",
+        source_engine="sgl-project/sglang",
+        evidence=None,
+    )
 
     assert scout.discover_candidates([], [gap]) == []
 
@@ -203,9 +213,9 @@ def test_discover_from_store(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
     store = JsonlStore(tmp_path)
     store.upsert_items(
         [
-            _item("ROCm/vllm", 1, title="hipBLAS bug on gfx90a", category="build"),
+            _item("vllm-project/vllm", 1, title="hipBLAS bug on gfx90a", category="build"),
             _item(
-                "ROCm/vllm",
+                "sgl-project/sglang",  # a real, non-"primary" tracked engine -- no ROCm fork
                 2,
                 title="shipped fp8 kv-cache",
                 type="pr",
@@ -226,13 +236,13 @@ def test_discover_from_store(tmp_path, monkeypatch: pytest.MonkeyPatch) -> None:
 def test_discover_from_store_degrades_gracefully_on_parity_error(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Regression: a config.REPOS misconfiguration (no fork/primary role) used to crash the
-    whole run via an uncaught parity.ParityError, losing the good-first-issue/rocm-reproducible
+    """Regression: a config.REPOS misconfiguration (no primary role) used to crash the whole
+    run via an uncaught parity.ParityError, losing the good-first-issue/rocm-reproducible
     sources too, even though neither depends on parity gaps at all."""
     store = JsonlStore(tmp_path)
     store.upsert_items([_item("o/r", 1, title="hipBLAS bug on gfx90a")])
     monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
-    monkeypatch.setattr(parity.config, "REPOS", [{"slug": "o/r", "role": "primary"}])
+    monkeypatch.setattr(parity.config, "REPOS", [{"slug": "o/r", "role": "source"}])
 
     candidates = scout.discover_from_store(store)
 
