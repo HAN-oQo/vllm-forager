@@ -45,18 +45,20 @@ Having 3 MI250s as the available hardware isn't a constraint — it's a **differ
   hardware to reproduce them on." Being able to actually **reproduce, test, and verify** on MI250 is exactly what
   maintainers want most, and it substantially boosts PR credibility.
 
-### Repo weighting (the ROCm source is a two-tier structure)
-- **`vllm-project/vllm` (upstream, main repo) — primary target.** Prioritize `rocm`/`amd`-labeled issues and
-  ROCm-specific build/kernel/performance failures. **PRs are ultimately submitted here.** Tracking the "AMD
-  Development Roadmap (2026 Q2)" issue (#44092) and the broader ROCm roadmap surfaces AMD's priorities (e.g.,
-  achieving decode-performance parity with SGLang/ATOM at high concurrency) = the basis for a parity-gap
-  strategy.
-- **`ROCm/vllm` (AMD's official downstream fork) — primary secondary source.** Where ROCm optimizations often
-  land before upstream → source for finding **"exists in the fork but not upstream"** contribution opportunities.
-  Downstream-to-upstream porting is a classic, well-received PR pattern.
-- **SGLang** — has ROCm support → a **performance-parity comparison baseline** + trend source.
-- **NVIDIA Dynamo** — NVIDIA-centric → **trend radar only** (for reading overall direction).
-- **llm-d** — a trend source for serving orchestration.
+### Targets & sources (multi-domain — `config.REPOS` is the source of truth)
+- **`vllm-project/vllm` (upstream) — primary target; ROCm SPEECH is the current priority.** ROCm is now a
+  **first-class platform *upstream*** (dedicated ROCm CI since Dec 2025), so ROCm PRs go here. Prioritize
+  `rocm`/`amd` **∩ speech/audio** items (ASR/TTS/whisper…). AMD's roadmap issues (#44092 Q2, #44091 Q3) surface
+  priorities + aligned candidates. (ROCm CI regression fixes are ideal MI250-edge candidates.)
+- **`vllm-project/vllm-omni` — primary target (omni / multimodal).** Has a ROCm roadmap → the MI250 edge applies.
+- **`vllm-project/vime` — primary target (RL post-training).**
+- **Ecosystem sources — watched for trends/parity, *not* contributed to:**
+  - *RL / post-training:* verl · OpenRLHF · NVIDIA-NeMo/RL · slime · SkyRL · prime-rl.
+  - *omni / diffusion-video:* SGLang (also the ROCm perf-parity baseline) · diffusers · xDiT · FastVideo · cache-dit.
+  - *engines / radar:* NVIDIA Dynamo · llm-d (overall direction only).
+- **`ROCm/vllm` — retired.** AMD's downstream fork is deprecated; ROCm work consolidated upstream, so the old
+  "exists in the fork but not upstream" port strategy is gone — parity now compares across the **live** engines.
+  Kept in `config.REPOS` only until the parity default is generalized off the `fork` role (DEVPLAN **M3.9 / T3.14**).
 
 > MI250 = gfx90a (CDNA2) → supported on the mainline ROCm path, so it works fine as a reproduction/test
 > environment.
@@ -86,7 +88,7 @@ In short, the direction is not "write new kernels" but **reproduce · debug · e
 ## Architecture (at a glance)
 
 ```
-[Collector] GitHub API/GraphQL → issues, PRs, releases, commits (vllm-project/vllm, ROCm/vllm, SGLang, Dynamo, llm-d)
+[Collector] GitHub API/GraphQL → issues, PRs, releases (targets: vllm-project/vllm [ROCm-speech], vllm-omni, vime · + RL & omni/diffusion ecosystems — see config.REPOS)
    ↓
 [Normalization + RAG index] Store normalized items in a DB (Firebase/Firestore) + embeddings of text/labels/diffs
    ↓
@@ -112,7 +114,7 @@ only through the Engineer → MI250 verify → ensemble self-review → **human 
 
 ```mermaid
 flowchart TB
-  SRC[("Sources — 5 repos<br/>vLLM · ROCm/vllm · SGLang · Dynamo · llm-d")]
+  SRC[("Sources — config.REPOS<br/>targets: vLLM (ROCm-speech) · vllm-omni · vime<br/>ecosystem: SGLang · RL (verl, OpenRLHF…) · omni (diffusers, xDiT…)")]
 
   subgraph DATA["🟢 Data plane · M0 ✅ — no LLM"]
     COL["Collector ✅<br/>GitHub API → normalize"]
@@ -280,7 +282,7 @@ runs (what it decided, and why). Two halves:
 - **Trend charts:** technique/topic momentum over time per taxonomy category (e.g., activity in spec decoding,
   disaggregated prefill/decode, quantization), sourced from classified issue/PR volume across the 5 repos.
 - **Parity analysis of LLM inference engines:** a feature/capability **comparison matrix** across
-  vllm-project/vllm · ROCm/vllm · SGLang · Dynamo · llm-d (paged KV cache, continuous batching, spec decoding,
+  vllm-project/vllm · vllm-omni · SGLang · Dynamo · llm-d (paged KV cache, continuous batching, spec decoding,
   disaggregated P/D, quantization/kernels, ROCm support …), highlighting **gaps present elsewhere but missing
   upstream** — the visual counterpart to M2's parity-gap discovery.
 - **Diagrams:** a rendered architecture/data-flow view of the pipeline itself, and parity/gap diagrams (e.g.,

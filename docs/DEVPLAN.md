@@ -462,6 +462,37 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Test:** `tests/test_pr_followup.py` — mock PR states → the steward picks the correct action per state (ci_fail→engineer · comment→review-response · approved→notify · stale→draft-nudge · conflict→rebase); nothing is pushed/posted without an explicit approve (gh/subprocess mocked).
   - **Feeds:** a **"PRs in flight"** panel on the Agents/Ops dashboard (each open PR + its state + what it needs + who's blocked) + ntfy on state changes (extends the merge/open workflow to "PR needs your attention").
 
+## M3.9 — Retarget rework (parity · taxonomy · scout · collection) — before M4
+
+> **Why this milestone:** the target set moved to multi-domain — **vLLM (ROCm *speech* priority) · vllm-omni ·
+> vime**, watching the **RL** and **omni/diffusion** ecosystems around them (`config.REPOS`, PR #82) — and
+> **`ROCm/vllm` retired**. Several already-built pieces assume the old world (parity = fork-vs-upstream ·
+> ROCm-centric taxonomy), so rework them **before** M4/M5 build on that data model. Reworks T2.4 (parity) /
+> T1.2 (taxonomy) / T2.5 (scout).
+> **Acceptance:** `pytest` green with reworked defaults · `config.REPOS` no longer needs a `fork` role · the
+> diagrams + README reflect the new source set.
+
+- [ ] **T3.14 Generalize parity off fork-vs-upstream (+ drop retired ROCm/vllm)** — rework `src/parity.py`: a gap = "capability present in engine A, missing in target B" across **any** engines, not the hardcoded ROCm/vllm `fork` default; make the fork engine optional; then remove `ROCm/vllm` from `config.REPOS` and update `parity`/`scout` defaults + `tests/test_parity.py`.
+  - **Why:** the fork is retired (ROCm is upstream now) → the fork-vs-upstream premise is dead; parity must compare across the live multi-engine set.
+  - **e.g.:** gap = "flash-attn-3 in SGLang, missing in vllm-omni" → flagged; no ROCm/vllm needed.
+  - **Test:** `tests/test_parity.py` — reworked fixtures (no `fork` role) → cross-engine gaps computed; a missing engine is handled, not an error.
+- [ ] **T3.15 Domain-aware taxonomy (speech · rl · omni · engine)** — the analyst/taxonomy must classify across the new `domain`s, not just ROCm-kernel categories; seed per-domain top-level nodes in the M1.5 tree.
+  - **Why:** half the tracked repos are RL/omni now; a ROCm-centric taxonomy can't classify verl/diffusers items.
+  - **e.g.:** an OpenRLHF PPO issue → `rl > post-training > PPO`; a diffusers scheduler bug → `omni > diffusion > scheduler`.
+  - **Test:** `tests/test_analyst.py` — items from rl/omni/speech repos land in the right domain subtree.
+- [ ] **T3.16 Scout: ROCm∩speech boost + per-repo signals** — `scout.py` consumes `SPEECH_HINTS`+`ROCM_HINTS` to boost **vLLM ROCm-speech** candidates, and scores per-repo **merge-velocity** + **edge-applicability** (does MI250 help?) so fast, edge-relevant work ranks first.
+  - **Why:** vLLM's priority is ROCm-speech; and we want fast-acceptance, edge-relevant candidates surfaced.
+  - **e.g.:** a `[ROCm] whisper decode` vllm issue outranks a generic feature; a diffusers docs typo deprioritized.
+  - **Test:** `tests/test_scout.py` — a ROCm+speech vllm item outranks a non-matching one; merge-velocity affects order.
+- [ ] **T3.17 Per-role collection tuning (volume)** — large `source` repos (verl/diffusers/OpenRLHF/slime) shouldn't backfill 180 days of everything; tune collection by role — `primary` = full window, `source`/`radar` = shorter window and/or issues-only / label-filtered.
+  - **Why:** 17 repos incl. huge ones → the KB + API budget get swamped; sources only need the trend signal.
+  - **e.g.:** `primary` 180d full; `source` 60d, issues + labeled PRs only.
+  - **Test:** `tests/test_collector_robust.py` — a `source`-role repo uses the reduced window/filter; `primary` unchanged.
+- [ ] **T3.18 Keep diagrams + README synced to the target set** — the PLAN.md diagrams (ASCII + both Mermaid views) + README "How it works" diagram must reflect the multi-domain sources; ideally derive the source list from `config.REPOS` so it can't drift.
+  - **Why:** stale diagrams ("5 repos incl. ROCm/vllm") mislead readers. (Refreshed once in the retarget docs pass; this makes them config-driven so they stay right.)
+  - **e.g.:** a tiny `scripts/repos-md.py` prints the `config.REPOS` grouping for embedding.
+  - **Test:** `tests/test_repos_md.py` — generated list matches `config.REPOS` (offline).
+
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
 > **Expected output:** an always-on loop on `ce-master` under tmux; per-stage run events **+ live

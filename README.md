@@ -14,7 +14,7 @@ tracking criteria**, and uses those signals to run an always-on, self-improving 
 
 ```mermaid
 flowchart TB
-  SRC[("5 inference-serving repos<br/>vLLM · ROCm/vllm · SGLang · Dynamo · llm-d")]
+  SRC[("Tracked repos (config.REPOS)<br/>targets: vLLM (ROCm-speech) · vllm-omni · vime<br/>+ RL & omni/diffusion ecosystems")]
   COL["① Collect + index<br/>issues · PRs · releases"]
   KB[("Knowledge Base")]
   INTEL["② Classify · forecast · cited weekly report"]
