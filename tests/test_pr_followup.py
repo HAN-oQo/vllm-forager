@@ -62,9 +62,28 @@ def test_ci_failure_triggers_ci_fix() -> None:
     assert action.action == pr_followup.ACTION_CI_FIX
 
 
-def test_changes_requested_triggers_review_response() -> None:
-    action = pr_followup.next_action(_pr(review_decision="CHANGES_REQUESTED"), now=_NOW)
+def test_changes_requested_with_an_unanswered_comment_triggers_review_response() -> None:
+    action = pr_followup.next_action(
+        _pr(review_decision="CHANGES_REQUESTED", has_new_comments=True), now=_NOW
+    )
     assert action.action == pr_followup.ACTION_REVIEW_RESPONSE
+
+
+def test_changes_requested_with_nothing_new_needs_no_action_yet() -> None:
+    """Regression: GitHub only clears CHANGES_REQUESTED on an explicit re-review, so once every
+    comment is answered there's nothing left for the steward itself to do -- the ball is in the
+    reviewer's court. Forcing review_response here would mean run_review_loop composing nothing
+    every poll, forever, with no path to ever escalate to a stale-nudge."""
+    action = pr_followup.next_action(_pr(review_decision="CHANGES_REQUESTED"), now=_NOW)
+    assert action.action == pr_followup.ACTION_NONE
+
+
+def test_changes_requested_with_nothing_new_can_still_go_stale() -> None:
+    action = pr_followup.next_action(
+        _pr(review_decision="CHANGES_REQUESTED", last_activity_at="2026-01-01T00:00:00Z"),
+        now=_NOW,
+    )
+    assert action.action == pr_followup.ACTION_NUDGE_STALE
 
 
 def test_new_comment_alone_triggers_review_response() -> None:
@@ -72,9 +91,22 @@ def test_new_comment_alone_triggers_review_response() -> None:
     assert action.action == pr_followup.ACTION_REVIEW_RESPONSE
 
 
-def test_approved_triggers_notify_ready() -> None:
+def test_approved_with_green_ci_triggers_notify_ready() -> None:
     action = pr_followup.next_action(_pr(review_decision="APPROVED"), now=_NOW)
     assert action.action == pr_followup.ACTION_NOTIFY_READY
+
+
+def test_approved_with_ci_not_yet_reported_does_not_notify() -> None:
+    """Regression: `ci_status="unknown"` (no checks reported yet) must not be treated as
+    equivalent to a green build -- the module's own docstring says nothing else matters until
+    the code itself is green, not merely "not failed yet"."""
+    action = pr_followup.next_action(_pr(review_decision="APPROVED", ci_status="unknown"), now=_NOW)
+    assert action.action != pr_followup.ACTION_NOTIFY_READY
+
+
+def test_approved_with_ci_pending_does_not_notify() -> None:
+    action = pr_followup.next_action(_pr(review_decision="APPROVED", ci_status="pending"), now=_NOW)
+    assert action.action != pr_followup.ACTION_NOTIFY_READY
 
 
 def test_stale_with_no_other_signal_triggers_nudge() -> None:
@@ -246,6 +278,24 @@ def test_apply_none_action_is_a_no_op(tmp_path, monkeypatch: pytest.MonkeyPatch)
 # --------------------------------------------------------------------- fetch_pr_state
 
 
+def _store_with_item(tmp_path, *, repo="o/r", number=1) -> JsonlStore:
+    store = JsonlStore(tmp_path)
+    store.upsert_items(
+        [
+            {
+                "repo": repo,
+                "number": number,
+                "type": "pull_request",
+                "title": "t",
+                "body": "b",
+                "state": "open",
+                "url": f"https://github.com/{repo}/pull/{number}",
+            }
+        ]
+    )
+    return store
+
+
 def _gh_comment(comment_id, author, body="hi"):
     return {"id": comment_id, "user": {"login": author}, "body": body}
 
@@ -292,7 +342,7 @@ def test_fetch_pr_state_builds_state_from_gh_json(
 def test_fetch_pr_state_marks_a_genuinely_new_comment(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = JsonlStore(tmp_path)
+    store = _store_with_item(tmp_path)
     pr_json = {
         "url": "u",
         "state": "OPEN",
@@ -318,7 +368,7 @@ def test_fetch_pr_state_marks_a_genuinely_new_comment(
 def test_fetch_pr_state_excludes_an_already_answered_comment(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = JsonlStore(tmp_path)
+    store = _store_with_item(tmp_path)
     store.record_run(
         {
             "repo": "o/r",
@@ -351,7 +401,7 @@ def test_fetch_pr_state_excludes_an_already_answered_comment(
 def test_fetch_pr_state_excludes_the_bots_own_comment(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    store = JsonlStore(tmp_path)
+    store = _store_with_item(tmp_path)
     pr_json = {
         "url": "u",
         "state": "OPEN",
@@ -383,6 +433,152 @@ def test_fetch_pr_state_returns_none_on_gh_failure(
     monkeypatch.setattr(pr_followup.subprocess, "run", _fail)
 
     assert pr_followup.fetch_pr_state(store, "o/r", 1) is None
+
+
+def test_fetch_pr_state_ignores_a_new_comment_when_the_kb_item_is_missing(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: has_new_comments must agree with whether run_review_loop would actually do
+    anything -- run_review_loop is a no-op without a KB item, so fetch_pr_state must not report
+    a new comment it can never act on."""
+    store = JsonlStore(tmp_path)  # no upsert_items: no KB item for o/r#1
+    pr_json = {
+        "url": "u",
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "reviewDecision": "",
+        "updatedAt": "2026-01-05T00:00:00Z",
+        "statusCheckRollup": [],
+    }
+    monkeypatch.setattr(
+        pr_followup.subprocess,
+        "run",
+        _fake_gh(pr_json=pr_json, comments=[_gh_comment(1, "maintainer")]),
+    )
+
+    pr = pr_followup.fetch_pr_state(store, "o/r", 1)
+
+    assert pr is not None
+    assert pr.has_new_comments is False
+
+
+def test_fetch_pr_state_returns_none_when_comments_fetch_fails(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a comments-fetch failure must not be silently read as "zero comments" --
+    that could hide reviewer feedback and pick notify_ready instead of review_response."""
+    store = _store_with_item(tmp_path)
+    pr_json = {
+        "url": "u",
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "reviewDecision": "APPROVED",
+        "updatedAt": "2026-01-05T00:00:00Z",
+        "statusCheckRollup": [],
+    }
+
+    def _run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr_json))
+        if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/comments"):
+            raise subprocess.CalledProcessError(1, cmd)
+        raise AssertionError(f"unexpected gh invocation: {cmd}")
+
+    monkeypatch.setattr(pr_followup.subprocess, "run", _run)
+
+    assert pr_followup.fetch_pr_state(store, "o/r", 1) is None
+
+
+def test_fetch_pr_state_returns_none_when_gh_identity_is_unresolvable(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: an unresolvable gh identity must fail closed (not treat every comment,
+    including the bot's own, as a new maintainer comment)."""
+    store = _store_with_item(tmp_path)
+    pr_json = {
+        "url": "u",
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "reviewDecision": "",
+        "updatedAt": "2026-01-05T00:00:00Z",
+        "statusCheckRollup": [],
+    }
+
+    def _run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr_json))
+        if cmd[:2] == ["gh", "api"] and cmd[2] == "user":
+            raise subprocess.CalledProcessError(1, cmd)
+        if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/comments"):
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps([_gh_comment(1, "m")]))
+        raise AssertionError(f"unexpected gh invocation: {cmd}")
+
+    monkeypatch.setattr(pr_followup.subprocess, "run", _run)
+
+    assert pr_followup.fetch_pr_state(store, "o/r", 1) is None
+
+
+def test_fetch_pr_state_skips_comment_lookup_for_a_closed_pr(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a closed/merged PR's comments/identity/store work is wasted (next_action
+    discards it), so fetch_pr_state must not even fetch it."""
+    store = _store_with_item(tmp_path)
+    pr_json = {
+        "url": "u",
+        "state": "MERGED",
+        "mergeable": None,
+        "reviewDecision": "",
+        "updatedAt": "2026-01-05T00:00:00Z",
+        "statusCheckRollup": [],
+    }
+
+    def _run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr_json))
+        raise AssertionError(f"unexpected gh invocation for a closed PR: {cmd}")
+
+    monkeypatch.setattr(pr_followup.subprocess, "run", _run)
+
+    pr = pr_followup.fetch_pr_state(store, "o/r", 1)
+
+    assert pr is not None
+    assert pr.state == "merged"
+    assert pr.has_new_comments is False
+
+
+def test_ci_status_reads_legacy_status_context_failure(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `statusCheckRollup` can carry legacy `StatusContext` entries (`state`, no
+    `conclusion`/`status`) alongside CheckRun entries -- a failed legacy status must not be
+    misread as merely "pending"."""
+    assert pr_followup._ci_status_from_rollup([{"context": "ci/legacy", "state": "FAILURE"}]) == (
+        "failure"
+    )
+
+
+def test_ci_status_reads_legacy_status_context_success() -> None:
+    assert pr_followup._ci_status_from_rollup([{"context": "ci/legacy", "state": "SUCCESS"}]) == (
+        "success"
+    )
+
+
+def test_apply_notify_ready_reports_failure_when_notify_script_exits_nonzero(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: a nonzero exit from notify.sh must not be reported as success."""
+    store = JsonlStore(tmp_path)
+    monkeypatch.setattr(
+        pr_followup.subprocess,
+        "run",
+        lambda cmd, **k: subprocess.CompletedProcess(cmd, 1, stderr="boom"),
+    )
+    action = pr_followup.FollowupAction("o/r", 1, pr_followup.ACTION_NOTIFY_READY, "x")
+
+    message = pr_followup.apply_action(store, action, _pr(), approve=True)
+
+    assert "notify failed" in message
 
 
 # --------------------------------------------------------------------- CLI

@@ -8,11 +8,15 @@ at a time.
 
 **Priority, most-blocking first:** a merge conflict (`mergeable is False`) blocks a merge
 regardless of anything else, so it's checked first; CI failure is next (nothing else matters
-until the code itself is green); then reviewer feedback (`CHANGES_REQUESTED` or an unanswered
-comment — checked together since either means "the human is waiting on a response," and this
-must outrank a stale `reviewDecision=APPROVED` left over from before a later comment landed);
-then an outright approval (nothing left to do but tell the human); staleness is the fallback when
-none of the above hold. A closed/merged PR needs nothing.
+until the code itself is green); then an unanswered comment (something concrete to respond to
+right now); then an outright approval with CI green (nothing left to do but tell the human).
+**`review_decision == "CHANGES_REQUESTED"` alone, with no new comment, is deliberately NOT its
+own branch** -- GitHub only clears that decision on an explicit re-review, so once every comment
+has been answered the ball is in the *reviewer's* court, not something this steward can act on
+again; forcing it back into `review_response` forever would mean `run_review_loop` composing
+nothing every single poll with no path to ever escalate to a stale-nudge. Staleness is the
+fallback for everything that isn't otherwise actionable (including a stuck `CHANGES_REQUESTED`
+with nothing new to say). A closed/merged PR needs nothing.
 
 **Nothing is posted/pushed without an explicit human-confirm**, mirroring `gate.py`/
 `review_loop.py`'s own convention: :func:`next_action` is a pure, side-effect-free decision
@@ -41,7 +45,7 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-from . import gate, review_loop
+from . import config, gate, review_loop
 from .store import resolve_store
 from .store.base import Store
 
@@ -49,9 +53,7 @@ from .store.base import Store
 # `updatedAt` is machine-written by GitHub, never LLM-generated, so strict parsing is right.
 _TS_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
-# Resolved relative to this file (not cwd), same reasoning as wait-merge.sh's own notify_sh
-# resolution: this module can be invoked from anywhere, but the script always lives here.
-_NOTIFY_SCRIPT = Path(__file__).resolve().parent.parent / "scripts" / "notify.sh"
+_NOTIFY_SCRIPT = config.ROOT / "scripts" / "notify.sh"
 
 STALE_AFTER_DAYS = 7
 
@@ -63,6 +65,7 @@ ACTION_NUDGE_STALE = "nudge_stale"
 ACTION_NONE = "none"
 
 _MERGEABLE = {"MERGEABLE": True, "CONFLICTING": False}
+# `CheckRun` (GitHub Actions/Checks API) failure conclusions.
 _CI_FAILURE_CONCLUSIONS = {
     "FAILURE",
     "CANCELLED",
@@ -70,6 +73,12 @@ _CI_FAILURE_CONCLUSIONS = {
     "ACTION_REQUIRED",
     "STARTUP_FAILURE",
 }
+# `StatusContext` (legacy Commit Status API -- external CI like Buildkite/CircleCI/Jenkins)
+# failure states. `statusCheckRollup` is a union of both shapes; a rollup entry carries either
+# conclusion/status (CheckRun) or state (StatusContext), never both -- a code-review finding on
+# this module pointed out that reading only conclusion/status silently misreads a failed legacy
+# status as "pending" forever, since it has neither key.
+_CI_FAILURE_STATES = {"FAILURE", "ERROR"}
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,12 +129,12 @@ def next_action(pr: PRState, *, now: datetime | None = None) -> FollowupAction:
     if pr.ci_status == "failure":
         return FollowupAction(pr.repo, pr.number, ACTION_CI_FIX, "CI is red")
 
-    if pr.review_decision == "CHANGES_REQUESTED" or pr.has_new_comments:
+    if pr.has_new_comments:
         return FollowupAction(
             pr.repo, pr.number, ACTION_REVIEW_RESPONSE, "reviewer feedback needs a response"
         )
 
-    if pr.review_decision == "APPROVED":
+    if pr.review_decision == "APPROVED" and pr.ci_status == "success":
         return FollowupAction(
             pr.repo, pr.number, ACTION_NOTIFY_READY, "approved and ready to merge"
         )
@@ -145,17 +154,28 @@ def next_action(pr: PRState, *, now: datetime | None = None) -> FollowupAction:
 
 def _notify(
     message: str, *, title: str = "vllm-forager:pr-followup", url: str | None = None
-) -> None:
-    """Best-effort phone push via `scripts/notify.sh` -- a silent no-op if `NOTIFY_URL` isn't
-    configured (see that script's own docstring). Never raises: a failed notification must never
-    fail the steward's own decision-making pass."""
+) -> bool:
+    """Best-effort phone push via `scripts/notify.sh` -- `True` only if the script actually ran
+    and exited zero, `False` otherwise (logged, never raised: a failed notification must never
+    fail the steward's own decision-making pass, but its caller still needs to know it failed
+    rather than silently reporting success)."""
     cmd = [str(_NOTIFY_SCRIPT), message, title]
     if url:
         cmd.append(url)
     try:
-        subprocess.run(cmd, capture_output=True, text=True, timeout=gate._DEFAULT_GH_TIMEOUT_S)
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=gate._DEFAULT_GH_TIMEOUT_S
+        )
     except (FileNotFoundError, subprocess.TimeoutExpired) as exc:
         print(f"pr_followup: notify failed: {exc}", file=sys.stderr)
+        return False
+    if result.returncode != 0:
+        print(
+            f"pr_followup: notify.sh exited {result.returncode}: {result.stderr.strip()}",
+            file=sys.stderr,
+        )
+        return False
+    return True
 
 
 def apply_action(
@@ -191,17 +211,26 @@ def apply_action(
                 f"{action.repo}#{action.number}: approved and ready to merge "
                 "(pass --approve to notify)"
             )
-        _notify(f"PR {action.repo}#{action.number} is approved and ready to merge.", url=pr.url)
-        return f"{action.repo}#{action.number}: notified -- approved and ready to merge"
+        sent = _notify(
+            f"PR {action.repo}#{action.number} is approved and ready to merge.", url=pr.url
+        )
+        if sent:
+            return f"{action.repo}#{action.number}: notified -- approved and ready to merge"
+        return (
+            f"{action.repo}#{action.number}: notify failed (see stderr) -- "
+            "approved and ready to merge"
+        )
 
     if action.action == ACTION_NUDGE_STALE:
         if not approve:
             return f"{action.repo}#{action.number}: stale (pass --approve to notify)"
-        _notify(
+        sent = _notify(
             f"PR {action.repo}#{action.number} has been silent for >= {STALE_AFTER_DAYS} days.",
             url=pr.url,
         )
-        return f"{action.repo}#{action.number}: notified -- stale, needs a nudge"
+        if sent:
+            return f"{action.repo}#{action.number}: notified -- stale, needs a nudge"
+        return f"{action.repo}#{action.number}: notify failed (see stderr) -- stale, needs a nudge"
 
     if action.action == ACTION_CI_FIX:
         return (
@@ -220,7 +249,8 @@ def apply_action(
 
 def _ci_status_from_rollup(rollup: list) -> str:
     """`"failure"` if any check concluded badly, `"pending"` if any is still running,
-    `"success"` if every check completed cleanly, else `"unknown"` (no checks reported yet)."""
+    `"success"` if every check completed cleanly, else `"unknown"` (no checks reported yet).
+    Handles both `statusCheckRollup` node shapes (see `_CI_FAILURE_STATES`'s comment)."""
     if not rollup:
         return "unknown"
     saw_pending = False
@@ -230,9 +260,15 @@ def _ci_status_from_rollup(rollup: list) -> str:
             continue
         conclusion = str(check.get("conclusion") or "").upper()
         status = str(check.get("status") or "").upper()
-        if conclusion in _CI_FAILURE_CONCLUSIONS:
+        state = str(check.get("state") or "").upper()
+        if conclusion in _CI_FAILURE_CONCLUSIONS or state in _CI_FAILURE_STATES:
             return "failure"
-        if not conclusion or (status and status != "COMPLETED"):
+        if state:
+            if state == "SUCCESS":
+                saw_completed = True
+            else:
+                saw_pending = True
+        elif not conclusion or (status and status != "COMPLETED"):
             saw_pending = True
         else:
             saw_completed = True
@@ -242,12 +278,18 @@ def _ci_status_from_rollup(rollup: list) -> str:
 
 
 def fetch_pr_state(store: Store, repo: str, number: int) -> PRState | None:
-    """Poll GitHub for `repo`#`number`'s current lifecycle state, or `None` if the `gh` call
-    failed (logged, not raised — the same fetch-failure tolerance every sibling M3 stage
-    applies). `has_new_comments` reuses `review_loop`'s own already-answered bookkeeping (the
-    same `stage="review_response"` KB records `run_review_loop` itself checks) rather than a
-    separate heuristic, so the steward's decision to run a review-response pass always agrees
-    with whether that pass would actually find something new to compose."""
+    """Poll GitHub for `repo`#`number`'s current lifecycle state, or `None` if any `gh` call
+    needed to answer it failed (logged, not raised -- the same fetch-failure tolerance every
+    sibling M3 stage applies, but fails **closed**: a comments-fetch or identity-resolution
+    failure must never be silently read as "no new comments," since that could hide reviewer
+    feedback in the same way `review_loop.run_review_loop` explicitly refuses to guess who
+    posted a comment when its own identity check fails).
+
+    `has_new_comments` reuses `review_loop`'s own already-answered bookkeeping (the same
+    `stage="review_response"` KB records `run_review_loop` itself checks) and the same
+    `get_item_or_skip`-style KB-item gate `run_review_loop` applies, so the steward's decision to
+    run a review-response pass always agrees with whether that pass would actually find
+    something new to compose."""
     cmd = [
         "gh",
         "pr",
@@ -281,25 +323,46 @@ def fetch_pr_state(store: Store, repo: str, number: int) -> PRState | None:
         )
         return None
 
-    comments = review_loop._fetch_comments(repo, number) or []
-    self_login = review_loop._current_gh_login()
-    already_answered = {
-        r.get("comment_id")
-        for r in store.list_runs(repo=repo, number=number, stage="review_response")
-    }
-    has_new_comments = any(
-        isinstance(comment, dict)
-        and isinstance(comment.get("user"), dict)
-        and comment.get("id") not in already_answered
-        and comment["user"].get("login") != self_login
-        for comment in comments
-    )
+    state = str(data.get("state") or "").lower()
+
+    has_new_comments = False
+    # `next_action` discards has_new_comments for a non-open PR anyway -- skip the
+    # comments/identity/store round trips a closed/merged PR would otherwise still pay for.
+    # `run_review_loop` (the thing ACTION_REVIEW_RESPONSE actually delegates to) is also a no-op
+    # without a KB item for this candidate -- match that gate here too, so a picked action always
+    # agrees with what applying it would do (a code-review finding on this module).
+    if state == "open" and store.get_item(repo, number) is not None:
+        comments = review_loop._fetch_comments(repo, number)
+        if comments is None:
+            print(f"pr_followup: failed to fetch comments for {repo}#{number}", file=sys.stderr)
+            return None
+        if comments:
+            self_login = review_loop._current_gh_login()
+            if self_login is None:
+                print(
+                    f"pr_followup: could not resolve the bot's own gh identity for "
+                    f"{repo}#{number} -- skipping this poll rather than risk treating its own "
+                    "comments as new maintainer feedback",
+                    file=sys.stderr,
+                )
+                return None
+            already_answered = {
+                r.get("comment_id")
+                for r in store.list_runs(repo=repo, number=number, stage="review_response")
+            }
+            has_new_comments = any(
+                isinstance(comment, dict)
+                and isinstance(comment.get("user"), dict)
+                and comment.get("id") not in already_answered
+                and comment["user"].get("login") != self_login
+                for comment in comments
+            )
 
     return PRState(
         repo=repo,
         number=number,
         url=data.get("url") or "",
-        state=str(data.get("state") or "").lower(),
+        state=state,
         ci_status=_ci_status_from_rollup(data.get("statusCheckRollup") or []),
         review_decision=(data.get("reviewDecision") or None),
         has_new_comments=has_new_comments,
