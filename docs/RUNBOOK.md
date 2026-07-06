@@ -81,6 +81,12 @@ no-op (the conversation already moved on); otherwise it pings you and reschedule
 `wait-merge.sh`'s own notification (that one fires once, on the actual merge) — this one exists so a session
 never silently sits blocked on you for 30+ minutes with no signal that it's waiting.
 
+**Background-wait notification.** The same applies when Claude itself is waiting on a long-running background
+job it started (a slow script, a remote build/test/repro run on `mi250-05x`) rather than waiting on you: send a
+`scripts/notify.sh` ping (ntfy phone push) immediately when the wait begins, stating what's running, then again
+every ~30 minutes until it finishes. Don't rely on an in-chat status message alone — you may not be watching the
+session, and without a `notify.sh` call nothing reaches your phone.
+
 ## Your side (Mac)
 - Review the PR + CI (green) → optional `/code-review` on the diff → **merge**. That merge is what releases the
   poll and lets the loop advance.
