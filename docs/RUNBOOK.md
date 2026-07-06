@@ -75,11 +75,13 @@ go, **STOPs and asks** on anything ambiguous, and **never self-merges** (`gh pr 
 with Esc; start a fresh session per milestone to keep context clean.
 
 **Idle-on-you notification.** Any point where the loop is waiting specifically on *you* — a milestone-boundary
-sign-off, an ambiguous-todo question, any other stop that isn't a tracked background job — schedule a ~30 minute
-fallback notification (`scripts/notify.sh`) before ending that turn. On firing: if you've since replied, it's a
-no-op (the conversation already moved on); otherwise it pings you and reschedules. This is separate from
+sign-off, an ambiguous-todo question, **a PR-draft sign-off before `gate.py --submit`**, any other stop that
+isn't a tracked background job — send a `scripts/notify.sh` ping **immediately**, in the same turn that presents
+the thing you need to decide on, not just an in-chat message (you may not be watching the session). Then schedule
+a ~30 minute fallback re-ping before ending that turn. On firing: if you've since replied, it's a no-op (the
+conversation already moved on); otherwise it pings you again and reschedules. This is separate from
 `wait-merge.sh`'s own notification (that one fires once, on the actual merge) — this one exists so a session
-never silently sits blocked on you for 30+ minutes with no signal that it's waiting.
+never silently sits blocked on you with no signal that it's waiting, from the very first moment it starts.
 
 **Background-wait notification.** The same applies when Claude itself is waiting on a long-running background
 job it started (a slow script, a remote build/test/repro run on `mi250-05x`) rather than waiting on you: send a
