@@ -138,6 +138,66 @@ def test_main_uses_lookback_window(tmp_path, monkeypatch):
 
 
 # ===================================================================================
+# T3.17: per-role collection tuning (source/radar get a shorter backfill window).
+# ===================================================================================
+
+
+def test_main_uses_shorter_lookback_for_source_role(tmp_path, monkeypatch):
+    """A `"source"`/`"radar"`-role repo backfills `SOURCE_LOOKBACK_DAYS`, not the full
+    `INITIAL_LOOKBACK_DAYS` -- large ecosystem-trend repos don't need six months of history.
+    A `"primary"`-role repo is unaffected."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(
+        config,
+        "REPOS",
+        [
+            {"slug": "o/primary", "role": "primary"},
+            {"slug": "o/source", "role": "source"},
+            {"slug": "o/radar", "role": "radar"},
+        ],
+    )
+    monkeypatch.setattr(config, "INITIAL_LOOKBACK_DAYS", 180)
+    monkeypatch.setattr(config, "SOURCE_LOOKBACK_DAYS", 60)
+    monkeypatch.setattr(sys, "argv", ["collector"])
+
+    seen_since = {}
+
+    def fake_fetch(slug, since, on_stall=None):
+        seen_since[slug] = since
+        return []
+
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    collector.main()
+
+    now = datetime.now(timezone.utc)
+
+    def age_days(slug):
+        since = datetime.strptime(seen_since[slug], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        return (now - since).days
+
+    assert 179 <= age_days("o/primary") <= 181
+    assert 59 <= age_days("o/source") <= 61
+    assert 59 <= age_days("o/radar") <= 61
+
+
+def test_lookback_days_for_role_falls_back_for_other_roles(tmp_path, monkeypatch):
+    """`_lookback_days_for_role` uses `INITIAL_LOOKBACK_DAYS` for `"parity"` and any
+    other/missing role, not just `"primary"` -- only `"source"`/`"radar"` get the shorter
+    `SOURCE_LOOKBACK_DAYS` window."""
+    monkeypatch.setattr(config, "INITIAL_LOOKBACK_DAYS", 180)
+    monkeypatch.setattr(config, "SOURCE_LOOKBACK_DAYS", 60)
+
+    assert collector._lookback_days_for_role("parity") == 180
+    assert collector._lookback_days_for_role("primary") == 180
+    assert collector._lookback_days_for_role(None) == 180
+    assert collector._lookback_days_for_role("source") == 60
+    assert collector._lookback_days_for_role("radar") == 60
+
+
+# ===================================================================================
 # T0.10 remaining: retry/backoff, secondary rate limits, schema validation, body cap.
 # ===================================================================================
 

@@ -17,6 +17,21 @@ This endpoint returns issues and PRs together (PRs have a `pull_request` key), a
   metric via `src.audit.record_stall`, not just stderr; `main`'s per-repo isolation logs a full
   traceback for non-network failures (a real bug) instead of the same message used for an
   expected transient skip.
+- Per-role tuning (T3.17): `config.REPOS`'s large `"source"`/`"radar"`-role repos (verl,
+  diffusers, OpenRLHF, slime, dynamo, llm-d, …) are ecosystem-trend watches, not contribution
+  targets, so they don't need `"primary"`/`"parity"`'s full `INITIAL_LOOKBACK_DAYS` history:
+  :func:`_lookback_days_for_role` backfills them over the shorter `config.SOURCE_LOOKBACK_DAYS`
+  window instead — the GitHub API budget stays proportional to what these repos are tracked for
+  (`src.trends`' signal), not their raw six-month history. A content filter (dropping unlabeled
+  PRs) was evaluated and deliberately **not** implemented: it would silently and irrecoverably
+  drop real signal on repos that label inconsistently (`src.trends.category_trends` counts raw
+  PR/issue volume as the momentum metric itself — there's no "signal" independent of that
+  count), inconsistently degrade `"radar"`-role engine-domain repos (dynamo, llm-d) relative to
+  `sgl-project/sglang`'s `"parity"`-role, unfiltered baseline even though `src.parity` treats
+  all three identically, and would create a permanent false-positive once T0.11's
+  `audit.reconcile` data-quality guardrail is wired up to run per-repo (local counts would
+  permanently trail GitHub's by design, not from an actual collection bug). Window-shortening
+  alone already serves this todo's stated goal (API budget + KB swamping) without those risks.
 
 Usage:
     python -m src.collector            # incremental collection for all repos
@@ -274,6 +289,16 @@ def _normalize(it: dict, slug: str) -> dict:
     }
 
 
+def _lookback_days_for_role(role: str | None) -> int:
+    """`config.SOURCE_LOOKBACK_DAYS` for a `"source"`/`"radar"`-role repo (T3.17: large
+    ecosystem-trend watches that only need recent history); `config.INITIAL_LOOKBACK_DAYS` for
+    `"primary"`/`"parity"` (real contribution targets and their direct comparison baseline need
+    the full window to find parity gaps) or any other/missing role."""
+    if role in ("source", "radar"):
+        return config.SOURCE_LOOKBACK_DAYS
+    return config.INITIAL_LOOKBACK_DAYS
+
+
 def _merge_jsonl(path, records: list[dict]) -> int:
     """Upsert by `number`, then rewrite atomically. Returns the total record count.
 
@@ -294,10 +319,6 @@ def main(argv: list[str] | None = None) -> None:
     store = get_store()  # backend selected by env STORE=jsonl|firestore (default jsonl, T0.6.2)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    # First run / --full: start from a rolling lookback window, not the beginning of time.
-    default_since = (now_dt - timedelta(days=config.INITIAL_LOOKBACK_DAYS)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
 
     if not os.getenv("GITHUB_TOKEN"):
         print(
@@ -337,6 +358,12 @@ def main(argv: list[str] | None = None) -> None:
 
     for repo in config.REPOS:
         slug = repo["slug"]
+        role = repo.get("role")
+        # First run / --full: start from a rolling, role-tuned lookback window (T3.17), not
+        # the beginning of time.
+        default_since = (now_dt - timedelta(days=_lookback_days_for_role(role))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         # --full ignores the stored cursor and re-fetches the whole lookback window.
         since = default_since if args.full else (store.get_state(slug) or default_since)
         print(f"[{slug}] since {since} …")
