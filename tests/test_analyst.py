@@ -13,7 +13,7 @@ lookup vs. the pending-items check.
 
 import pytest
 
-from src import llm
+from src import llm, parity
 from src.agents import analyst
 from src.store.jsonl_store import JsonlStore
 from src.taxonomy import Taxonomy, TaxonomyError, create_taxonomy
@@ -31,7 +31,10 @@ _REPOS = [
 
 @pytest.fixture(autouse=True)
 def _config_repos(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(analyst.config, "REPOS", _REPOS)
+    # analyst._domain_of_item delegates to parity._domain_of (T3.15 reuse), which reads
+    # parity's own `config` reference -- patch REPOS there, not on analyst (which no longer
+    # imports config directly).
+    monkeypatch.setattr(parity.config, "REPOS", _REPOS)
 
 
 def _item(repo: str, number: int, title: str, **overrides) -> dict:
@@ -101,6 +104,13 @@ def test_classify_item_matches_the_devplan_worked_examples(monkeypatch: pytest.M
         _item("huggingface/diffusers", 2, "flow-matching scheduler off by one"), omni_taxonomy
     )
     assert omni_result["path"] == ["omni", "diffusion", "scheduler"]
+
+    monkeypatch.setattr(llm, "complete", lambda prompt, **k: {"path": ["rocm-build"]})
+    speech_taxonomy = Taxonomy(version=1, categories=(("speech", "rocm-build"),))
+    speech_result = analyst.classify_item(
+        _item("vllm-project/vllm", 3, "hipBLAS build fails on gfx90a"), speech_taxonomy
+    )
+    assert speech_result["path"] == ["speech", "rocm-build"]
 
 
 def test_classify_item_stops_at_the_first_level_that_drifts_off_taxonomy(

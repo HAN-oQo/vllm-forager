@@ -62,6 +62,28 @@ today's taxonomy size (never seeded in production yet), but worth revisiting onc
 taxonomy is large/deep enough that prompt length or guess-then-validate accuracy actually
 matters (T1.5.4/T2.3).
 
+Known limitation, not fixed here (a code-review finding on this rework, confirmed by 4
+independent finder angles): a domain with no registered subcategories yet now classifies as
+just ``(domain,)``, not :data:`OTHER`. :mod:`~src.agents.curator`'s ``propose_new_categories``
+(T2.3, unchanged by this rework) discovers new-category candidates by clustering items where
+``category == OTHER`` — domain-only items no longer satisfy that filter. Since every domain
+starts with zero subcategories in production, this silently disables curator's already-built
+new-category-discovery pipeline for every domain until a human manually calls
+:func:`~src.taxonomy.add_category` at least once per domain to seed a first subcategory — the
+exact population (domain-root-only items) that most needs it. A real fix means teaching
+``curator.py`` to cluster per-domain (not just :data:`OTHER`) and giving its
+``NewCategoryProposal`` a domain field so a human can add a correctly domain-rooted path — a
+design change to a different module/milestone (T2.3/M2), not a contained fix within this
+rework's own files; left for a dedicated follow-up. Relatedly, :func:`~src.taxonomy.
+add_category`/:func:`~src.taxonomy.create_taxonomy` have no concept of the four
+:data:`~src.config.REPOS` domain names as reserved level-0 roots — nothing stops
+``add_category(store, "not-a-real-domain")`` from creating a permanently unreachable top-level
+category, since :func:`classify_item` only ever walks from ``config.REPOS``-derived domains,
+never from ``taxonomy.categories``' own roots. Low risk in practice (no crash, just dead data
+a human would need to notice by inspection) — the domain-rooted design lives entirely in this
+module's read path, with no corresponding write-side enforcement in the shared
+:class:`~src.taxonomy.Taxonomy`/``Store`` layer; deferred alongside the curator fix above.
+
 Previously a known limitation, fixed in T1.10: ``Store.upsert_items`` now merges the given
 fields onto an existing ``(repo, number)`` record rather than fully replacing it (both
 backends). Before that fix, the collector's own ``_normalize()`` — which never carries
@@ -77,7 +99,8 @@ from __future__ import annotations
 
 import sys
 
-from .. import config, llm
+from .. import llm
+from ..parity import _domain_of
 from ..store.base import Store
 from ..taxonomy import LEVEL_SEPARATOR, CategoryPath, Taxonomy, casefold_label
 from ..taxonomy import get_active as get_active_taxonomy
@@ -98,12 +121,11 @@ def _domain_of_item(item: dict) -> str | None:
     """The item's repo's :data:`~src.config.REPOS` ``domain``, or `None` if the repo isn't
     tracked there (a stale/retired repo — e.g. ``ROCm/vllm``, collected before T3.14 dropped
     it — or a malformed record). Domain is a deterministic KB fact, not something the model
-    should guess: it only ever classifies *beneath* it (see :func:`classify_item`)."""
-    repo = item.get("repo")
-    for entry in config.REPOS:
-        if entry["slug"] == repo:
-            return entry.get("domain")
-    return None
+    should guess: it only ever classifies *beneath* it (see :func:`classify_item`).
+
+    Reuses :func:`~src.parity._domain_of` (the identical ``config.REPOS`` slug->domain lookup
+    T3.14 already added) rather than a second copy — a code-review finding on this module."""
+    return _domain_of(item.get("repo") or "")
 
 
 def _known_subpaths(taxonomy: Taxonomy, domain: str) -> tuple[str, ...]:
@@ -138,11 +160,22 @@ def _path_prompt(item: dict, taxonomy: Taxonomy, domain: str) -> str:
     )
 
 
-def _validated_subpath(raw: object, taxonomy: Taxonomy, *, prefix: CategoryPath) -> CategoryPath:
+def _validated_subpath(
+    raw: object,
+    taxonomy: Taxonomy,
+    *,
+    prefix: CategoryPath,
+    root_options: tuple[str, ...] | None = None,
+) -> CategoryPath:
     """The longest prefix of `raw`'s levels that validates against `taxonomy`'s tree, walked
     from `prefix` (T3.15's deterministic domain root) via :meth:`~src.taxonomy.Taxonomy.
     children` — the "controlled per-level label set" T1.5.2 introduced, scoped to whatever
     root the caller already knows rather than the tree's true root.
+
+    `root_options` is `prefix`'s own children, if the caller already computed it (e.g.
+    :func:`classify_item` calls :meth:`~src.taxonomy.Taxonomy.children` once to decide whether
+    there's anything to validate against at all) — reused for the walk's first iteration
+    instead of a second identical, O(len(categories)) scan; computed here if omitted.
 
     Matches each level case/whitespace-insensitively (:func:`~src.taxonomy.casefold_label`);
     the walk stops at the first level that doesn't match (keeping the valid sub-prefix, not
@@ -155,7 +188,9 @@ def _validated_subpath(raw: object, taxonomy: Taxonomy, *, prefix: CategoryPath)
         return ()
     validated: list[str] = []
     for level in raw:
-        options = taxonomy.children((*prefix, *validated))
+        options = root_options if not validated and root_options is not None else None
+        if options is None:
+            options = taxonomy.children((*prefix, *validated))
         normalized = casefold_label(level)
         match = next((opt for opt in options if casefold_label(opt) == normalized), None)
         if match is None:
@@ -198,11 +233,12 @@ def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     domain = _domain_of_item(item)
     if domain is None:
         return _classified_record(item, (OTHER,), taxonomy.version)
-    if not taxonomy.children((domain,)):
+    root_options = taxonomy.children((domain,))
+    if not root_options:
         return _classified_record(item, (domain,), taxonomy.version)
     reply = llm.complete(_path_prompt(item, taxonomy, domain), json_schema=_PATH_SCHEMA)
     raw_path = reply.get("path") if isinstance(reply, dict) else None
-    sublevels = _validated_subpath(raw_path, taxonomy, prefix=(domain,))
+    sublevels = _validated_subpath(raw_path, taxonomy, prefix=(domain,), root_options=root_options)
     return _classified_record(item, (domain, *sublevels), taxonomy.version)
 
 

@@ -6,7 +6,7 @@
 
 import pytest
 
-from src import analyze, llm
+from src import analyze, llm, parity
 from src.store.jsonl_store import JsonlStore
 from src.taxonomy import create_taxonomy
 
@@ -30,13 +30,20 @@ def _item(repo: str, number: int, title: str, **overrides) -> dict:
     return rec
 
 
+@pytest.fixture(autouse=True)
+def _config_repos(monkeypatch: pytest.MonkeyPatch) -> None:
+    # T3.15 roots every classified path at the item's own repo's config.REPOS domain -- pin a
+    # fixture domain here rather than depending on production config.py's real content, so an
+    # unrelated future edit to config.REPOS can't silently break this CLI test.
+    monkeypatch.setattr(
+        parity.config, "REPOS", [{"slug": "o/r", "role": "primary", "domain": "speech"}]
+    )
+
+
 def test_main_classifies_pending_items(tmp_path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     store = JsonlStore(tmp_path)
-    # vllm-project/vllm is a real config.REPOS entry (domain "speech") -- T3.15 roots every
-    # classified path at the item's own repo's domain, so the taxonomy/item repo here must
-    # actually be tracked, not an arbitrary "o/r" placeholder.
     create_taxonomy(store, [["speech", "rocm-build"]])
-    store.upsert_items([_item("vllm-project/vllm", 1, "hipBLAS build fails on gfx90a")])
+    store.upsert_items([_item("o/r", 1, "hipBLAS build fails on gfx90a")])
     monkeypatch.setattr(llm, "complete", lambda *a, **k: {"path": ["rocm-build"]})
 
     rc = analyze.main(["--data-dir", str(tmp_path)])
