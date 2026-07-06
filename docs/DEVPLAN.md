@@ -449,6 +449,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** transparency + learning + reproducibility — a failed attempt is still valuable (what was tried, why it failed), and a human must be able to re-run the agent's exact approach; feeds the M5 "Attempts" tab (T5.11).
   - **e.g.:** `data/attempts/<candidate>.md` — "Issue: … · Approach: patched X, rebuilt on mi250-051 · Reproduce: `git fetch fork <branch>; ./repro.sh` · Outcome: FAILED — signal didn't flip because …".
   - **Test:** `tests/test_attempt_report.py` — a mock verified run and a mock failed run each produce a report with all 3 sections + outcome + a runnable reproduce block; failure reports are still written.
+  - **Note (added during T3.6's first real attempt):** for a **verified/gate-ready** candidate specifically, the report must carry (or link to) a fully **rendered** view of the gate draft — title + body + diff stats + evidence (repro/verify logs, self-review vote, quality-gate verdict) styled for human reading, not just the raw `pr_drafts/*.md` text — mirroring the ad hoc rendered draft produced for `vllm-project/vllm#47600`'s sign-off. The human should be able to review and approve straight from this rendering, the same way they would from the dashboard.
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
@@ -542,6 +543,7 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** see exactly what the contribution agent did on each issue — success or fail — and reproduce it by hand.
   - **e.g.:** a list of worked issues with 🟢/🔴 → click → the full T3.12 attempt report rendered.
   - **Test:** `tests/test_dashboard_attempts.py` — seeded attempt reports → the tab lists them with outcome + renders all 3 sections.
+  - **Note (added during T3.6's first real attempt):** for a 🟢 verified attempt, don't just link the raw draft file — render the same rich title/body/diff-stats/evidence view T3.12's note now requires directly in this tab, with the T5.6 patch-review approve action wired to it, so a human can go straight from "browsing attempts" to "approving this one" without leaving the console.
 - [ ] **T5.12 Tabbed console shell** — unify the panels into one **tabbed** nav: **Issues** (tree, M1.5) · **Reports/Trends** (T5.9) · **Candidates** (select, T5.10) · **Attempts** (T5.11) · **Health/Guardrails** (T5.8/T5.7). Read-only except the T5.10 selection and T5.6 review actions.
   - **Why:** one operator console for the whole loop instead of scattered CLIs/panels — what the user asked for.
   - **e.g.:** `python -m dashboard` → top-nav tabs, each deep-linkable.
