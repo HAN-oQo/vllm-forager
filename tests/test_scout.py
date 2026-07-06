@@ -185,6 +185,87 @@ def test_discover_candidates_empty_returns_empty() -> None:
     assert scout.discover_candidates([]) == []
 
 
+# --------------------------------------------------------------------- T3.16 boost signals
+
+
+def test_discover_candidates_rocm_speech_outranks_non_matching(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEVPLAN's T3.16 scenario: a `[ROCm] whisper decode` vllm issue outranks a generic
+    feature — same LLM scores, so only the ROCm∩speech boost can explain the order."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    items = [
+        _item(
+            "vllm-project/vllm",
+            1,
+            title="generic feature request",
+            labels=["good first issue"],
+        ),
+        _item(
+            "vllm-project/vllm",
+            2,
+            title="[ROCm] whisper decode is broken on gfx90a",
+            labels=["good first issue"],
+        ),
+    ]
+
+    candidates = scout.discover_candidates(items)
+
+    assert [c.title for c in candidates] == [
+        "[ROCm] whisper decode is broken on gfx90a",
+        "generic feature request",
+    ]
+
+
+def test_discover_candidates_rocm_speech_boost_needs_priority_repo(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ROCm∩speech boost only applies on a `"primary"`/`"speech"` repo (vllm) -- the same
+    matching text on an untracked repo gets no boost."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    items = [_item("o/r", 1, title="[ROCm] whisper decode is broken on gfx90a")]
+
+    candidates = scout.discover_candidates(items)
+
+    assert len(candidates) == 1
+    assert candidates[0].boost == 0
+
+
+def test_discover_candidates_merge_velocity_affects_order(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """DEVPLAN's T3.16 scenario: merge-velocity affects order -- two otherwise-identical
+    candidates on different repos rank by which repo merges PRs faster."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    items = [
+        _item(
+            "fast/repo",
+            1,
+            type="pr",
+            state="closed",
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-01-02T00:00:00Z",
+        ),
+        _item(
+            "slow/repo",
+            1,
+            type="pr",
+            state="closed",
+            created_at="2024-01-01T00:00:00Z",
+            updated_at="2024-06-01T00:00:00Z",
+        ),
+        _item("fast/repo", 2, title="hipBLAS bug on gfx90a"),
+        _item("slow/repo", 2, title="hipBLAS bug on gfx90a"),
+    ]
+
+    candidates = scout.discover_candidates(items)
+
+    assert [(c.evidence, c.boost) for c in candidates] == [
+        ("https://github.com/fast/repo/issues/2", 1),
+        ("https://github.com/slow/repo/issues/2", 0),
+    ]
+
+
 # --------------------------------------------------------------------- Candidate/priority
 
 

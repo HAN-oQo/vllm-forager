@@ -31,6 +31,29 @@ An item matching more than one source (e.g. a "good first issue" that's also ROC
 only scored once, under whichever source is checked first — deliberately not double-counted,
 since ranking the same underlying work twice would misrepresent the queue's actual size.
 
+**ROCm∩speech boost + per-repo signals (T3.16):** on top of the LLM's risk/effort/impact score,
+every candidate gets a small deterministic ``boost`` added straight into :attr:`Candidate.priority`
+— computed from facts already in the KB, not another LLM call, so it stays cheap and testable
+offline:
+
+- **ROCm∩speech** (+2): the candidate's repo is one of this project's ``"primary"``-role,
+  ``"speech"``-domain targets (config-derived via :data:`_ROCM_SPEECH_PRIORITY_REPOS`, not a
+  hardcoded slug — currently just ``vllm-project/vllm``) *and* its text matches **both**
+  :data:`~src.config.ROCM_HINTS` and :data:`~src.config.SPEECH_HINTS` — the intersection
+  :data:`~src.config.SPEECH_HINTS`'s own docstring names as vLLM's current top priority.
+- **Edge-applicability** (+1): the candidate's repo domain is inference/serving-shaped work an
+  MI250 (an inference-class accelerator) can plausibly run (``speech``/``omni``/``engine``) —
+  not ``rl`` (post-training work, typically trained on large clusters rather than deployed at
+  the edge) and not an untracked repo.
+- **Merge-velocity** (+1): the candidate's repo ships (merges) PRs faster than the run's own
+  median repo (:func:`_merge_velocity_by_repo`, from `updated_at - created_at` on already-merged
+  PRs in this same item batch — the same ``state == "closed"``-as-merged approximation
+  :func:`~src.agents.reporter.is_merged` already documents). A repo with no merge history in this
+  batch gets no boost either way — unknown, not assumed slow.
+
+A parity-gap candidate is boosted against its `target_engine` (where the port would land), using
+its own synthesized title as the boost's text source — there's no real issue/PR body for a gap.
+
 Risk/effort/impact are judged by one ``llm.complete`` call per candidate — like T1.4/T1.5/
 T2.1/T2.3's own qualitative calls, these aren't reducible to a deterministic field check. A
 candidate whose scoring call fails (``llm.LLMError`` or a malformed reply) is skipped and
@@ -60,12 +83,14 @@ Known limitations, not fixed here:
 from __future__ import annotations
 
 import sys
+from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime
 
-from .. import llm
+from .. import config, llm
 from .. import parity as parity_module
 from ..store.base import Store
-from .reporter import categorize, evidence_url
+from .reporter import _compile, _haystack, categorize, evidence_url, is_merged
 
 _LEVELS = ("low", "medium", "high")
 _LEVEL_SCORE = {level: score for score, level in enumerate(_LEVELS, start=1)}
@@ -80,6 +105,22 @@ _SCORE_SCHEMA = {
     "required": ["risk", "effort", "impact"],
 }
 
+# T3.16 boost signals — see module docstring's "ROCm∩speech boost + per-repo signals" section.
+_ROCM_PATTERN = _compile(config.ROCM_HINTS)
+_SPEECH_PATTERN = _compile(config.SPEECH_HINTS)
+
+# Config-derived (not hardcoded) so a future retarget can't silently stop boosting the right
+# repo — currently just vllm-project/vllm, the one "primary"/"speech" entry in config.REPOS.
+_ROCM_SPEECH_PRIORITY_REPOS = frozenset(
+    repo["slug"]
+    for repo in config.REPOS
+    if repo.get("role") == "primary" and repo.get("domain") == "speech"
+)
+
+# Domains an MI250 (an inference-class accelerator) can plausibly help with -- inference/serving
+# work, not "rl" (post-training, typically trained on large clusters, not deployed at the edge).
+_EDGE_APPLICABLE_DOMAINS = frozenset({"speech", "omni", "engine"})
+
 
 class ScoutError(RuntimeError):
     """A candidate was constructed with a risk/effort/impact value outside `_LEVELS`."""
@@ -89,8 +130,10 @@ class ScoutError(RuntimeError):
 class Candidate:
     """One ranked contribution candidate.
 
-    `priority` combines all three dimensions into one sort key — impact weighted most heavily,
-    risk and effort each a mild penalty. It's a ranking aid, not a claim of precise value.
+    `priority` combines all three LLM-judged dimensions plus `boost` into one sort key — impact
+    weighted most heavily, risk and effort each a mild penalty, `boost` added on top (see module
+    docstring's "ROCm∩speech boost + per-repo signals" section). It's a ranking aid, not a claim
+    of precise value.
     """
 
     title: str
@@ -99,6 +142,7 @@ class Candidate:
     effort: str
     impact: str
     evidence: str
+    boost: int = 0
 
     def __post_init__(self) -> None:
         for name, value in (("risk", self.risk), ("effort", self.effort), ("impact", self.impact)):
@@ -107,14 +151,22 @@ class Candidate:
 
     @property
     def priority(self) -> int:
-        """3×impact − risk − effort — weighted so impact dominates enough to satisfy the
+        """3×impact − risk − effort + boost — weighted so impact dominates enough to satisfy the
         DEVPLAN's own acceptance criterion (a low-risk/low-impact candidate never outranks a
         medium-risk/high-impact one, for any effort value — see this module's own test), while
         still letting a cheap, low-risk medium-impact candidate outrank an expensive, risky
         high-impact one: a deliberate tiebreak, not a gap, since effort is what makes a
-        candidate schedulable soon rather than someday (see module docstring).
+        candidate schedulable soon rather than someday (see module docstring). `boost` (T3.16) is
+        additive on top, deliberately small (+0..+4) relative to the risk/effort/impact spread,
+        so it can break ties among similarly-scored candidates without ever letting a
+        low-impact item leapfrog a high-impact one on boost alone.
         """
-        return 3 * _LEVEL_SCORE[self.impact] - _LEVEL_SCORE[self.risk] - _LEVEL_SCORE[self.effort]
+        return (
+            3 * _LEVEL_SCORE[self.impact]
+            - _LEVEL_SCORE[self.risk]
+            - _LEVEL_SCORE[self.effort]
+            + self.boost
+        )
 
 
 def _score_prompt(title: str, body: str, source: str) -> str:
@@ -149,6 +201,78 @@ def _score(title: str, body: str, source: str) -> dict[str, str] | None:
     return scores
 
 
+def _parse_ts(raw: str | None) -> datetime | None:
+    """Best-effort UTC timestamp parse for :func:`_merge_velocity_by_repo` — `None` (not a
+    raised error) on anything missing or malformed, so one bad timestamp drops just that item
+    from the average rather than aborting the whole ranking (the same per-item degradation this
+    module's LLM-scoring path already applies)."""
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def _rocm_speech_boost(item: dict) -> int:
+    """+2 if `item` is on one of :data:`_ROCM_SPEECH_PRIORITY_REPOS` AND its title/labels/body
+    match **both** `config.ROCM_HINTS` and `config.SPEECH_HINTS`; 0 otherwise."""
+    if item.get("repo") not in _ROCM_SPEECH_PRIORITY_REPOS:
+        return 0
+    text = _haystack(item)
+    if _ROCM_PATTERN.search(text) and _SPEECH_PATTERN.search(text):
+        return 2
+    return 0
+
+
+def _edge_applicability_boost(item: dict) -> int:
+    """+1 if `item`'s repo domain is in :data:`_EDGE_APPLICABLE_DOMAINS`; 0 for `"rl"` or an
+    untracked repo (:func:`~src.parity._domain_of` returns `None`)."""
+    domain = parity_module._domain_of(item.get("repo") or "")
+    return 1 if domain in _EDGE_APPLICABLE_DOMAINS else 0
+
+
+def _merge_velocity_by_repo(items: list[dict]) -> dict[str, float]:
+    """Mean days-to-merge (`updated_at - created_at`, the same closed-as-merged approximation
+    :func:`~src.agents.reporter.is_merged` already documents) for every repo with at least one
+    shipped PR in `items` with parseable timestamps — the fewer days, the faster that repo
+    accepts work. A repo with no shipped PRs, or none with parseable timestamps, has no entry.
+    """
+    days_by_repo: dict[str, list[float]] = defaultdict(list)
+    for item in items:
+        if not is_merged(item):
+            continue
+        repo = item.get("repo")
+        created = _parse_ts(item.get("created_at"))
+        updated = _parse_ts(item.get("updated_at"))
+        if not repo or created is None or updated is None:
+            continue
+        days_by_repo[repo].append((updated - created).total_seconds() / 86400)
+    return {repo: sum(days) / len(days) for repo, days in days_by_repo.items() if days}
+
+
+def _merge_velocity_boost(repo: str | None, velocity_by_repo: dict[str, float]) -> int:
+    """+1 if `repo` merges PRs at or faster than the median of every repo with velocity data in
+    this run (a relative, run-local "faster than typical" signal, not a fixed day threshold); 0
+    for a slower repo, an unknown repo, or when no repo in this run has merge-velocity data."""
+    if repo is None or repo not in velocity_by_repo:
+        return 0
+    values = sorted(velocity_by_repo.values())
+    mid = len(values) // 2
+    median = values[mid] if len(values) % 2 else (values[mid - 1] + values[mid]) / 2
+    return 1 if velocity_by_repo[repo] <= median else 0
+
+
+def _boost_for(item: dict, velocity_by_repo: dict[str, float]) -> int:
+    """Sum of every T3.16 boost signal for `item` (a real issue/PR, or a synthetic
+    ``{"repo": ..., "title": ..., "body": ""}`` stand-in for a parity gap)."""
+    return (
+        _rocm_speech_boost(item)
+        + _edge_applicability_boost(item)
+        + _merge_velocity_boost(item.get("repo"), velocity_by_repo)
+    )
+
+
 def _candidate_source(item: dict) -> str | None:
     """Which of T2.5's two GitHub-signal sources `item` qualifies for, or `None` for neither."""
     labels = [
@@ -162,13 +286,21 @@ def _candidate_source(item: dict) -> str | None:
 
 
 def _try_score_and_append(
-    candidates: list[Candidate], *, title: str, body: str, source: str, evidence: str
+    candidates: list[Candidate],
+    *,
+    title: str,
+    body: str,
+    source: str,
+    evidence: str,
+    boost: int = 0,
 ) -> None:
-    """Score `(title, body, source)`; append a :class:`Candidate` to `candidates` if it scored
-    (silently a no-op otherwise — :func:`_score` already logged why)."""
+    """Score `(title, body, source)`; append a :class:`Candidate` (carrying `boost`, T3.16) to
+    `candidates` if it scored (silently a no-op otherwise — :func:`_score` already logged why)."""
     scores = _score(title, body, source)
     if scores is not None:
-        candidates.append(Candidate(title=title, source=source, evidence=evidence, **scores))
+        candidates.append(
+            Candidate(title=title, source=source, evidence=evidence, boost=boost, **scores)
+        )
 
 
 def discover_candidates(
@@ -185,13 +317,20 @@ def discover_candidates(
     """
     candidates: list[Candidate] = []
     seen: set[tuple[str | None, int | None]] = set()
+    velocity_by_repo = _merge_velocity_by_repo(items)
 
     for gap in gaps or []:
         if not gap.evidence:
             continue
         title = f"Port to {gap.target_engine}: {gap.capability} (shipped in {gap.source_engine})"
+        gap_item = {"repo": gap.target_engine, "title": title, "body": ""}
         _try_score_and_append(
-            candidates, title=title, body="", source="parity-gap", evidence=gap.evidence
+            candidates,
+            title=title,
+            body="",
+            source="parity-gap",
+            evidence=gap.evidence,
+            boost=_boost_for(gap_item, velocity_by_repo),
         )
 
     for item in items:
@@ -211,6 +350,7 @@ def discover_candidates(
             body=item.get("body") or "",
             source=source,
             evidence=evidence_url(item),
+            boost=_boost_for(item, velocity_by_repo),
         )
 
     return sorted(candidates, key=lambda c: c.priority, reverse=True)
