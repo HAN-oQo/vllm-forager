@@ -36,17 +36,27 @@ Known limitations, not fixed here:
 - A capability's key is its *exact* flattened ``category`` string, not its hierarchical
   ``path``. Two items describing the same real capability can land at different depths
   (:func:`~src.agents.analyst._canonical_path` returns a shorter path when the model is only
-  confident about the higher levels) — e.g. the fork's PR classified all the way to
-  ``"quantization > FP8 > kv-cache"`` while upstream's equivalent only validated to
+  confident about the higher levels) — e.g. a source engine's PR classified all the way to
+  ``"quantization > FP8 > kv-cache"`` while the target's equivalent only validated to
   ``"quantization > FP8"``. These become two different, non-matching capability keys, which
-  can produce a false-positive gap (fork's deeper key looks port-worthy when the shallower
-  upstream key actually covers it) or a false negative (the reverse). Same root cause as
-  :mod:`src.trends`'s own documented "buckets by the full flattened path, not rolled up by
+  can produce a false-positive gap (the source's deeper key looks port-worthy when the
+  shallower target key actually covers it) or a false negative (the reverse). Same root cause
+  as :mod:`src.trends`'s own documented "buckets by the full flattened path, not rolled up by
   prefix" limitation — a real fix means teaching capability comparison to roll up by path
-  prefix, not just this module's problem to solve alone.
+  prefix, not just this module's problem to solve alone. **Growing surface (T3.14):**
+  generalizing from one fork/one upstream to N tracked engines × 3 primary targets across four
+  taxonomy domains multiplies how often two engines can independently classify the same real
+  capability at different depths — this limitation was always here, but the multi-domain
+  target set makes it bite more often, not something this rework fixes.
 - Like :mod:`~src.agents.curator`'s own retirement/new-category proposals, this is computed
   fresh from a full :meth:`Store.query` scan on every call, with no delta tracking of which
   gaps were already surfaced to a human.
+- :func:`find_gaps`'s "first source engine (in `source_engines` order) to ship it wins" pick
+  is a list-order artifact, not a judgment about which source is the best evidence — if two
+  independent engines both ship the same capability, only one's evidence URL is cited and the
+  corroborating second source is silently dropped. Was moot with a single fork; now that
+  `source_engines` can be several engines, a human asking "why does it cite X and not Y" has no
+  better answer than "REPOS list order."
 """
 
 from __future__ import annotations
@@ -141,11 +151,31 @@ def _default_engine(role: str) -> str:
     return engines[0]
 
 
+def _domain_of(slug: str) -> str | None:
+    """`slug`'s :data:`~src.config.REPOS` ``domain``, or `None` if `slug` isn't tracked."""
+    for repo in config.REPOS:
+        if repo["slug"] == slug:
+            return repo.get("domain")
+    return None
+
+
+def _index_by_engine(cells: list[ParityCell]) -> dict[str, dict[str, ParityCell]]:
+    """`cells` grouped `{engine: {capability: cell}}` — built once by
+    :func:`find_gaps_for_all_targets` and threaded through :func:`find_gaps`'s private
+    `_by_engine` so checking every ``"primary"`` target doesn't re-derive the identical index
+    from the same `cells` list once per target (a code-review finding on this rework)."""
+    by_engine: dict[str, dict[str, ParityCell]] = defaultdict(dict)
+    for cell in cells:
+        by_engine[cell.engine][cell.capability] = cell
+    return by_engine
+
+
 def find_gaps(
     cells: list[ParityCell],
     *,
     target_engine: str | None = None,
     source_engines: list[str] | None = None,
+    _by_engine: dict[str, dict[str, ParityCell]] | None = None,
 ) -> list[Gap]:
     """Every capability shipped on a source engine but not on `target_engine` — a port
     candidate into `target_engine`, citing the first source engine (in `source_engines` order)
@@ -153,11 +183,21 @@ def find_gaps(
 
     `target_engine` defaults to :data:`~src.config.REPOS`'s first ``"primary"``-role entry (a
     real contribution target). `source_engines` defaults to every OTHER tracked engine in
-    :data:`~src.config.REPOS`, of any role — generalized off the old hardcoded ``"fork"``-role
-    default (T3.14, ROCm/vllm retired): any tracked engine can supply a capability a target is
-    missing, not just one designated fork. A source or target engine with no cell at all
-    (nothing shipped or even classified yet) is treated like any other "not present" case, not
-    an error — overridable for tests or to scope a check to specific engines.
+    :data:`~src.config.REPOS` **whose `domain` is either `"engine"` (a generic cross-domain
+    comparison baseline -- SGLang/Dynamo/llm-d) or matches `target_engine`'s own `domain`**
+    (its surrounding ecosystem, e.g. `verl`/`OpenRLHF` for the `"rl"`-domain `vime` target) --
+    generalized off the old hardcoded ``"fork"``-role default (T3.14, ROCm/vllm retired), but
+    scoped by `config.REPOS`'s own `domain` field (its stated purpose: "groups a target with
+    the ecosystem watched around it") so a capability from one domain's ecosystem doesn't get
+    flagged as "missing" on an unrelated-domain target -- e.g. an RL post-training capability
+    shipped only on `vime` (domain `"rl"`) must never be flagged as a gap against the
+    speech-focused `vllm` or the omni-focused `vllm-omni`, now that there's more than one
+    `"primary"` target and cross-domain contamination is actually reachable (a review finding
+    on this very rework: before T3.14 there was exactly one fork and one upstream, so no domain
+    could ever cross). A source or target engine with no cell at all (nothing shipped or even
+    classified yet) is treated like any other "not present" case, not an error — overridable
+    for tests or to scope a check to specific engines (an explicit `source_engines` bypasses
+    the domain scoping entirely; it's the caller's own choice).
 
     Raises:
         ParityError: `target_engine` was defaulted and no :data:`~src.config.REPOS` entry has
@@ -165,11 +205,15 @@ def find_gaps(
     """
     target_engine = target_engine or _default_engine("primary")
     if source_engines is None:
-        source_engines = [repo["slug"] for repo in config.REPOS if repo["slug"] != target_engine]
+        target_domain = _domain_of(target_engine)
+        source_engines = [
+            repo["slug"]
+            for repo in config.REPOS
+            if repo["slug"] != target_engine
+            and (repo.get("domain") == "engine" or repo.get("domain") == target_domain)
+        ]
 
-    by_engine: dict[str, dict[str, ParityCell]] = defaultdict(dict)
-    for cell in cells:
-        by_engine[cell.engine][cell.capability] = cell
+    by_engine = _by_engine if _by_engine is not None else _index_by_engine(cells)
     target_cells = by_engine.get(target_engine, {})
 
     gaps: dict[str, Gap] = {}
@@ -196,12 +240,13 @@ def find_gaps_for_all_targets(cells: list[ParityCell]) -> list[Gap]:
     are missing.
 
     Raises:
-        ParityError: no :data:`~src.config.REPOS` entry has role ``"primary"``.
+        ParityError: no :data:`~src.config.REPOS` entry has role ``"primary"`` (the same error
+            :func:`_default_engine` raises -- reused via a first defaulted call rather than a
+            second hand-copied message, so the two can't drift out of sync).
     """
-    targets = _engines_with_role("primary")
-    if not targets:
-        raise ParityError("no config.REPOS entry has role 'primary'")
+    targets = _engines_with_role("primary") or [_default_engine("primary")]
+    by_engine = _index_by_engine(cells)
     gaps: list[Gap] = []
     for target in targets:
-        gaps.extend(find_gaps(cells, target_engine=target))
+        gaps.extend(find_gaps(cells, target_engine=target, _by_engine=by_engine))
     return gaps

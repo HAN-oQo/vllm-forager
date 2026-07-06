@@ -248,6 +248,94 @@ def test_find_gaps_any_role_can_be_a_source_not_just_a_hardcoded_fork(
     assert gaps[0].target_engine == "vllm-project/vllm-omni"
 
 
+def test_find_gaps_default_source_engines_excludes_unrelated_domains(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression: a code-review finding on this rework -- before it, there was exactly one
+    fork and one upstream, so no domain could ever cross. Generalizing to "every other tracked
+    engine" without a domain filter would flag an RL-only capability as a "gap" on the
+    speech-focused vllm target, a semantically meaningless cross-domain port suggestion."""
+    monkeypatch.setattr(
+        parity.config,
+        "REPOS",
+        [
+            {"slug": "vllm-project/vllm", "role": "primary", "domain": "speech"},
+            {"slug": "vllm-project/vime", "role": "primary", "domain": "rl"},
+            {"slug": "verl-project/verl", "role": "source", "domain": "rl"},
+        ],
+    )
+    items = [_item("vllm-project/vime", 1, "ppo-trainer", state="closed")]
+    cells = parity.build_matrix(items)
+
+    gaps = parity.find_gaps(cells, target_engine="vllm-project/vllm")
+
+    assert gaps == []
+
+
+def test_find_gaps_default_source_engines_includes_same_domain_ecosystem(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        parity.config,
+        "REPOS",
+        [
+            {"slug": "vllm-project/vime", "role": "primary", "domain": "rl"},
+            {"slug": "verl-project/verl", "role": "source", "domain": "rl"},
+        ],
+    )
+    items = [_item("verl-project/verl", 1, "ppo-trainer", state="closed")]
+    cells = parity.build_matrix(items)
+
+    gaps = parity.find_gaps(cells, target_engine="vllm-project/vime")
+
+    assert [g.capability for g in gaps] == ["ppo-trainer"]
+
+
+def test_find_gaps_default_source_engines_includes_engine_domain_regardless_of_target(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An "engine"-domain repo (SGLang/Dynamo/llm-d) is a generic cross-domain comparison
+    baseline, not tied to any one target's ecosystem -- matches this todo's own worked example
+    (SGLang -> vllm-omni, "engine" domain vs. "omni" domain)."""
+    monkeypatch.setattr(
+        parity.config,
+        "REPOS",
+        [
+            {"slug": "vllm-project/vime", "role": "primary", "domain": "rl"},
+            {"slug": "sgl-project/sglang", "role": "parity", "domain": "engine"},
+        ],
+    )
+    items = [_item("sgl-project/sglang", 1, "flash-attn-3", state="closed")]
+    cells = parity.build_matrix(items)
+
+    gaps = parity.find_gaps(cells, target_engine="vllm-project/vime")
+
+    assert [g.capability for g in gaps] == ["flash-attn-3"]
+
+
+def test_find_gaps_for_all_targets_excludes_cross_domain_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression, end to end through find_gaps_for_all_targets: a capability vime (domain
+    "rl") ships must not be flagged as missing on vllm (domain "speech") or vllm-omni (domain
+    "omni")."""
+    monkeypatch.setattr(
+        parity.config,
+        "REPOS",
+        [
+            {"slug": "vllm-project/vllm", "role": "primary", "domain": "speech"},
+            {"slug": "vllm-project/vllm-omni", "role": "primary", "domain": "omni"},
+            {"slug": "vllm-project/vime", "role": "primary", "domain": "rl"},
+        ],
+    )
+    items = [_item("vllm-project/vime", 1, "ppo-trainer", state="closed")]
+    cells = parity.build_matrix(items)
+
+    gaps = parity.find_gaps_for_all_targets(cells)
+
+    assert gaps == []
+
+
 def test_find_gaps_uses_config_defaults(monkeypatch: pytest.MonkeyPatch) -> None:
     """No explicit target_engine/source_engines -- target falls back to config.REPOS's first
     "primary" role; source_engines falls back to every other tracked engine."""
