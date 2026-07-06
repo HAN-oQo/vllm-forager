@@ -108,7 +108,7 @@ def _reproduce_block(verify_run: dict) -> str:
     return "```bash\n" + "\n".join(lines) + "\n```"
 
 
-def _approach(repro_run: dict | None, verify_run: dict) -> str:
+def _approach(repro_run: dict | None, verify_run: dict, verified: bool) -> str:
     """What was tried and what actually happened -- the repro run's baseline failing signal (if
     one was recorded) followed by the patch attempt's own outcome."""
     parts = []
@@ -117,7 +117,6 @@ def _approach(repro_run: dict | None, verify_run: dict) -> str:
             f"Reproduced the failure via `{repro_run.get('command') or '(command not captured)'}`."
         )
     branch = verify_run.get("branch") or "(no branch recorded)"
-    verified = bool(verify_run.get("verified"))
     parts.append(
         f"Patched on branch `{branch}` and re-ran the same check on MI250; "
         f"the signal {'flipped to passing' if verified else 'did not flip'}."
@@ -125,8 +124,7 @@ def _approach(repro_run: dict | None, verify_run: dict) -> str:
     return " ".join(parts)
 
 
-def _outcome(verify_run: dict) -> str:
-    verified = bool(verify_run.get("verified"))
+def _outcome(verify_run: dict, verified: bool) -> str:
     log_tail = (verify_run.get("log") or "")[-_REPRO_LOG_CHARS:]
     if verified:
         return f"**VERIFIED** — the check passed after the patch.\n\n```\n{log_tail}\n```"
@@ -160,14 +158,35 @@ def render_attempt_report(
     if verified:
         verified_result = gate.verified_diff(store, repo, number)
         if verified_result is not None:
-            diff, _ = verified_result
+            diff, verify_recorded_at = verified_result
+            all_runs = store.list_runs(repo=repo, number=number)
             self_review_run = latest_run(
-                store.list_runs(repo=repo, number=number, stage="self_review")
+                [
+                    r
+                    for r in all_runs
+                    if r.get("stage") == "self_review"
+                    and r.get("verify_recorded_at") == verify_recorded_at
+                ]
             )
-            pr_author_run = latest_run(store.list_runs(repo=repo, number=number, stage="pr_author"))
-            pr_quality_run = latest_run(
-                store.list_runs(repo=repo, number=number, stage="pr_quality")
+            pr_author_run = latest_run(
+                [
+                    r
+                    for r in all_runs
+                    if r.get("stage") == "pr_author"
+                    and r.get("verify_recorded_at") == verify_recorded_at
+                ]
             )
+            pr_quality_run = None
+            if pr_author_run is not None:
+                pr_author_recorded_at = pr_author_run.get("recorded_at")
+                pr_quality_run = latest_run(
+                    [
+                        r
+                        for r in all_runs
+                        if r.get("stage") == "pr_quality"
+                        and r.get("pr_author_recorded_at") == pr_author_recorded_at
+                    ]
+                )
             rendered_html = _render_html(
                 item,
                 diff=diff,
@@ -182,9 +201,9 @@ def render_attempt_report(
         number=number,
         verified=verified,
         issue_overview=issue_overview,
-        approach=_approach(repro_run, verify_run),
+        approach=_approach(repro_run, verify_run, verified),
         reproduce=_reproduce_block(verify_run),
-        outcome=_outcome(verify_run),
+        outcome=_outcome(verify_run, verified),
         rendered_html=rendered_html,
         recorded_at=when.strftime(TS_FORMAT),
     )
@@ -211,6 +230,16 @@ def _esc(text: str) -> str:
     return html_module.escape(text)
 
 
+_SAFE_URL_SCHEMES = ("http://", "https://")
+
+
+def _safe_href(url: str) -> str:
+    """`url` if it's http(s), else `""` -- same guard `dashboard/render.py`'s `_safe_href` uses:
+    this is rendered HTML with no auth, so a stray `javascript:`/`data:` value in a malformed KB
+    record must never become a clickable link."""
+    return url if url.startswith(_SAFE_URL_SCHEMES) else ""
+
+
 def _render_html(
     item: dict,
     *,
@@ -235,7 +264,7 @@ def _render_html(
         else "<p>Self-review: (no record)</p>"
     )
     quality_html = (
-        f"<p>Quality gate: {'PASSED' if pr_quality_run.get('passes') else 'NOT PASSED'} "
+        f"<p>Quality gate: {'PASSED' if pr_quality_run.get('passes') is True else 'NOT PASSED'} "
         f"({pr_quality_run.get('approve_count')}/{pr_quality_run.get('total_votes')} acceptable)"
         "</p>"
         if pr_quality_run
@@ -252,7 +281,7 @@ def _render_html(
         "h1{font-size:1.4rem}h2{font-size:1.1rem;margin-top:2rem}"
         "</style></head><body>"
         f"<h1>{title}</h1>"
-        f'<p><a href="{_esc(evidence_url(item))}">{_esc(evidence_url(item))}</a></p>'
+        f'<p><a href="{_esc(_safe_href(evidence_url(item)))}">{_esc(evidence_url(item))}</a></p>'
         f"<h2>Body</h2>{body_html}"
         f"<h2>Evidence</h2>{self_review_html}{quality_html}"
         f"<h2>Diff</h2><pre>{_esc(diff)}</pre>"
@@ -301,7 +330,10 @@ def main(argv: list[str] | None = None) -> int:
         store, repo, number, attempts_dir=resolved_data_dir / _ATTEMPTS_SUBDIR
     )
     if path is None:
-        print(f"{repo}#{number} has no verify run yet (see stderr for why).")
+        if store.get_item(repo, number) is None:
+            print(f"{repo}#{number} is not in the KB (see stderr for why).")
+        else:
+            print(f"{repo}#{number} has no verify run yet (see stderr for why).")
         return 1
     print(f"wrote {path}")
     return 0

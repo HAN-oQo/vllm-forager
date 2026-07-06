@@ -225,6 +225,144 @@ def test_gate_ready_html_uses_composed_pr_author_narrative_when_present(tmp_path
     assert "Quality gate: PASSED" in report.rendered_html
 
 
+def test_gate_ready_html_ignores_self_review_from_a_different_verify_run(tmp_path) -> None:
+    """Regression: a self-review run that doesn't match the *current* verify run's
+    `verify_recorded_at` must never be shown, even if it's the most recently recorded one --
+    mirrors `gate._readiness`'s own matching, which this module's HTML render must not bypass."""
+    store = _store_with_verify(tmp_path, verified=True)
+    _make_gate_ready(store)  # approve_count=4/5, matches verify_recorded_at 2025-12-31
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "self_review",
+            "critiques": [{"looks_correct": False, "reason": "stale"}],
+            "approve_count": 1,
+            "total_votes": 1,
+            "advance": False,
+            "verify_recorded_at": "2020-01-01T00:00:00Z",  # a different, stale verify run
+            "recorded_at": "2026-06-01T00:00:00Z",  # recorded *after* the matching one
+        }
+    )
+
+    report = attempt_report.render_attempt_report(store, "o/r", 1)
+
+    assert report is not None
+    assert report.rendered_html is not None
+    assert "Self-review: 4/5 approve" in report.rendered_html
+    assert "1/1" not in report.rendered_html
+
+
+def test_gate_ready_html_ignores_pr_author_and_pr_quality_from_a_different_verify_run(
+    tmp_path,
+) -> None:
+    """Regression: a `pr_author`/`pr_quality` pair composed/judged for an older verify run must
+    never be shown against the current diff after a re-verification -- the exact staleness bug
+    `gate._current_narrative` guards against."""
+    store = _store_with_verify(tmp_path, verified=True)
+    _make_gate_ready(store)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "[Bugfix] stale title",
+            "body": "stale composed body",
+            "verify_recorded_at": "2020-01-01T00:00:00Z",  # a different, stale verify run
+            "recorded_at": "2026-06-01T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_quality",
+            "votes": [{"acceptable": True, "reason": "stale"}],
+            "approve_count": 1,
+            "total_votes": 1,
+            "passes": True,
+            "pr_author_recorded_at": "2026-06-01T00:00:00Z",
+            "recorded_at": "2026-06-02T00:00:00Z",
+        }
+    )
+
+    report = attempt_report.render_attempt_report(store, "o/r", 1)
+
+    assert report is not None
+    assert report.rendered_html is not None
+    assert "stale title" not in report.rendered_html
+    assert "stale composed body" not in report.rendered_html
+    assert "No composed PR narrative" in report.rendered_html
+    assert "Quality gate: (no record)" in report.rendered_html
+
+
+def test_gate_ready_html_quality_gate_requires_passes_is_true_not_truthy(tmp_path) -> None:
+    """Regression: `passes` must be read via `is True`, not plain truthiness, so a malformed
+    non-bool value can never be coerced into an accidental PASSED -- mirrors
+    `gate._current_narrative`'s own guard for the identical field."""
+    store = _store_with_verify(tmp_path, verified=True)
+    _make_gate_ready(store)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "title",
+            "body": "body",
+            "verify_recorded_at": "2025-12-31T00:00:00Z",
+            "recorded_at": "2026-01-02T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_quality",
+            "votes": [{"acceptable": True, "reason": "ok"}],
+            "approve_count": 1,
+            "total_votes": 1,
+            "passes": "true",  # malformed: truthy string, not an actual bool
+            "pr_author_recorded_at": "2026-01-02T00:00:00Z",
+            "recorded_at": "2026-01-03T00:00:00Z",
+        }
+    )
+
+    report = attempt_report.render_attempt_report(store, "o/r", 1)
+
+    assert report is not None
+    assert report.rendered_html is not None
+    assert "Quality gate: NOT PASSED" in report.rendered_html
+
+
+def test_gate_ready_html_uses_safe_href_for_evidence_link(tmp_path) -> None:
+    """Regression: `evidence_url(item)` lands straight into an `<a href>` -- a malformed
+    non-http(s) URL in the KB record must not become a clickable link (mirrors
+    `dashboard/render.py`'s own `_safe_href` guard for the identical situation)."""
+    store = JsonlStore(tmp_path)
+    store.upsert_items([{**_ITEM, "url": "javascript:alert(1)"}])
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "verify",
+            "branch": "forager/o-r-1",
+            "patch": "--- a/x.py\n+++ b/x.py\n@@ -1 +1 @@\n-bad\n+good\n",
+            "command": "pytest test_fp8.py",
+            "log": "1 passed\n",
+            "verified": True,
+            "recorded_at": "2025-12-31T00:00:00Z",
+        }
+    )
+    _make_gate_ready(store)
+
+    report = attempt_report.render_attempt_report(store, "o/r", 1)
+
+    assert report is not None
+    assert report.rendered_html is not None
+    assert 'href="javascript:alert(1)"' not in report.rendered_html
+    assert '<a href="">' in report.rendered_html
+
+
 def test_gate_ready_html_escapes_untrusted_title_and_body(tmp_path) -> None:
     """The composed title/body are LLM/human-authored text landing straight into an HTML
     document -- must not be interpretable as markup."""
