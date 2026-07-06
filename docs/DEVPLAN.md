@@ -495,6 +495,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** stale diagrams ("5 repos incl. ROCm/vllm") mislead readers. (Refreshed once in the retarget docs pass; this makes them config-driven so they stay right.)
   - **e.g.:** a tiny `scripts/repos-md.py` prints the `config.REPOS` grouping for embedding.
   - **Test:** `tests/test_repos_md.py` — generated list matches `config.REPOS` (offline).
+- [ ] **T3.19 Full-pipeline dry-run on the retargeted, re-prioritized set (gate before M4)** — after `#84` (config) + T3.14–T3.17 land, run the whole loop **once, by hand**, and eyeball it: **re-collect** the expanded repos → `analyze` (domain-path classify) → `forecast` → `report` (tree) → `grade` → `candidates` (scout, ROCm∩speech boosted) → view on the **dashboard**. Confirm the retarget actually shows up.
+  - **Why:** the collect scope + priorities changed a lot; validate the loop produces sensible, re-prioritized output **before** building always-on orchestration (M4) on top of it — catch retarget bugs while it's still human-driven.
+  - **e.g.:** `./scripts/collect.sh` (manual — picks up the new `config.REPOS`) → `python -m src.analyze && python -m src.forecast && python -m src.report && python -m src.candidates` → `python -m dashboard`: top candidates are **ROCm-speech vLLM** items; verl/diffusers items sit under **rl/omni** in the tree; no swamp.
+  - **Test:** **human-run checkpoint** (like T3.6, not a unit test) — paste evidence here: per-repo collected counts, the top-5 candidates, and a dashboard observation confirming the new domains + the speech/ROCm priority. Checked only once that evidence is present.
+  - **Note:** **collect must be re-triggered manually** (`./scripts/collect.sh` or `python -m src.collector`) — a `config.REPOS` change only takes effect on the next collection run (the collect-loop's next 24h cycle would also pick it up). Run this **after T3.17** so the large `source` repos don't over-collect.
 
 ## M4 — Orchestration / always-on (on ce-master, tmux)
 
