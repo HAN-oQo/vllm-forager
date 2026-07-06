@@ -32,7 +32,9 @@ flowchart TB
 verified on real **MI250** hardware and a **human approves**; nothing goes upstream automatically. The ♻️ loop is
 the differentiator: the agent grades its own past predictions to keep improving its taxonomy + policy. Full
 architecture, including the dev-loop / self-build view, is in
-[`docs/PLAN.md`](docs/PLAN.md#architecture-at-a-glance).
+[`docs/PLAN.md`](docs/PLAN.md#architecture-at-a-glance) — see its
+[Tracked repos](docs/PLAN.md#tracked-repos-configrepos) section for the full, generated
+`config.REPOS` list.
 
 ## Why ROCm
 
