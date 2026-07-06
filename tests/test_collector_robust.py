@@ -138,6 +138,80 @@ def test_main_uses_lookback_window(tmp_path, monkeypatch):
 
 
 # ===================================================================================
+# T3.17: per-role collection tuning (source/radar get a shorter window + label filter).
+# ===================================================================================
+
+
+def test_main_uses_shorter_lookback_for_source_role(tmp_path, monkeypatch):
+    """A `"source"`/`"radar"`-role repo backfills `SOURCE_LOOKBACK_DAYS`, not the full
+    `INITIAL_LOOKBACK_DAYS` -- large ecosystem-trend repos don't need six months of history.
+    A `"primary"`-role repo is unaffected."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(
+        config,
+        "REPOS",
+        [
+            {"slug": "o/primary", "role": "primary"},
+            {"slug": "o/source", "role": "source"},
+            {"slug": "o/radar", "role": "radar"},
+        ],
+    )
+    monkeypatch.setattr(config, "INITIAL_LOOKBACK_DAYS", 180)
+    monkeypatch.setattr(config, "SOURCE_LOOKBACK_DAYS", 60)
+    monkeypatch.setattr(sys, "argv", ["collector"])
+
+    seen_since = {}
+
+    def fake_fetch(slug, since, on_stall=None):
+        seen_since[slug] = since
+        return []
+
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    collector.main()
+
+    now = datetime.now(timezone.utc)
+
+    def age_days(slug):
+        since = datetime.strptime(seen_since[slug], "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+        return (now - since).days
+
+    assert 179 <= age_days("o/primary") <= 181
+    assert 59 <= age_days("o/source") <= 61
+    assert 59 <= age_days("o/radar") <= 61
+
+
+def test_main_filters_unlabeled_prs_for_source_role(tmp_path, monkeypatch):
+    """For a `"source"`-role repo, an unlabeled PR is dropped before persisting (noise); issues
+    and labeled PRs are kept. A `"primary"`-role repo keeps everything, unfiltered."""
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
+    monkeypatch.setattr(config, "STATE_PATH", tmp_path / "state.json")
+    monkeypatch.setattr(
+        config,
+        "REPOS",
+        [{"slug": "o/primary", "role": "primary"}, {"slug": "o/source", "role": "source"}],
+    )
+    monkeypatch.setattr(sys, "argv", ["collector"])
+
+    def fake_fetch(slug, since, on_stall=None):
+        return [
+            {"repo": slug, "number": 1, "type": "issue", "labels": [], "updated_at": "t"},
+            {"repo": slug, "number": 2, "type": "pr", "labels": [], "updated_at": "t"},
+            {"repo": slug, "number": 3, "type": "pr", "labels": ["ready"], "updated_at": "t"},
+        ]
+
+    monkeypatch.setattr(collector, "fetch_repo", fake_fetch)
+    collector.main()
+
+    primary_lines = (tmp_path / "o__primary.jsonl").read_text().strip().splitlines()
+    source_lines = (tmp_path / "o__source.jsonl").read_text().strip().splitlines()
+    assert {json.loads(line)["number"] for line in primary_lines} == {1, 2, 3}  # unfiltered
+    assert {json.loads(line)["number"] for line in source_lines} == {1, 3}  # unlabeled #2 dropped
+
+
+# ===================================================================================
 # T0.10 remaining: retry/backoff, secondary rate limits, schema validation, body cap.
 # ===================================================================================
 

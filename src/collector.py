@@ -17,6 +17,13 @@ This endpoint returns issues and PRs together (PRs have a `pull_request` key), a
   metric via `src.audit.record_stall`, not just stderr; `main`'s per-repo isolation logs a full
   traceback for non-network failures (a real bug) instead of the same message used for an
   expected transient skip.
+- Per-role tuning (T3.17): `config.REPOS`'s large `"source"`/`"radar"`-role repos (verl,
+  diffusers, OpenRLHF, slime, …) are ecosystem-trend watches, not contribution targets, so they
+  don't need `"primary"`/`"parity"`'s full `INITIAL_LOOKBACK_DAYS` history or every routine PR:
+  :func:`_lookback_days_for_role` backfills them over the shorter `config.SOURCE_LOOKBACK_DAYS`
+  window, and :func:`_keep_for_role` drops their unlabeled PRs (issues and labeled PRs are
+  always kept) before persisting — the KB + GitHub API budget stay proportional to what these
+  repos are actually tracked for (`src.trends`' signal), not their raw activity volume.
 
 Usage:
     python -m src.collector            # incremental collection for all repos
@@ -274,6 +281,26 @@ def _normalize(it: dict, slug: str) -> dict:
     }
 
 
+def _lookback_days_for_role(role: str | None) -> int:
+    """`config.SOURCE_LOOKBACK_DAYS` for a `"source"`/`"radar"`-role repo (T3.17: large
+    ecosystem-trend watches that only need recent history); `config.INITIAL_LOOKBACK_DAYS` for
+    `"primary"`/`"parity"` (real contribution targets and their direct comparison baseline need
+    the full window to find parity gaps) or any other/missing role."""
+    if role in ("source", "radar"):
+        return config.SOURCE_LOOKBACK_DAYS
+    return config.INITIAL_LOOKBACK_DAYS
+
+
+def _keep_for_role(record: dict, role: str | None) -> bool:
+    """T3.17: for a `"source"`/`"radar"`-role repo, drop an unlabeled PR (noise — dependency
+    bumps, docs typos — that isn't the trend signal these repos are tracked for) while always
+    keeping issues (the real discussion signal) and any labeled PR; every other role keeps
+    every record, unfiltered."""
+    if role not in ("source", "radar"):
+        return True
+    return record.get("type") == "issue" or bool(record.get("labels"))
+
+
 def _merge_jsonl(path, records: list[dict]) -> int:
     """Upsert by `number`, then rewrite atomically. Returns the total record count.
 
@@ -294,10 +321,6 @@ def main(argv: list[str] | None = None) -> None:
     store = get_store()  # backend selected by env STORE=jsonl|firestore (default jsonl, T0.6.2)
     now_dt = datetime.now(timezone.utc)
     now = now_dt.strftime("%Y-%m-%dT%H:%M:%SZ")
-    # First run / --full: start from a rolling lookback window, not the beginning of time.
-    default_since = (now_dt - timedelta(days=config.INITIAL_LOOKBACK_DAYS)).strftime(
-        "%Y-%m-%dT%H:%M:%SZ"
-    )
 
     if not os.getenv("GITHUB_TOKEN"):
         print(
@@ -337,6 +360,12 @@ def main(argv: list[str] | None = None) -> None:
 
     for repo in config.REPOS:
         slug = repo["slug"]
+        role = repo.get("role")
+        # First run / --full: start from a rolling, role-tuned lookback window (T3.17), not
+        # the beginning of time.
+        default_since = (now_dt - timedelta(days=_lookback_days_for_role(role))).strftime(
+            "%Y-%m-%dT%H:%M:%SZ"
+        )
         # --full ignores the stored cursor and re-fetches the whole lookback window.
         since = default_since if args.full else (store.get_state(slug) or default_since)
         print(f"[{slug}] since {since} …")
@@ -349,6 +378,9 @@ def main(argv: list[str] | None = None) -> None:
             print(f"  !! {slug} UNEXPECTED failure — skipping (cursor preserved):", file=sys.stderr)
             traceback.print_exc(file=sys.stderr)
             continue
+        # T3.17: for "source"/"radar" roles, drop unlabeled PRs (noise) before persisting —
+        # keeps the KB from being swamped by e.g. verl/diffusers' routine PR churn.
+        records = [r for r in records if _keep_for_role(r, role)]
         totals = store.upsert_items(records)  # {repo: post-upsert total} — no re-read needed
         store.set_state(slug, now)  # persist progress per repo so a later failure can't lose it
         # `slug` is absent from totals only when there were no records to write this cycle.

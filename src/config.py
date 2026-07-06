@@ -90,8 +90,14 @@ SPEECH_HINTS = [
 # Collection parameters
 PER_PAGE = 100
 # First-run / --full window: only collect items updated in the last N days (rolling, so it
-# stays recent without editing a date). ~6 months keeps the initial backfill sane.
+# stays recent without editing a date). ~6 months keeps the initial backfill sane. Used for
+# "primary"/"parity"-role repos (see SOURCE_LOOKBACK_DAYS for "source"/"radar").
 INITIAL_LOOKBACK_DAYS = 180
+# Per-role collection tuning (T3.17): "source"/"radar"-role repos are large ecosystem-trend
+# watches (verl, diffusers, OpenRLHF, slime, …), not contribution targets -- they only feed
+# src.trends' signal, so they don't need INITIAL_LOOKBACK_DAYS' full six months of history.
+# A shorter window keeps the KB + API budget from being swamped by a handful of huge repos.
+SOURCE_LOOKBACK_DAYS = 60
 # Scheduler cadence: how often the data-plane collection runs, in hours.
 # 24h (daily) for now; the M4 orchestrator reads this to decide when to re-collect.
 COLLECT_INTERVAL_HOURS = 24
