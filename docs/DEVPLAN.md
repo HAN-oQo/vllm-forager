@@ -383,14 +383,13 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Superseded by T3.7:** the "approved ⇒ `gh` invoked" line above described a single flag that, in
     practice, opened a real public PR (see T3.6's incident note) — `gate.py` now requires an explicit,
     separate `--submit` flag *and* a pre-existing draft from an earlier call before `gh` is ever invoked.
-- [ ] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
+- [x] **T3.6 First real PR** (lowest risk: docs/typing/test-only) through the gate.
   - **Why:** the project's first actual upstream deliverable — proves the whole pipeline end-to-end on a low-risk change before attempting harder fixes.
   - **e.g.:** a docs/typing fix flows repro→patch→verify→self-review→**human confirm**→ a real PR URL on vllm-project/vllm.
-  - **Test:** manual/`integration` — **PR URL pasted here**; checked only then.
-  - **Note:** PR URL = …
-  - **⚠ BLOCKED — do this only via M3.5.** The M3 test flow auto-opened a low-quality draft on the **public**
-    `vllm-project/vllm#47645` (now withdrawn) because `gh pr create` from a fork branch defaults base=upstream. Do
-    **not** open any upstream PR until M3.5 lands (fork-first + human-confirm + maintainer-grade authoring).
+  - **Test:** manual/`integration` — **PR URL: https://github.com/vllm-project/vllm/pull/47678** (`[Bugfix] Ship missing tool_chat_template_gemma4.jinja in packaged chat_templates`, fixes `vllm-project/vllm#47600`, opened as a draft on the fork `HAN-oQo/vllm` → `vllm-project/vllm:main`).
+  - **Note:** candidate selection took real effort — three earlier candidates (`#43364`, `#37967`, `#47600`'s sibling packaging-doc issues) turned out to be either environment-drift-dependent (couldn't reproduce today), already resolved elsewhere, or already claimed by other contributors; the "good first issue"/typo/docs pools on `vllm-project/vllm` are heavily contested. `#47600` (an `examples/*.jinja` chat-template file referenced by vLLM's own docs but never shipped in the installed package) was uncontested, deterministically reproducible, and root-caused via a real published-wheel inspection. Full repro→patch→verify cycle run for real on `mi250-051` (editable install, gfx90a); self-review 5/5 and quality-gate 5/5 (twice, after a factual slip — "Gemma-3" instead of "Gemma-4" — was caught and corrected by hand, since neither automated stage flagged it). Two real pipeline defects found and fixed live during this run: (1) the composed body didn't follow the target repo's actual fetched `pr_template` structure at all — see the new **T3.10.7** — worked around by hand for this PR; (2) `gate.py`'s `_create_draft_pr` hardcoded a generic PR title, discarding T3.9's composed one entirely — fixed for real in `gate.py` (PR #78) before this submission, so it's not a one-off workaround.
+  - **⚠ Previously BLOCKED — now resolved via M3.5.** The M3 test flow had auto-opened a low-quality draft on the **public**
+    `vllm-project/vllm#47645` (now withdrawn) because `gh pr create` from a fork branch defaults base=upstream. M3.5's fork-first + human-confirm + maintainer-grade authoring (T3.7–T3.11) landed first; this submission went through `--fork-owner HAN-oQo` and two separate, human-confirmed `gate.py` invocations, with zero PRs ever opened against upstream until this one, explicitly approved.
 
 ## M3.5 — Maintainer-grade upstream PRs (fork-first, human-confirmed)
 
