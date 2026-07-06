@@ -29,9 +29,12 @@ STATE_PATH = DATA_DIR / "state.json"
 # `src.parity.find_gaps` compares any tracked engine (of any role) against a `primary` target --
 # there's no dedicated "fork" role anymore (ROCm/vllm retired upstream; T3.14 generalized parity
 # off the old fork-vs-upstream premise before this list dropped it).
-# Note: collection treats all repos equally; role/domain are hints for the M2 ranking/parity.
-# ⚠ Some source repos are large (verl, diffusers, OpenRLHF, slime) — see DEVPLAN for tuning
-#   collection per role (shorter window / issues-only) so the KB isn't swamped.
+# Note: role/domain are hints for the M2 ranking/parity; collection is also role-aware now
+# (T3.17: `src.collector._lookback_days_for_role` gives "source"/"radar" a shorter backfill
+# window than "primary"/"parity", via SOURCE_LOOKBACK_DAYS below) so the KB + API budget stay
+# proportional to what a large watched-only repo (verl, diffusers, OpenRLHF, slime, …) is
+# actually tracked for, not its raw six-month activity volume.
+_VALID_ROLES = frozenset({"primary", "parity", "source", "radar"})
 REPOS = [
     # ── contribution targets ──
     {
@@ -66,6 +69,28 @@ REPOS = [
     {"slug": "hao-ai-lab/FastVideo", "role": "source", "domain": "omni"},
     {"slug": "vipshop/cache-dit", "role": "source", "domain": "omni"},
 ]
+
+
+def _validate_roles(repos: list[dict]) -> None:
+    """Raise `ValueError` if any `repos` entry's `role` isn't one of `_VALID_ROLES`.
+
+    Loud, not silent (T3.17 review): a typo'd/renamed role (e.g. `"Source"`) would otherwise
+    fall through every role-keyed lookup's default branch unnoticed — `collector.py`'s per-role
+    window tuning, `parity.py`'s engine-role filtering, `scout.py`'s boost logic would all
+    silently pick the wrong behavior for that one entry, with no test or log to catch it.
+    """
+    for repo in repos:
+        if repo.get("role") not in _VALID_ROLES:
+            raise ValueError(
+                f"config.REPOS entry {repo['slug']!r} has invalid role {repo.get('role')!r} "
+                f"(must be one of {sorted(_VALID_ROLES)})"
+            )
+
+
+# Only re-validates the literal list above, at import time; a test that later
+# `monkeypatch.setattr(config, "REPOS", ...)` with its own informal roles (e.g. `"x"`/`"y"`,
+# common in this codebase's isolated unit tests) is unaffected.
+_validate_roles(REPOS)
 
 # Labels/keywords that boost the ROCm-relevance signal (to be used in M2 ranking)
 ROCM_HINTS = ["rocm", "amd", "hip", "mi250", "mi300", "gfx", "hipblas", "instinct"]
