@@ -32,20 +32,23 @@ def _item(repo: str, number: int, title: str, **overrides) -> dict:
 
 def test_main_classifies_pending_items(tmp_path, monkeypatch: pytest.MonkeyPatch, capsys) -> None:
     store = JsonlStore(tmp_path)
-    create_taxonomy(store, ["rocm-build"])
-    store.upsert_items([_item("o/r", 1, "hipBLAS build fails on gfx90a")])
+    # vllm-project/vllm is a real config.REPOS entry (domain "speech") -- T3.15 roots every
+    # classified path at the item's own repo's domain, so the taxonomy/item repo here must
+    # actually be tracked, not an arbitrary "o/r" placeholder.
+    create_taxonomy(store, [["speech", "rocm-build"]])
+    store.upsert_items([_item("vllm-project/vllm", 1, "hipBLAS build fails on gfx90a")])
     monkeypatch.setattr(llm, "complete", lambda *a, **k: {"path": ["rocm-build"]})
 
     rc = analyze.main(["--data-dir", str(tmp_path)])
 
     assert rc == 0
     assert capsys.readouterr().out.strip() == "classified 1 item(s)"
-    assert store.query()[0]["category"] == "rocm-build"
+    assert store.query()[0]["category"] == "speech > rocm-build"
 
 
 def test_main_no_pending_items_prints_zero(tmp_path, capsys) -> None:
     store = JsonlStore(tmp_path)
-    create_taxonomy(store, ["rocm-build"])
+    create_taxonomy(store, [["speech", "rocm-build"]])
     rc = analyze.main(["--data-dir", str(tmp_path)])
     assert rc == 0
     assert capsys.readouterr().out.strip() == "classified 0 item(s)"

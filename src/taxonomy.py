@@ -70,7 +70,7 @@ def casefold_label(label: str) -> str:
     """The one normalization every case/whitespace-insensitive taxonomy comparison uses.
 
     Shared by :func:`_casefold_path` (path dedup, here) and
-    :func:`~src.agents.analyst._canonical_path` (LLM-reply matching, level by level) so the
+    :func:`~src.agents.analyst._validated_subpath` (LLM-reply matching, level by level) so the
     two can never silently drift apart on what counts as "the same" category.
     """
     return label.strip().casefold()
@@ -145,7 +145,7 @@ class Taxonomy:
         insensitive (:func:`casefold_label`); for two paths whose corresponding level differs
         only by case/whitespace, the spelling from whichever path is listed first in
         :attr:`categories` wins — this is T1.5.2's "controlled per-level label set to prevent
-        drift." As of T1.5.2, :func:`~src.agents.analyst._canonical_path` uses this
+        drift." As of T1.5.2, :func:`~src.agents.analyst._validated_subpath` uses this
         *post-hoc*: the model generates a whole path in one guess, then this method validates
         it level by level, keeping only the prefix that matches at each step — not (yet) an
         interactive walk where the model is shown this method's output before choosing each
