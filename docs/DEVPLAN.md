@@ -485,6 +485,21 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** an unattended pipeline should attempt to fix its own bugs — but as a *proposed PR*, keeping the human merge gate intact (no autonomous self-modification of main).
   - **e.g.:** collector crashes on a new GitHub payload shape → triage opens a fix PR with a regression test for you to review.
   - **Test:** integration (needs `claude`+`gh`); the skip-guards are shell-checkable.
+- [ ] **T4.8 Per-agent cost capture** — persist a cost record per `llm.complete` call to the KB (fold into the T4.4 run-event stream): `{agent, run_id, loop, model, provider, tokens_in/out/cache, cost, ts}`; price via a **maintained table** (borrow LiteLLM's `model_prices_and_context_window.json` / ccusage data) with **explicit prices for local-vLLM models**; a scheduled roll-up by day / agent / model.
+  - **Why:** operating a multi-agent system needs per-agent spend visibility, and cost only accrues history if we record it from the start; the wrapper already returns the metadata (T0.7), so this is nearly free on top of T4.4.
+  - **e.g.:** a `costs` doc `{agent:"analyst", model:"claude-…", cost:0.0021, run:"r-42", ts}` → the ops dashboard shows analyst = $X/day.
+  - **Test:** `tests/test_cost.py` — mocked calls across agents → correct per-agent / per-day sums; a local-vLLM model priced via the custom table (offline).
+  - **Ref:** `docs/research/cost-tracking.md` (recommendation #1).
+- [ ] **T4.9 Claude Code session cost ingest** — the `claude -p` dev-loop / collect-loop sessions bypass `llm.complete`, so ingest **`ccusage --json`** (or Claude Code's OTel `claude_code.api_request` event) into the same cost schema, tagged by session/loop.
+  - **Why:** those CLI sessions are a real chunk of spend (the "tokens burn fast" worry) and won't show up in T4.8 otherwise.
+  - **e.g.:** a nightly `ccusage --json` per node → session cost rows alongside the agent costs, in one view.
+  - **Test:** `tests/test_cost_ccusage.py` — a fixture ccusage JSON → session cost rows with the expected totals (offline).
+  - **Note:** `ccusage` also works **today, zero-build**, retroactively (`npx ccusage@latest`) — use it for an immediate read before this lands.
+- [ ] **T4.10 LiteLLM budget gateway (adopt when going always-on)** — route Anthropic API + local vLLM (+ `claude -p` via `ANTHROPIC_BASE_URL`) through a self-hosted **LiteLLM** proxy with per-key / per-tag (**= per-agent**) spend + a **hard budget cap**, so an unattended run can't overspend.
+  - **Why:** T4.8/T4.9 give *visibility*; this adds *enforcement* — a bug/loop can't run up the bill overnight. **Trigger:** the first time the loop runs unattended, or the T2.6 bandit routes multiple providers; **mandatory** at the IDEAS agent-teams stage. Skip until then.
+  - **e.g.:** the `analyst` key hits its daily cap → further calls refused, not a surprise invoice.
+  - **Test:** `tests/test_llm_gateway.py` — client honors a budget-exceeded response (mocked); integration (proxy up) = a tagged request is costed + attributed. *(Needs Postgres; ⚠ pin a clean version — PyPI 1.82.7/8 were malware.)*
+  - **Ref:** `docs/research/cost-tracking.md` (recommendation #2).
 
 ## M5 — Dashboard (Firestore-backed; monitoring + trends + parity)
 
@@ -493,7 +508,9 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
 > engine×capability parity heatmap, pipeline data-flow diagram, guardrail panels, and the patch review pane.
 > Unified as a **tabbed operator console** — tabs: **Issues** (tree) · **Reports/Trends** (daily archive) ·
 > **Candidates** (ranking + why-selected + human "work this" select) · **Attempts** (per-issue reports) ·
-> **Health/Guardrails**. Read-only **except two human decisions**: candidate selection (T5.10) and patch review (T5.6).
+> **Agents/Ops** (what's running · problems/stalls · **cost per agent**) + **Guardrails**. Read-only **except two
+> human decisions**: candidate selection (T5.10) and patch review (T5.6). *(Reports vs Agents/Ops are the two
+> halves — the report dashboard and the agent-operations dashboard — living as tabs in one app.)*
 > **Demo:** `python -m dashboard` (or `streamlit run dashboard/app.py`) → open the printed localhost URL.
 > **Acceptance:** `pytest -m m5` green · panels/charts render from a seeded KB · the health view shows a running
 > stage as active and a stale one as `stalled`.
@@ -542,10 +559,14 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Why:** see exactly what the contribution agent did on each issue — success or fail — and reproduce it by hand.
   - **e.g.:** a list of worked issues with 🟢/🔴 → click → the full T3.12 attempt report rendered.
   - **Test:** `tests/test_dashboard_attempts.py` — seeded attempt reports → the tab lists them with outcome + renders all 3 sections.
-- [ ] **T5.12 Tabbed console shell** — unify the panels into one **tabbed** nav: **Issues** (tree, M1.5) · **Reports/Trends** (T5.9) · **Candidates** (select, T5.10) · **Attempts** (T5.11) · **Health/Guardrails** (T5.8/T5.7). Read-only except the T5.10 selection and T5.6 review actions.
+- [ ] **T5.12 Tabbed console shell** — unify the panels into one **tabbed** nav: **Issues** (tree, M1.5) · **Reports/Trends** (T5.9) · **Candidates** (select, T5.10) · **Attempts** (T5.11) · **Agents/Ops** (running · problems · cost — T5.8/T5.7/T5.13). Read-only except the T5.10 selection and T5.6 review actions.
   - **Why:** one operator console for the whole loop instead of scattered CLIs/panels — what the user asked for.
   - **e.g.:** `python -m dashboard` → top-nav tabs, each deep-linkable.
   - **Test:** `tests/test_dashboard_tabs.py` — each tab route renders its panel from seeded data.
+- [ ] **T5.13 Cost panel (Agents/Ops view)** — in the **agent-ops** tab (next to the T5.8 live-health panel, *not* the report tabs): **per-agent spend** (today / 7d / total), broken down by model & provider, a burn-rate, and a **budget line**; includes the Claude Code session cost (T4.9). Reads T4.8/T4.9.
+  - **Why:** operating the agents = "what's running · what's wrong · **what's it costing**" in one place; cost belongs with health, not with the reports.
+  - **e.g.:** a bar per agent ($ today) + a total-vs-budget gauge that turns 🔴 when a budget line is crossed.
+  - **Test:** `tests/test_dashboard_cost.py` — seeded cost records → per-agent/day series + a budget-exceeded flag.
 
 ---
 
