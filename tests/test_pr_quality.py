@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 import pytest
 
 from src import llm, pr_quality
+from src.pr_profile import RepoProfile
 from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m3
@@ -200,6 +201,75 @@ def test_a_failed_judge_is_excluded_not_counted_as_reject(
     assert result.total_votes == 4
     assert result.approve_count == 4
     assert result.passes is True
+
+
+# ------------------------------------------------ run_pr_quality: template headers (T3.10.7)
+
+_VLLM_STYLE_TEMPLATE = "## Purpose\n\n## Test Plan\n\n## Test Result\n\n---\n<details></details>\n"
+_VLLM_STYLE_PROFILE = RepoProfile(
+    repo="o/r", contributing=None, pr_template=_VLLM_STYLE_TEMPLATE, exemplars=()
+)
+
+
+def test_missing_template_header_fails_even_when_all_judges_approve(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression for T3.10.7: found by hand during T3.6's real vllm-project/vllm#47600 attempt
+    that judges alone don't reliably catch an off-template body -- a body using entirely
+    different headers than the repo's own template passed 5/5, twice, in the real run."""
+    store = _store_ready_for_quality(
+        tmp_path, body="## Problem\n...\n\n## Root cause\n...\n\nFixes #1"
+    )
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, True, True))
+
+    result = pr_quality.run_pr_quality(store, "o/r", 1, profile=_VLLM_STYLE_PROFILE, now=_NOW)
+
+    assert result is not None
+    assert result.approve_count == 5  # the ensemble itself unanimously approved
+    assert result.missing_template_headers == ("Purpose", "Test Plan", "Test Result")
+    assert result.passes is False  # but the deterministic header check overrides it
+
+
+def test_no_missing_headers_when_body_uses_the_templates_own_sections(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_quality(
+        tmp_path, body="## Purpose\n...\n\n## Test Plan\n...\n\n## Test Result\n...\n"
+    )
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, True, True))
+
+    result = pr_quality.run_pr_quality(store, "o/r", 1, profile=_VLLM_STYLE_PROFILE, now=_NOW)
+
+    assert result.missing_template_headers == ()
+    assert result.passes is True
+
+
+def test_missing_template_headers_empty_when_profile_has_no_template(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_ready_for_quality(tmp_path, body="## Problem\n...\n\nFixes #1")
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, True, True))
+
+    result = pr_quality.run_pr_quality(store, "o/r", 1, now=_NOW)  # no profile -> autouse None
+
+    assert result.missing_template_headers == ()
+    assert result.passes is True
+
+
+def test_cli_reports_missing_template_headers(
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    _store_ready_for_quality(tmp_path, body="## Problem\n...\n\n## Root cause\n...\n\nFixes #1")
+    monkeypatch.setattr(llm, "complete", _votes(True, True, True, True, True))
+    monkeypatch.setattr(pr_quality, "get_profile", lambda repo, **k: _VLLM_STYLE_PROFILE)
+
+    rc = pr_quality.main(["--candidate", "o/r#1", "--data-dir", str(tmp_path)])
+
+    assert rc == 1
+    out = capsys.readouterr().out
+    assert "FAILED" in out
+    assert "missing required section header" in out
+    assert "## Purpose" in out
 
 
 # --------------------------------------------------------------------- run_pr_quality: skip paths

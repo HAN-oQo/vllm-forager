@@ -333,6 +333,98 @@ def test_compose_pr_body_prompt_handles_no_profile(monkeypatch: pytest.MonkeyPat
     assert "No contribution-norms profile is available" in captured["prompt"]
 
 
+# --------------------------------------------------------------------- T3.10.7 template headers
+
+_VLLM_STYLE_TEMPLATE = (
+    "PLEASE FILL IN THE PR DESCRIPTION HERE.\n\n"
+    "## Purpose\n\n## Test Plan\n\n## Test Result\n\n"
+    "---\n<details><summary>Checklist</summary>\n\n"
+    "- [ ] The purpose of the PR\n- [ ] The test plan\n</details>\n"
+)
+
+
+def test_extract_template_headers_stops_before_the_checklist_divider() -> None:
+    headers = pr_author._extract_template_headers(_VLLM_STYLE_TEMPLATE)
+    assert headers == ["Purpose", "Test Plan", "Test Result"]
+
+
+def test_template_sections_matches_vllm_style_headers() -> None:
+    profile = RepoProfile(
+        repo="o/r", contributing=None, pr_template=_VLLM_STYLE_TEMPLATE, exemplars=()
+    )
+    sections = pr_author._template_sections(profile)
+    assert sections == pr_author.TemplateSections(
+        purpose="Purpose", test_plan="Test Plan", test_result="Test Result"
+    )
+
+
+def test_template_sections_none_when_no_profile() -> None:
+    assert pr_author._template_sections(None) is None
+
+
+def test_template_sections_none_when_profile_has_no_template() -> None:
+    profile = RepoProfile(repo="o/r", contributing=None, pr_template=None, exemplars=())
+    assert pr_author._template_sections(profile) is None
+
+
+def test_template_sections_none_when_headers_dont_cover_all_three_concepts() -> None:
+    """A template with headers that don't include a recognizable test-result section (e.g. just
+    a generic "## Notes") must not be force-matched -- fall back to the fixed shape instead of
+    guessing at a partial/wrong mapping."""
+    profile = RepoProfile(
+        repo="o/r",
+        contributing=None,
+        pr_template="## Purpose\n## Test Plan\n## Notes\n",
+        exemplars=(),
+    )
+    assert pr_author._template_sections(profile) is None
+
+
+def test_compose_pr_body_uses_the_repos_own_template_headers(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Regression for T3.10.7: found by hand during T3.6's real vllm-project/vllm#47600 attempt
+    that the composed body used entirely different section names than the repo's own template."""
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    profile = RepoProfile(
+        repo="o/r", contributing=None, pr_template=_VLLM_STYLE_TEMPLATE, exemplars=()
+    )
+    result = pr_author.compose_pr_body(_bundle(), profile)
+    assert result is not None
+    assert "## Purpose" in result.body
+    assert "## Test Plan" in result.body
+    assert "## Test Result" in result.body
+    # the fixed shape's own headers must not appear -- this is a replacement, not an addition
+    for heading in ("## Problem", "## Root cause", "## Fix rationale", "## Reproduction"):
+        assert heading not in result.body
+    assert "Fixes #42" in result.body
+    assert _FULL_REPLY["problem"] in result.body
+    assert _bundle().repro_command in result.body
+
+
+def test_compose_pr_body_falls_back_to_fixed_shape_when_template_headers_dont_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    profile = RepoProfile(
+        repo="o/r", contributing=None, pr_template="## Notes\n## Extra\n", exemplars=()
+    )
+    result = pr_author.compose_pr_body(_bundle(), profile)
+    assert result is not None
+    assert "## Problem" in result.body
+    assert "## Checklist" in result.body
+
+
+def test_compose_pr_body_falls_back_to_fixed_shape_with_no_template(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    result = pr_author.compose_pr_body(_bundle(), None)
+    assert result is not None
+    assert "## Problem" in result.body
+    assert "## Checklist" in result.body
+
+
 # --------------------------------------------------------------------- _default_signoff
 
 
