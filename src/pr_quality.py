@@ -76,7 +76,7 @@ from pathlib import Path
 
 from . import gate
 from .agents.forecaster import TS_FORMAT
-from .pr_author import _DIFF_CONTEXT_CHARS, _profile_context, _template_sections
+from .pr_author import _DIFF_CONTEXT_CHARS, TemplateSections, _profile_context, _template_sections
 from .pr_profile import RepoProfile, get_profile
 from .self_review import DEFAULT_VOTES, SUPERMAJORITY_THRESHOLD
 from .stages import complete_or_none, latest_run, record_run_best_effort
@@ -143,13 +143,17 @@ class PRQualityResult:
         return record
 
 
-def _missing_template_headers(body: str, profile: RepoProfile | None) -> tuple[str, ...]:
-    """Which of `profile.pr_template`'s own purpose/test-plan/test-result headers (T3.10.7,
+def _missing_template_headers(body: str, sections_map: TemplateSections | None) -> tuple[str, ...]:
+    """Which of `sections_map`'s purpose/test-plan/test-result headers (T3.10.7,
     `pr_author._template_sections`) are absent from `body` as a `## {header}` line -- empty if
     there's no template to check against (nothing this module can enforce), or every required
     header is present. A deterministic, code-level check rather than relying on the judges to
-    notice (see this module's own docstring: they didn't, twice, on a real off-template body)."""
-    sections_map = _template_sections(profile)
+    notice (see this module's own docstring: they didn't, twice, on a real off-template body).
+
+    Takes the already-computed `sections_map` rather than a `RepoProfile` so a caller
+    (`run_pr_quality`) that also needs `sections_map` for `required_headers` doesn't have to
+    parse the same `pr_template` twice (a code-review finding on an earlier version of this
+    function)."""
     if sections_map is None:
         return ()
     return tuple(
@@ -265,8 +269,8 @@ def run_pr_quality(
     resolved_profile = profile if profile is not None else get_profile(repo)
     title = pr_author_run.get("title") or ""
     body = pr_author_run.get("body") or ""
-    missing_headers = _missing_template_headers(body, resolved_profile)
     sections_map = _template_sections(resolved_profile)
+    missing_headers = _missing_template_headers(body, sections_map)
     required_headers = (
         (sections_map.purpose, sections_map.test_plan, sections_map.test_result)
         if sections_map is not None

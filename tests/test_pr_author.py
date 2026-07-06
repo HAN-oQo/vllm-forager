@@ -380,6 +380,86 @@ def test_template_sections_none_when_headers_dont_cover_all_three_concepts() -> 
     assert pr_author._template_sections(profile) is None
 
 
+def test_extract_template_headers_survives_per_section_dividers() -> None:
+    """Code-review regression: an earlier version truncated at the FIRST `---`, so a template
+    using `---` as a horizontal rule between every section (not just once before a trailing
+    checklist) silently lost every section after the first one."""
+    template = (
+        "## Purpose\n\nfoo\n\n---\n\n## Test Plan\n\nbar\n\n---\n\n"
+        "## Test Result\n\nbaz\n\n---\n\n<checklist>\n"
+    )
+    assert pr_author._extract_template_headers(template) == [
+        "Purpose",
+        "Test Plan",
+        "Test Result",
+    ]
+
+
+def test_template_sections_matches_headers_across_per_section_dividers() -> None:
+    template = (
+        "## Purpose\n\nfoo\n\n---\n\n## Test Plan\n\nbar\n\n---\n\n"
+        "## Test Result\n\nbaz\n\n---\n\n<checklist>\n"
+    )
+    profile = RepoProfile(repo="o/r", contributing=None, pr_template=template, exemplars=())
+    assert pr_author._template_sections(profile) == pr_author.TemplateSections(
+        purpose="Purpose", test_plan="Test Plan", test_result="Test Result"
+    )
+
+
+def test_template_sections_matches_how_has_this_been_tested() -> None:
+    """Code-review regression: GitHub's own extremely common default template header wasn't
+    recognized by any test-plan keyword."""
+    profile = RepoProfile(
+        repo="o/r",
+        contributing=None,
+        pr_template="## Description\n## How Has This Been Tested?\n## Test Result\n",
+        exemplars=(),
+    )
+    sections = pr_author._template_sections(profile)
+    assert sections is not None
+    assert sections.test_plan == "How Has This Been Tested?"
+
+
+def test_template_sections_one_header_cannot_satisfy_two_concepts() -> None:
+    """Code-review regression: with no exclusivity check, a header like "Test Plan and Results"
+    matched both the test-plan and test-result keyword sets, so `_render_templated_body` would
+    emit the same heading twice. Purpose is matched first and claims "Summary"; test-plan then
+    claims "Test Plan and Results"; nothing is left for test-result, so this must NOT force-match
+    the same header twice -- it falls back to the fixed shape instead."""
+    profile = RepoProfile(
+        repo="o/r",
+        contributing=None,
+        pr_template="## Summary\n## Test Plan and Results\n",
+        exemplars=(),
+    )
+    assert pr_author._template_sections(profile) is None
+
+
+def test_template_sections_no_header_matches_two_buckets_when_all_three_are_distinguishable() -> (
+    None
+):
+    """A header that could plausibly match two keyword sets must only ever end up assigned to
+    one bucket in the final result, even when a full match (all three concepts) is otherwise
+    possible."""
+    profile = RepoProfile(
+        repo="o/r",
+        contributing=None,
+        pr_template="## Summary\n## Test Plan\n## Test Plan and Results\n",
+        exemplars=(),
+    )
+    sections = pr_author._template_sections(profile)
+    assert sections is not None
+    assert len({sections.purpose, sections.test_plan, sections.test_result}) == 3
+
+
+def test_match_header_is_word_boundary_safe_not_substring() -> None:
+    """Code-review regression: a bare substring check let a header like "## Repurpose the
+    cache" match the purpose bucket via the substring "purpose" inside "repurpose", even
+    though "purpose" doesn't start there as its own word."""
+    assert not pr_author._PURPOSE_HEADER_PATTERN.search("Repurpose the cache")
+    assert pr_author._PURPOSE_HEADER_PATTERN.search("Purpose")
+
+
 def test_compose_pr_body_uses_the_repos_own_template_headers(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -400,6 +480,27 @@ def test_compose_pr_body_uses_the_repos_own_template_headers(
     assert "Fixes #42" in result.body
     assert _FULL_REPLY["problem"] in result.body
     assert _bundle().repro_command in result.body
+    # Code-review regression: the templated path used to drop the Checklist section entirely,
+    # silently losing the fixed-shape path's only visible DCO-signoff signal.
+    assert "## Checklist" in result.body
+
+
+def test_compose_pr_body_templated_path_matches_reproduction_messaging_when_none_captured(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Code-review regression: Test Plan used to show '$ (command not captured)' -- implying a
+    command was expected but lost -- while Test Result (same underlying state) honestly said
+    'no captured pre-fix reproduction'. Both sections must describe a fully-missing repro the
+    same way."""
+    monkeypatch.setattr(pr_author, "complete_or_none", lambda *a, **k: dict(_FULL_REPLY))
+    profile = RepoProfile(
+        repo="o/r", contributing=None, pr_template=_VLLM_STYLE_TEMPLATE, exemplars=()
+    )
+    bundle = _bundle(repro_command="", repro_log="")
+    result = pr_author.compose_pr_body(bundle, profile)
+    assert result is not None
+    assert result.body.count("no captured pre-fix reproduction for this candidate") == 2
+    assert "(command not captured)" not in result.body
 
 
 def test_compose_pr_body_falls_back_to_fixed_shape_when_template_headers_dont_match(
