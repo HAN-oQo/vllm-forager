@@ -36,6 +36,38 @@
 ## 🔨 Shaping
 *(ideas being fleshed out — add the template fields)*
 
+### Cheap issue classification: rules → local classifier → LLM cascade (stop paying `claude -p` per issue)
+- **What:** replace "send every issue to `claude -p` to classify" with a **confidence-gated cascade**: (1) free
+  rules/labels first (`config.ROCM_HINTS`/`SPEECH_HINTS`, GitHub labels, regex) resolve the easy majority; (2) a
+  **local classifier on the already-computed embeddings** (`src/embed.py`) — SetFit / a linear head / centroid-kNN
+  — labels most of the rest **with a confidence score**; (3) only **low-confidence** items escalate, first to the
+  **local vLLM backend** (`LLM_PROVIDER=local`), and only the hardest tail to Claude. Close the loop with
+  **distillation**: Claude's (expensive, confirmed) labels become training data that keeps shrinking the LLM share.
+- **Why / value:** classification is high-volume + latency-insensitive (24h cadence) — the worst possible thing to
+  spend frontier tokens on one-at-a-time. A rules+embedding cascade typically resolves **80–95% with zero LLM
+  calls**; `T0.7` cost-meta + `src/llm_bandit.py` already exist to *measure* and *route* the savings. "Local
+  BERT" is directionally right — the catch below is why it can't be a naive frozen model.
+- **The catch that shapes the design (evolving taxonomy):** our taxonomy is **versioned + self-evolving** (grader
+  / curator update it), so a statically fine-tuned BERT goes stale on every taxonomy bump. The cheap tier must be
+  **refit-in-seconds** (linear head / centroid on frozen embeddings) or **example-based** (kNN / SetFit that
+  updates by *adding* examples, no retrain) so it tracks the evolving labels for free — self-evolution applied to
+  classification.
+- **Quick wins (low-effort, independent of the classifier, could graduate to DEVPLAN soon):** batch N issues per
+  prompt instead of one-per-call; use the **Anthropic Message Batches API** (~50% cheaper, async — fine at 24h
+  cadence); **prompt-cache** the taxonomy/instruction preamble across calls. Big spend cut, no architecture change.
+- **Guardrail (mirror T1.8):** a labeled **classification gold set** + accuracy/macro-F1 + a **confidence
+  threshold** so the cheap path never silently degrades quality (escalate below threshold; track drift). **Active
+  learning:** the low-confidence items you escalate are also the most informative to *train* on — same tail, two
+  wins.
+- **Scope / effort:** M — new `src/classify.py` (cascade + confidence + gold-set eval) over existing `embed.py`;
+  reuse `llm.py`/`llm_bandit.py` for the escalation tier; a small labeled set. Quick wins are S.
+- **Depends on / risk:** embeddings available at classify time (they are — data plane computes them for RAG);
+  **cold-start** (few labels early → start LLM-heavy, shift to cheap as labels accumulate via distillation); keep
+  the gold-set gate so cost-cutting ≠ quality regression. Relates to `docs/research/cost-tracking.md` and the
+  `LLM_PROVIDER=local` vLLM backend.
+- **Status:** shaping (quick wins are near-DEVPLAN; full cascade lands once the M1 intelligence plane exists to
+  classify against).
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.

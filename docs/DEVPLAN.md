@@ -555,6 +555,11 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **e.g.:** the `analyst` key hits its daily cap → further calls refused, not a surprise invoice.
   - **Test:** `tests/test_llm_gateway.py` — client honors a budget-exceeded response (mocked); integration (proxy up) = a tagged request is costed + attributed. *(Needs Postgres; ⚠ pin a clean version — PyPI 1.82.7/8 were malware.)*
   - **Ref:** `docs/research/cost-tracking.md` (recommendation #2).
+- [ ] **T4.11 Cheap-classification quick wins (batch + Message Batches + prompt caching)** — cut classification LLM spend *at the source*, no classifier change: (a) **batch N items per `llm.complete` classify call** instead of one-per-issue; (b) add an async **Anthropic Message Batches** path in `src/llm.py` (~50% cheaper — fine since classification is latency-insensitive at the 24h cadence); (c) **prompt-cache** the taxonomy/instruction preamble across classify calls.
+  - **Why:** classification is the highest-volume, most latency-insensitive LLM use, so per-issue `claude -p` is the worst possible cost shape (the "tokens burn fast" worry starts here). These are source-side savings that *complement* T4.8/T4.9 (measure) and T4.10 (cap) — spend less before you meter and cap. No hard M4 dependency (only needs the M1 analyst); pull forward if classification spend bites before M4.
+  - **e.g.:** 120 new items classified in batches of ~20 against a cached taxonomy preamble → a fraction of the per-request overhead + ~50% via Batches; the T4.8 cost rows show `analyst` $/day drop.
+  - **Test:** `tests/test_llm_batch.py` — a batched classify call returns per-item labels aligned to their inputs (mocked); the Batches path parses a batch-result fixture; the cached preamble is sent as a cache breakpoint (all offline/mocked).
+  - **Ref:** `docs/IDEAS.md` → "Cheap issue classification: rules → local classifier → LLM cascade" — this todo is that idea's **quick-wins slice**; the full local-classifier cascade + distillation stays in IDEAS until the M1 classify path is proven under load.
 
 ## M5 — Dashboard (Firestore-backed; monitoring + trends + parity)
 
