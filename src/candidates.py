@@ -9,7 +9,8 @@ Known limitation, not fixed here: like :mod:`~src.agents.curator`'s proposals, t
 the whole queue (one ``llm.complete`` call per candidate) from scratch on every run — no
 persistence of what a human already picked up, and no dedup against a near-duplicate seen
 before (T2.7's job). Cost grows with the number of open ROCm-relevant/good-first issues in the
-KB, not with what's new since the last run.
+KB, not with what's new since the last run -- ``--per-domain-limit`` (T3.19 support) bounds
+that cost for a one-off dry run, but doesn't change this per-run-from-scratch design.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import argparse
 from pathlib import Path
 
 from .agents import scout
+from .analyze import _positive_int
 from .store import resolve_store
 
 
@@ -41,10 +43,21 @@ def main(argv: list[str] | None = None) -> int:
             "(default: config.DATA_DIR, backend from env STORE=jsonl|firestore)."
         ),
     )
+    ap.add_argument(
+        "--per-domain-limit",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Score at most N good-first-issue/ROCm-reproducible matches per domain "
+            "(speech/rl/omni/engine) -- for a KB with hundreds of matches, each a separate "
+            "LLM call, this bounds a dry run (e.g. right after a retarget, T3.19) while still "
+            "sampling every domain. Parity-gap candidates are never capped. Must be positive."
+        ),
+    )
     args = ap.parse_args(argv)
 
     store, _ = resolve_store(args.data_dir)
-    candidates = scout.discover_from_store(store)
+    candidates = scout.discover_from_store(store, per_domain_limit=args.per_domain_limit)
     print(f"{len(candidates)} candidate(s)")
     for candidate in candidates:
         print(

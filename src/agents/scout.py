@@ -329,8 +329,37 @@ def _try_score_and_append(
         )
 
 
+def _sample_matched_per_domain(items: list[dict], limit: int) -> list[dict]:
+    """At most `limit` open, good-first-issue/ROCm-reproducible-eligible issues **per domain**
+    (:func:`~src.parity._domain_of`), preserving `items`' own relative order.
+
+    Matching is re-derived here (open+type check, :func:`_candidate_source`) so the cap only
+    counts against items that would actually reach an LLM scoring call — bounds the cost of a
+    KB with hundreds of matching issues (e.g. right after a multi-domain retarget, T3.19) the
+    same way :func:`~src.agents.analyst._sample_per_domain` bounds :func:`analyze_store`'s
+    classification cost, and for the same reason: an uneven repo-per-domain split shouldn't
+    give one domain a disproportionate share of a bounded sample.
+    """
+    counts: dict[str | None, int] = defaultdict(int)
+    sampled = []
+    for item in items:
+        if item.get("type") != "issue" or item.get("state") != "open":
+            continue
+        if _candidate_source(item) is None:
+            continue
+        domain = parity_module._domain_of(item.get("repo") or "")
+        if counts[domain] >= limit:
+            continue
+        counts[domain] += 1
+        sampled.append(item)
+    return sampled
+
+
 def discover_candidates(
-    items: list[dict], gaps: list[parity_module.Gap] | None = None
+    items: list[dict],
+    gaps: list[parity_module.Gap] | None = None,
+    *,
+    per_domain_limit: int | None = None,
 ) -> list[Candidate]:
     """Every parity-gap, good-first-issue, and ROCm-reproducible candidate found in `items`
     (open issues only for the latter two — a PR isn't something to "reproduce and fix"),
@@ -340,6 +369,14 @@ def discover_candidates(
     :func:`~src.parity.build_matrix`) is accepted as a parameter rather than recomputed here,
     so a caller that already has it (e.g. :func:`discover_from_store`) doesn't pay for it
     twice.
+
+    `per_domain_limit` caps how many good-first-issue/ROCm-reproducible candidates *per domain*
+    get an LLM scoring call this run (via :func:`_sample_matched_per_domain`) — a large KB can
+    have hundreds of matching open issues, each a separate ``llm.complete`` call; a small
+    per-domain cap still samples every domain for a bounded dry run (T3.19). Parity-gap
+    candidates are never capped — one gap per (target, capability) pair is already naturally
+    bounded by the taxonomy's own size, not the KB's raw item count. `None` (the default)
+    scores every match, as before.
     """
     candidates: list[Candidate] = []
     seen: set[tuple[str | None, int | None]] = set()
@@ -360,7 +397,10 @@ def discover_candidates(
             boost=_boost_for(gap_item, velocity_by_repo, velocity_median),
         )
 
-    for item in items:
+    eligible_items = (
+        items if per_domain_limit is None else _sample_matched_per_domain(items, per_domain_limit)
+    )
+    for item in eligible_items:
         if item.get("type") != "issue" or item.get("state") != "open":
             continue
         key = (item.get("repo"), item.get("number"))
@@ -383,7 +423,7 @@ def discover_candidates(
     return sorted(candidates, key=lambda c: c.priority, reverse=True)
 
 
-def discover_from_store(store: Store) -> list[Candidate]:
+def discover_from_store(store: Store, *, per_domain_limit: int | None = None) -> list[Candidate]:
     """:func:`discover_candidates` over every item currently in `store` — see module docstring
     for why a :class:`~src.parity.ParityError` here degrades to "no parity gaps" rather than
     aborting the good-first-issue/ROCm-reproducible sources too.
@@ -394,4 +434,4 @@ def discover_from_store(store: Store) -> list[Candidate]:
     except parity_module.ParityError as exc:
         print(f"scout: skipping parity gaps: {exc}", file=sys.stderr)
         gaps = []
-    return discover_candidates(items, gaps)
+    return discover_candidates(items, gaps, per_domain_limit=per_domain_limit)
