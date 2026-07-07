@@ -185,6 +185,79 @@ def test_discover_candidates_empty_returns_empty() -> None:
     assert scout.discover_candidates([]) == []
 
 
+# --------------------------------------------------------------------- T3.19 dry-run sampling
+
+
+def test_discover_candidates_per_domain_limit_gives_every_domain_an_equal_slice(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """T3.19: `per_domain_limit` caps good-first-issue/ROCm-reproducible matches per *domain*,
+    not per repo -- a KB with more repos under one domain than another must not give that
+    domain a disproportionate share of a bounded sample (the same rationale as
+    `analyst._sample_per_domain`)."""
+    monkeypatch.setattr(
+        parity.config,
+        "REPOS",
+        [
+            {"slug": "verl-project/verl", "role": "source", "domain": "rl"},
+            {"slug": "OpenRLHF/OpenRLHF", "role": "source", "domain": "rl"},
+            {"slug": "vllm-project/vllm", "role": "primary", "domain": "speech"},
+        ],
+    )
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    items = (
+        [_item("verl-project/verl", n, title=f"hipBLAS bug {n} on gfx90a") for n in range(1, 4)]
+        + [_item("OpenRLHF/OpenRLHF", n, title=f"hipBLAS bug {n} on gfx90a") for n in range(1, 4)]
+        + [_item("vllm-project/vllm", 1, title="hipBLAS bug on gfx90a")]
+    )
+
+    candidates = scout.discover_candidates(items, per_domain_limit=2)
+
+    rl_repos = ("verl-project/verl", "OpenRLHF/OpenRLHF")
+    rl_count = sum(1 for c in candidates if any(r in (c.evidence or "") for r in rl_repos))
+    speech_count = sum(1 for c in candidates if "vllm-project/vllm" in (c.evidence or ""))
+    assert rl_count == 2
+    assert speech_count == 1
+    assert len(candidates) == 3
+
+
+def test_discover_candidates_per_domain_limit_never_caps_parity_gaps(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Parity-gap candidates aren't subject to `per_domain_limit` -- they're already bounded
+    by the taxonomy's own size, not the KB's raw item count."""
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: _reply())
+    gap = parity.Gap(
+        capability="fp8-kv-cache",
+        target_engine="vllm-project/vllm-omni",
+        source_engine="sgl-project/sglang",
+        evidence="https://github.com/sgl-project/sglang/pull/1",
+    )
+
+    candidates = scout.discover_candidates([], [gap], per_domain_limit=1)
+
+    assert len(candidates) == 1
+    assert candidates[0].source == "parity-gap"
+
+
+def test_sample_matched_per_domain_only_counts_items_that_would_actually_match(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A closed issue, a PR, and an unrelated open issue don't consume any domain's budget --
+    only items `_candidate_source` would actually match do."""
+    monkeypatch.setattr(parity.config, "REPOS", [{"slug": "o/r", "role": "source", "domain": "rl"}])
+    items = [
+        _item("o/r", 1, title="hipBLAS bug on gfx90a", state="closed"),
+        _item("o/r", 2, title="hipBLAS bug on gfx90a", type="pr"),
+        _item("o/r", 3, title="typo in docs"),
+        _item("o/r", 4, title="hipBLAS bug on gfx90a"),  # the only real match
+    ]
+
+    sampled = scout._sample_matched_per_domain(items, limit=5)
+
+    assert [item["number"] for item in sampled] == [4]
+
+
 # --------------------------------------------------------------------- T3.16 boost signals
 
 

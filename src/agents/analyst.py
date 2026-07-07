@@ -98,6 +98,7 @@ re-collected item doesn't get repeatedly and wastefully re-sent through ``llm.co
 from __future__ import annotations
 
 import sys
+from collections import defaultdict
 
 from .. import llm
 from ..parity import _domain_of
@@ -242,7 +243,32 @@ def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     return _classified_record(item, (domain, *sublevels), taxonomy.version)
 
 
-def analyze_store(store: Store) -> list[dict]:
+def _sample_per_domain(items: list[dict], limit: int) -> list[dict]:
+    """At most `limit` items per **domain** (:func:`_domain_of_item`), preserving `items`' own
+    relative order.
+
+    Grouped by domain, not repo: `config.REPOS` has wildly uneven repo counts per domain (one
+    `"speech"` repo vs. seven `"rl"` repos, as of T3.19) — a per-*repo* cap would silently give
+    `"rl"` up to 7x `"speech"`'s sample size, systematically under-representing `"speech"`, the
+    one domain `config.py`'s own comments call this project's current top priority. Grouping by
+    domain instead guarantees every domain gets an equal look regardless of how many repos
+    happen to be tracked under it — the actual property a retarget dry run (T3.19) needs, since
+    the retarget itself is about domains, not individual repos. An item whose repo isn't
+    tracked in `config.REPOS` (`_domain_of_item` returns `None`) is grouped under `None`, capped
+    the same as any other "domain".
+    """
+    counts: dict[str | None, int] = defaultdict(int)
+    sampled = []
+    for item in items:
+        domain = _domain_of_item(item)
+        if counts[domain] >= limit:
+            continue
+        counts[domain] += 1
+        sampled.append(item)
+    return sampled
+
+
+def analyze_store(store: Store, *, per_domain_limit: int | None = None) -> list[dict]:
     """Classify every not-yet-classified item in `store` and write the results back.
 
     "Delta" = items with no ``path`` key yet, so a rerun only classifies what an earlier run
@@ -252,12 +278,28 @@ def analyze_store(store: Store) -> list[dict]:
     and left pending for the next run — rather than discarding every other item already
     classified in this batch.
 
+    `per_domain_limit` caps how many pending items *per domain* get classified this run (via
+    :func:`_sample_per_domain`) — for a KB with tens of thousands of pending items across many
+    repos and domains (e.g. right after a multi-domain retarget, T3.19), classifying everything
+    is a multi-hour, one-LLM-call-per-item commitment; a small per-domain cap still gives every
+    domain an equal-sized, representative slice for a bounded dry run instead of one domain's
+    disproportionate repo count skewing the sample. `None` (the default) classifies everything
+    pending, as before. Must be a positive int if given — raises `ValueError` otherwise, rather
+    than a `0`-or-negative value silently classifying nothing and printing the exact same
+    "classified 0 item(s)" a genuinely empty backlog would (indistinguishable operator footgun,
+    caught on T3.19's own code review).
+
     Returns the newly-classified items (``[]`` if there was nothing to do).
 
     Raises:
+        ValueError: `per_domain_limit` is given and isn't a positive int.
         TaxonomyError: there are pending items but no taxonomy has been created yet.
     """
+    if per_domain_limit is not None and per_domain_limit <= 0:
+        raise ValueError(f"per_domain_limit must be a positive int, got {per_domain_limit!r}")
     pending = [item for item in store.query() if "path" not in item]
+    if per_domain_limit is not None:
+        pending = _sample_per_domain(pending, per_domain_limit)
     if not pending:
         return []
 

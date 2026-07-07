@@ -15,6 +15,18 @@ from .agents import analyst
 from .store import resolve_store
 
 
+def _positive_int(raw: str) -> int:
+    """`argparse` type for `--per-domain-limit`: a clean CLI usage error for a non-positive
+    value, rather than a raw `ValueError` traceback from :func:`~src.agents.analyst.analyze_store`
+    — a `0`/negative limit used to silently classify nothing and print the exact same
+    "classified 0 item(s)" a genuinely empty backlog would, with no signal the flag itself was
+    the problem (caught on T3.19's own code review)."""
+    value = int(raw)
+    if value <= 0:
+        raise argparse.ArgumentTypeError(f"must be a positive int, got {raw!r}")
+    return value
+
+
 def main(argv: list[str] | None = None) -> int:
     """CLI entry point: classify pending items and print how many were classified.
 
@@ -35,10 +47,21 @@ def main(argv: list[str] | None = None) -> int:
             "(default: config.DATA_DIR, backend from env STORE=jsonl|firestore)."
         ),
     )
+    ap.add_argument(
+        "--per-domain-limit",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Classify at most N pending items per domain (speech/rl/omni/engine), giving every "
+            "domain an equal-sized slice regardless of how many repos are tracked under it -- "
+            "for a bounded dry run over a KB with many pending items (e.g. right after a "
+            "retarget, T3.19). Must be a positive int."
+        ),
+    )
     args = ap.parse_args(argv)
 
     store, _ = resolve_store(args.data_dir)
-    classified = analyst.analyze_store(store)
+    classified = analyst.analyze_store(store, per_domain_limit=args.per_domain_limit)
     print(f"classified {len(classified)} item(s)")
     return 0
 
