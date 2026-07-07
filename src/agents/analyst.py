@@ -98,6 +98,7 @@ re-collected item doesn't get repeatedly and wastefully re-sent through ``llm.co
 from __future__ import annotations
 
 import sys
+from collections import defaultdict
 
 from .. import llm
 from ..parity import _domain_of
@@ -242,7 +243,26 @@ def classify_item(item: dict, taxonomy: Taxonomy) -> dict:
     return _classified_record(item, (domain, *sublevels), taxonomy.version)
 
 
-def analyze_store(store: Store) -> list[dict]:
+def _sample_per_repo(items: list[dict], limit: int) -> list[dict]:
+    """At most `limit` items per repo, preserving `items`' own relative order.
+
+    Without this, a flat `pending[:limit]` slice over a KB spanning many repos of very
+    different sizes would exhaust one large repo's backlog (e.g. `sgl-project/sglang`'s tens
+    of thousands of items) before ever reaching a smaller one — for a bounded dry run meant to
+    sample *across* every tracked repo (T3.19), that silently defeats the point.
+    """
+    counts: dict[str | None, int] = defaultdict(int)
+    sampled = []
+    for item in items:
+        repo = item.get("repo")
+        if counts[repo] >= limit:
+            continue
+        counts[repo] += 1
+        sampled.append(item)
+    return sampled
+
+
+def analyze_store(store: Store, *, per_repo_limit: int | None = None) -> list[dict]:
     """Classify every not-yet-classified item in `store` and write the results back.
 
     "Delta" = items with no ``path`` key yet, so a rerun only classifies what an earlier run
@@ -252,12 +272,21 @@ def analyze_store(store: Store) -> list[dict]:
     and left pending for the next run — rather than discarding every other item already
     classified in this batch.
 
+    `per_repo_limit` caps how many pending items *per repo* get classified this run (via
+    :func:`_sample_per_repo`) — for a KB with tens of thousands of pending items across many
+    repos (e.g. right after a multi-domain retarget, T3.19), classifying everything is a
+    multi-hour, one-LLM-call-per-item commitment; a small per-repo cap still touches every
+    tracked repo/domain for a representative dry run instead of exhausting one large repo's
+    backlog first. `None` (the default) classifies everything pending, as before.
+
     Returns the newly-classified items (``[]`` if there was nothing to do).
 
     Raises:
         TaxonomyError: there are pending items but no taxonomy has been created yet.
     """
     pending = [item for item in store.query() if "path" not in item]
+    if per_repo_limit is not None:
+        pending = _sample_per_repo(pending, per_repo_limit)
     if not pending:
         return []
 

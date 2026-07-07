@@ -35,10 +35,20 @@ def main(argv: list[str] | None = None) -> int:
             "(default: config.DATA_DIR, backend from env STORE=jsonl|firestore)."
         ),
     )
+    ap.add_argument(
+        "--per-repo-limit",
+        type=int,
+        default=None,
+        help=(
+            "Classify at most N pending items per repo, sampling across every tracked repo "
+            "instead of exhausting one large repo's backlog first -- for a bounded dry run "
+            "over a KB with many pending items (e.g. right after a retarget, T3.19)."
+        ),
+    )
     args = ap.parse_args(argv)
 
     store, _ = resolve_store(args.data_dir)
-    classified = analyst.analyze_store(store)
+    classified = analyst.analyze_store(store, per_repo_limit=args.per_repo_limit)
     print(f"classified {len(classified)} item(s)")
     return 0
 

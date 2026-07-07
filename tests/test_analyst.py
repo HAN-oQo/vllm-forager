@@ -260,6 +260,28 @@ def test_analyze_store_classifies_only_pending_items(
     assert stored[2]["path"] == ["rl", "eval"]
 
 
+def test_analyze_store_per_repo_limit_samples_every_repo(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T3.19: `per_repo_limit` caps items per repo rather than taking a flat slice -- a repo
+    with many pending items must not exhaust the whole budget before a smaller repo is ever
+    reached."""
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    store.upsert_items(
+        [_item("verl-project/verl", n, f"item {n}") for n in range(1, 6)]
+        + [_item("vllm-project/vime", 1, "the only vime item")]
+    )
+    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"path": ["post-training"]})
+
+    classified = analyst.analyze_store(store, per_repo_limit=2)
+
+    by_repo: dict[str, int] = {}
+    for item in classified:
+        by_repo[item["repo"]] = by_repo.get(item["repo"], 0) + 1
+    assert by_repo == {"verl-project/verl": 2, "vllm-project/vime": 1}
+
+
 def test_analyze_store_backfills_path_for_a_pre_t1_5_2_flat_category_item(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
