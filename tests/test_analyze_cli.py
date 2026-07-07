@@ -61,16 +61,22 @@ def test_main_no_pending_items_prints_zero(tmp_path, capsys) -> None:
     assert capsys.readouterr().out.strip() == "classified 0 item(s)"
 
 
-def test_main_per_repo_limit_caps_classification(
+def test_main_per_domain_limit_caps_classification(
     tmp_path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
-    """T3.19: `--per-repo-limit` bounds a dry run over a KB with many pending items."""
+    """T3.19: `--per-domain-limit` bounds a dry run over a KB with many pending items."""
     store = JsonlStore(tmp_path)
     create_taxonomy(store, [["speech", "rocm-build"]])
     store.upsert_items([_item("o/r", n, f"hipBLAS bug {n} on gfx90a") for n in range(1, 6)])
     monkeypatch.setattr(llm, "complete", lambda *a, **k: {"path": ["rocm-build"]})
 
-    rc = analyze.main(["--data-dir", str(tmp_path), "--per-repo-limit", "2"])
+    rc = analyze.main(["--data-dir", str(tmp_path), "--per-domain-limit", "2"])
 
     assert rc == 0
     assert capsys.readouterr().out.strip() == "classified 2 item(s)"
+
+
+def test_main_per_domain_limit_rejects_non_positive(capsys) -> None:
+    with pytest.raises(SystemExit):
+        analyze.main(["--per-domain-limit", "0"])
+    assert "must be a positive int" in capsys.readouterr().err

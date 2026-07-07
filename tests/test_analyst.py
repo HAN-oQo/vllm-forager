@@ -260,26 +260,49 @@ def test_analyze_store_classifies_only_pending_items(
     assert stored[2]["path"] == ["rl", "eval"]
 
 
-def test_analyze_store_per_repo_limit_samples_every_repo(
+def test_analyze_store_per_domain_limit_gives_every_domain_an_equal_slice(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """T3.19: `per_repo_limit` caps items per repo rather than taking a flat slice -- a repo
-    with many pending items must not exhaust the whole budget before a smaller repo is ever
-    reached."""
+    """T3.19 (code-review follow-up): `per_domain_limit` caps items per *domain*, not per repo
+    -- `config.REPOS` can track many more repos under one domain than another (here: 2 `"rl"`
+    repos vs. 1 `"speech"` repo), so a repo-level cap would give `"rl"` up to 2x `"speech"`'s
+    sample size. A domain-level cap gives both domains the identical slice regardless."""
+    monkeypatch.setattr(
+        parity.config,
+        "REPOS",
+        [
+            {"slug": "verl-project/verl", "role": "source", "domain": "rl"},
+            {"slug": "OpenRLHF/OpenRLHF", "role": "source", "domain": "rl"},
+            {"slug": "vllm-project/vllm", "role": "primary", "domain": "speech"},
+        ],
+    )
     store = JsonlStore(tmp_path)
-    create_taxonomy(store, [["rl", "post-training"]])
+    create_taxonomy(store, [["rl", "post-training"], ["speech", "rocm"]])
     store.upsert_items(
-        [_item("verl-project/verl", n, f"item {n}") for n in range(1, 6)]
-        + [_item("vllm-project/vime", 1, "the only vime item")]
+        [_item("verl-project/verl", n, f"verl item {n}") for n in range(1, 4)]
+        + [_item("OpenRLHF/OpenRLHF", n, f"openrlhf item {n}") for n in range(1, 4)]
+        + [_item("vllm-project/vllm", 1, "the only speech item")]
     )
     monkeypatch.setattr(llm, "complete", lambda *a, **k: {"path": ["post-training"]})
 
-    classified = analyst.analyze_store(store, per_repo_limit=2)
+    classified = analyst.analyze_store(store, per_domain_limit=2)
 
-    by_repo: dict[str, int] = {}
-    for item in classified:
-        by_repo[item["repo"]] = by_repo.get(item["repo"], 0) + 1
-    assert by_repo == {"verl-project/verl": 2, "vllm-project/vime": 1}
+    rl_repos = {"verl-project/verl", "OpenRLHF/OpenRLHF"}
+    rl_count = sum(1 for item in classified if item["repo"] in rl_repos)
+    speech_count = sum(1 for item in classified if item["repo"] == "vllm-project/vllm")
+    # rl's 2-item cap is filled from whichever rl repo(s) store.query() happens to return
+    # first -- which specific repo isn't the guarantee; the domain-level cap is. Without this
+    # fix, a repo-level cap would have let *each* rl repo contribute up to 2 (4 total).
+    assert rl_count == 2
+    assert speech_count == 1
+    assert len(classified) == 3
+
+
+def test_analyze_store_per_domain_limit_rejects_non_positive(tmp_path) -> None:
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    with pytest.raises(ValueError, match="positive int"):
+        analyst.analyze_store(store, per_domain_limit=0)
 
 
 def test_analyze_store_backfills_path_for_a_pre_t1_5_2_flat_category_item(
