@@ -68,6 +68,47 @@
 - **Status:** shaping (quick wins are near-DEVPLAN; full cascade lands once the M1 intelligence plane exists to
   classify against).
 
+### Buy-not-build the operator console: adopt an OSS dashboard instead of hand-rolling
+- **What:** stop growing the bespoke `dashboard/` (the M1 thin slice that renders the whole KB per request — the
+  DEVPLAN `T5.16` scale problem). Offload the generic + observability parts to mature OSS; keep only the bespoke
+  domain views custom.
+- **Why / value:** the operator console is the most important surface, and scale / pagination / alerting / theming
+  / RBAC are exactly what battle-tested tools already solved — far less code to own than re-deriving it.
+- **The shape that fits (no single tool covers all — the console is three different natures):**
+  - **Ops / observability half → Grafana.** Live health ("what's running", `T5.8`), cost-per-agent over time
+    (`T5.13`), guardrail drift with thresholds + **alerting** (`T5.7`), trend charts (`T5.3`). Grafana is
+    purpose-built for exactly this and the most-deployed self-hosted viz tool; adopting it deletes those custom
+    panels and gives alerting for free. Needs a time-series / SQL / JSON datasource.
+  - **Interactive + write-back half → a low-code builder over our read API, or a thin custom app.** Candidate
+    "work this" select (writes a decision), patch approve/hold, tables. **Appsmith** (dev/JS, Apache-2.0; connects
+    Postgres/Mongo/**REST**/GraphQL) or **ToolJet** (visual+code, AGPL, built-in PG DB) give **natively paginated**
+    tables + forms + buttons over the `T5.1` read API; **Budibase** (no-code, GPL) for the simplest CRUD.
+    Python-native alternative: **Dash + AG Grid server-side row model** (100k+ rows) or **NiceGUI** (app-style
+    monitoring UIs). ⚠ plain **Streamlit does NOT fix scale** — its rerun + per-session-RAM model is the *same*
+    full-KB trap unless you paginate and push filtering to the DB.
+- **The real prerequisite (why `T5.16` isn't wasted even if we buy):** every one of these tools scales by
+  **querying a paginated/aggregated DB, not loading the whole KB** — which *is* `T5.16`'s core (read API +
+  pagination + a queryable backend). So `T5.16` isn't competing with adoption; it's the **seam that enables** it.
+  Deciding factor is the KB backend: Grafana/BI want SQL/time-series, builders want SQL/REST — so this likely
+  pushes the KB toward **Postgres, or exposing `T5.1` as REST** (Firestore isn't first-class in these tools).
+- **What stays custom (~30–40%):** the bespoke 大→소→소소 taxonomy tree with node summaries and the per-issue
+  attempt report don't map to generic BI widgets — hand-build or embed those; offload the generic ~60% (charts,
+  tables, health, cost, guardrails, pagination).
+- **Cost / caveat:** each tool is another self-hosted service to deploy/patch/secure on ce-master (the "hidden
+  engineering tax"). Clearly worth it for the **observability half (Grafana)**; for the interactive half, a
+  builder-service vs. a thin custom app over the same read API is a real toss-up for a single-user, human-gated tool.
+- **Scope / effort:** M — Grafana for the ops half is S–M once run/cost events are emitted in a datasource shape;
+  the interactive-half build-vs-buy call rides on the `T5.16` backend/read-API work.
+- **Depends on / risk:** the KB backend + `T5.1` read API (the seam); license compliance (Grafana/Superset/
+  Metabase/ToolJet AGPL, Budibase GPL, Appsmith Apache-2.0); operating extra services. Relates to
+  `docs/design/pipelines/README.md`, DEVPLAN `T5.16` (foundational) + `T5.15`.
+- **Status:** shaping — recommend adopting **Grafana** for the ops/observability half early (clear win); for the
+  interactive half, defer build-vs-buy until `T5.16`'s read-API/backend lands, then evaluate **Appsmith/ToolJet
+  over the read API** vs. a thin custom app.
+- **Sources (2026):** [Grafana vs Superset vs Metabase](https://www.modern-datatools.com/compare/metabase-vs-superset-vs-grafana)
+  · [Appsmith vs ToolJet vs Budibase](https://blog.tooljet.com/appsmith-vs-budibase-vs-tooljet/)
+  · [Streamlit/Dash/Reflex/NiceGUI at scale](https://reflex.dev/blog/streamlit-vs-dash-python-dashboards/).
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.
