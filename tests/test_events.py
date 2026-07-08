@@ -27,15 +27,22 @@ def store(tmp_path) -> JsonlStore:
     return s
 
 
+def _terminal(store: JsonlStore, stage_name: str) -> dict:
+    """The one terminal (`"ok"`/`"failed"`) run event for `stage_name`, ignoring the
+    `"started"` lifecycle event `run_tick` also writes for every due/triggered stage (T4.5) --
+    these tests are about the terminal-event contract specifically."""
+    matches = [r for r in store.list_runs(stage=stage_name) if r["status"] in ("ok", "failed")]
+    assert len(matches) == 1, matches
+    return matches[0]
+
+
 def test_run_tick_writes_a_run_event_with_the_expected_fields(store: JsonlStore) -> None:
     """DEVPLAN's own worked example: `{stage: collect, status: ok, items: 42, dur_s: 31}`."""
     stage = orchestrator.Stage("collect", lambda _s: 42, interval_hours=24)
 
     orchestrator.run_tick(store, [stage], now=_NOW)
 
-    runs = store.list_runs(stage="collect")
-    assert len(runs) == 1
-    run = runs[0]
+    run = _terminal(store, "collect")
     assert run["stage"] == "collect"
     assert run["status"] == "ok"
     assert run["items"] == 42
@@ -53,11 +60,10 @@ def test_run_tick_writes_a_failed_run_event_when_a_stage_raises(store: JsonlStor
     with pytest.raises(RuntimeError, match="boom"):
         orchestrator.run_tick(store, [stage], now=_NOW)
 
-    runs = store.list_runs(stage="intel")
-    assert len(runs) == 1
-    assert runs[0]["status"] == "failed"
-    assert runs[0]["error"] == "RuntimeError: boom"  # exception type included, not just str(exc)
-    assert "items" not in runs[0]
+    run = _terminal(store, "intel")
+    assert run["status"] == "failed"
+    assert run["error"] == "RuntimeError: boom"  # exception type included, not just str(exc)
+    assert "items" not in run
 
 
 def test_run_tick_writes_both_an_ok_and_a_failed_event_in_the_same_tick(
@@ -78,8 +84,8 @@ def test_run_tick_writes_both_an_ok_and_a_failed_event_in_the_same_tick(
     with pytest.raises(RuntimeError, match="boom"):
         orchestrator.run_tick(store, stages, now=_NOW)
 
-    assert store.list_runs(stage="collect")[0]["status"] == "ok"
-    assert store.list_runs(stage="intel")[0]["status"] == "failed"
+    assert _terminal(store, "collect")["status"] == "ok"
+    assert _terminal(store, "intel")["status"] == "failed"
 
 
 def test_run_tick_writes_no_event_for_a_skipped_stage(store: JsonlStore) -> None:
@@ -90,7 +96,7 @@ def test_run_tick_writes_no_event_for_a_skipped_stage(store: JsonlStore) -> None
     assert store.list_runs(stage="contribution") == []
 
 
-def test_run_tick_writes_one_event_per_stage_this_tick(store: JsonlStore) -> None:
+def test_run_tick_writes_one_terminal_event_per_stage_this_tick(store: JsonlStore) -> None:
     stages = [
         orchestrator.Stage("collect", lambda _s: 1, interval_hours=24),
         orchestrator.Stage("contribution", lambda _s: 2, trigger=lambda _s: True),
@@ -98,8 +104,9 @@ def test_run_tick_writes_one_event_per_stage_this_tick(store: JsonlStore) -> Non
 
     orchestrator.run_tick(store, stages, now=_NOW)
 
-    assert len(store.list_runs()) == 2
-    assert {r["stage"] for r in store.list_runs()} == {"collect", "contribution"}
+    terminal = [r for r in store.list_runs() if r["status"] in ("ok", "failed")]
+    assert len(terminal) == 2
+    assert {r["stage"] for r in terminal} == {"collect", "contribution"}
 
 
 def test_run_tick_survives_a_record_run_failure_but_the_event_is_genuinely_lost(
@@ -138,5 +145,5 @@ def test_run_tick_survives_a_set_state_failure_after_a_successful_run_event(
     result = orchestrator.run_tick(store, [stage], now=_NOW)
 
     assert result.ran == ("collect",)
-    assert store.list_runs(stage="collect")[0]["status"] == "ok"
+    assert _terminal(store, "collect")["status"] == "ok"
     assert "failed to advance last-run cursor" in capsys.readouterr().err
