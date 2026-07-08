@@ -61,6 +61,7 @@ Known limitations, not fixed here:
 
 from __future__ import annotations
 
+import sys
 from collections import defaultdict
 from dataclasses import dataclass
 
@@ -250,3 +251,19 @@ def find_gaps_for_all_targets(cells: list[ParityCell]) -> list[Gap]:
     for target in targets:
         gaps.extend(find_gaps(cells, target_engine=target, _by_engine=by_engine))
     return gaps
+
+
+def safe_find_gaps_for_all_targets(cells: list[ParityCell], *, caller: str) -> list[Gap]:
+    """:func:`find_gaps_for_all_targets`, degrading a :class:`ParityError` (no
+    ``"primary"``-role engine configured) to an empty list instead of raising — a config gap
+    that has nothing to do with candidate-discovery or dashboard-reading shouldn't crash
+    either. `caller` (a short label, e.g. ``"scout"``/``"dashboard.api"``) tags the stderr
+    message so the two real call sites (:func:`~src.agents.scout.discover_from_store`,
+    :func:`~dashboard.api.parity`) can share one implementation instead of independently
+    hand-copying the identical try/except (a code-review finding on the latter's own PR).
+    """
+    try:
+        return find_gaps_for_all_targets(cells)
+    except ParityError as exc:
+        print(f"{caller}: skipping parity gaps: {exc}", file=sys.stderr)
+        return []

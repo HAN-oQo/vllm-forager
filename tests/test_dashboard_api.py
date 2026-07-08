@@ -79,6 +79,18 @@ def test_tree_returns_capped_nodes_with_counts(tmp_path: Path) -> None:
     assert nodes[0]["count"] == 2
 
 
+def test_tree_is_unaffected_by_a_corrupt_prediction_record(tmp_path: Path) -> None:
+    """Regression: an earlier version of tree() routed through build_snapshot(), which also
+    reads the prediction log -- a corrupt prediction_count state value must not crash a
+    tree-only read that has nothing to do with predictions."""
+    store = _seeded_store(tmp_path)
+    store.set_state("prediction_count", "not-a-number")
+
+    nodes = api.tree(store)  # must not raise
+
+    assert len(nodes) == 1
+
+
 # --------------------------------------------------------------------- trends
 
 
@@ -93,13 +105,13 @@ def test_trends_returns_the_full_series(tmp_path: Path) -> None:
 def test_trends_for_category_matches_the_devplan_worked_example(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
 
-    assert api.trends_for_category(store, "cat") == {"2026-W02": 2}
+    assert api.trends(store, "cat") == {"2026-W02": 2}
 
 
 def test_trends_for_category_with_no_activity_returns_empty_dict(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
 
-    assert api.trends_for_category(store, "quantization") == {}
+    assert api.trends(store, "quantization") == {}
 
 
 # --------------------------------------------------------------------- predictions

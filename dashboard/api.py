@@ -16,9 +16,8 @@ call) vs. genuinely expensive is the load-bearing design decision here:
 
 - **items** — :func:`items`/:func:`tree`, thin wrappers over :mod:`dashboard.snapshot`'s
   already-built, already-tested :func:`~dashboard.snapshot.items_at_path`/
-  :func:`~dashboard.snapshot.build_snapshot` (no reason to duplicate either).
-- **trends** — :func:`trends`/:func:`trends_for_category`, over
-  :func:`~src.trends.trends_from_store`. Cheap (one scan).
+  :func:`~dashboard.snapshot.capped_tree` (no reason to duplicate either).
+- **trends** — :func:`trends`, over :func:`~src.trends.trends_from_store`. Cheap (one scan).
 - **predictions** — :func:`predictions`, over
   :func:`~src.agents.forecaster.list_predictions`. Cheap (reads the KB's small state map).
 - **candidates** — :func:`candidates` — **not cheap**: every candidate costs one
@@ -31,24 +30,39 @@ call) vs. genuinely expensive is the load-bearing design decision here:
   own established "expensive work is opt-in, safe by default" convention (e.g.
   ``analyze_store``'s ``batch_size``, T4.10's own gating). Persisting a scored queue so a
   *cheap* read becomes possible is a real follow-up (T5.10's own "human-in-the-loop signal"
-  todo is the natural place that lands), not this one.
+  todo is the natural place that lands), not this one. **Known limitation, not fixed here**:
+  ``[]`` means both "never computed" and "computed, genuinely empty" — indistinguishable to a
+  caller. T5.10 (the human-in-the-loop selection UI) will very likely need to replace this
+  plain `compute: bool` with a persisted-queue read plus a separate trigger-computation entry
+  point (a stable per-candidate identity to write a `decision` record against, and a
+  non-request-blocking way to trigger a scoring pass) — this signature is not guaranteed to
+  survive that redesign unchanged, and callers shouldn't assume it will.
 - **parity** — :func:`parity`, over :func:`~src.parity.build_matrix`/
-  :func:`~src.parity.find_gaps_for_all_targets`. Cheap (no LLM calls, just a scan + grouping) —
-  unlike candidates, safe to compute on every read.
+  :func:`~src.parity.safe_find_gaps_for_all_targets`. Cheap (no LLM calls, just a scan +
+  grouping) — unlike candidates, safe to compute on every read. **Known limitation, not fixed
+  here**: :func:`candidates`\\ (``compute=True``) independently recomputes this exact same
+  matrix/gap pair inside :func:`~src.agents.scout.discover_from_store` — a caller wanting both
+  on one page pays for it twice; not fixed here since nothing in this codebase calls both
+  together yet (no real caller to design the sharing against).
 - **runs** — :func:`runs`/:func:`stage_status`, thin wrappers over
   :meth:`~src.store.base.Store.list_runs`/:func:`~src.liveness.latest_status` (already built
   for exactly this "what's running" purpose, T4.5).
 
-Known limitation, not fixed here: every function that scans the store (items/tree/trends/
-parity) still does its own independent full :meth:`~src.store.base.Store.query` — the same
-"no `Store`-level `limit`/`offset`/path filter yet" gap :mod:`dashboard.snapshot`'s own
-docstring already discloses. This module doesn't add a new one, but doesn't fix the underlying
-one either; a real fix is a `Store` interface change, out of scope for a read-*layer* todo.
+**Known limitation, not fixed here — deferred for a second review cycle in a row**: every
+function that scans the store (items/tree/trends/parity) still does its own independent full
+:meth:`~src.store.base.Store.query` — the same "no `Store`-level `limit`/`offset`/path filter
+yet" gap :mod:`dashboard.snapshot`'s own docstring already discloses, itself written pointing
+at "T5.1's read layer" as "the natural place" to add it. T5.1 (this todo) still didn't add it —
+no real multi-domain caller exists yet to design the filter against, so speculatively building
+one now risked guessing wrong; but this gap has now survived two dedicated review cycles
+(T5.16(c), T5.1) without a concrete next owner. Whoever hits this for real (most likely T5.2's
+"monitoring panels," the first todo combining several of these domains on one page) should
+either fix `Store.query()` itself or open a dedicated todo naming it explicitly, rather than
+deferring a third time with the same paragraph.
 """
 
 from __future__ import annotations
 
-import sys
 from dataclasses import asdict
 from datetime import datetime
 
@@ -60,7 +74,7 @@ from src.store.base import Store
 from src.taxonomy import CategoryPath
 from src.trends import trends_from_store
 
-from .snapshot import DEFAULT_MAX_PRS_PER_NODE, build_snapshot, items_at_path
+from .snapshot import DEFAULT_MAX_PRS_PER_NODE, capped_tree, items_at_path, paginate
 
 
 def items(
@@ -73,32 +87,40 @@ def items(
 
 
 def tree(store: Store, *, max_prs_per_node: int = DEFAULT_MAX_PRS_PER_NODE) -> list[dict]:
-    """The full classified tree (counts + capped top-N leaf rows per node) — the ``"tree"``
-    half of :func:`~dashboard.snapshot.build_snapshot`, for a panel that wants the tree without
-    also paying for trends/forecasts it doesn't need."""
-    return build_snapshot(store, max_prs_per_node=max_prs_per_node)["tree"]
+    """The full classified tree (counts + capped top-N leaf rows per node). Thin re-export of
+    :func:`~dashboard.snapshot.capped_tree` — *not* ``build_snapshot(...)["tree"]``: an earlier
+    version of this function went through :func:`~dashboard.snapshot.build_snapshot`, which
+    also unconditionally computes trends (a second full store scan) and forecasts (a full
+    prediction-log read) only to discard both — wasted work, and a tree-only read could crash
+    on a corrupt *prediction* record that has nothing to do with the tree (a code-review
+    finding on this PR)."""
+    return capped_tree(store, max_prs_per_node=max_prs_per_node)
 
 
-def trends(store: Store) -> dict[str, dict[str, int]]:
-    """Every category's per-week activity counts (``{category: {week: count}}``). Thin
-    re-export of :func:`~src.trends.trends_from_store`."""
-    return trends_from_store(store)
-
-
-def trends_for_category(store: Store, category: str) -> dict[str, int]:
-    """One category's own per-week series (``{week: count}``), or ``{}`` if it has no recorded
-    activity — this todo's own worked example (``api.trends("quantization")``)."""
-    return trends_from_store(store).get(category, {})
+def trends(store: Store, category: str | None = None) -> dict:
+    """Every category's per-week activity counts (``{category: {week: count}}``), or — when
+    `category` is given — just that one category's own series (``{week: count}``, or ``{}`` if
+    it has no recorded activity). One function, not two (an earlier version split this into
+    `trends`/`trends_for_category` — a code-review finding that the split didn't earn its
+    keep), matching this todo's own worked example (``api.trends("quantization")``) more
+    directly. Thin re-export of :func:`~src.trends.trends_from_store`."""
+    series = trends_from_store(store)
+    return series if category is None else series.get(category, {})
 
 
 def predictions(store: Store, *, offset: int = 0, limit: int | None = None) -> list[dict]:
-    """Every recorded prediction (oldest first, matching
-    :func:`~src.agents.forecaster.list_predictions`'s own order), as plain dicts, sliced to one
-    page. `limit=None` (the default) returns every remaining prediction from `offset` on."""
-    all_predictions = [asdict(p) for p in list_predictions(store)]
-    if limit is None:
-        return all_predictions[offset:]
-    return all_predictions[offset : offset + limit]
+    """One page of recorded predictions (oldest first, matching
+    :func:`~src.agents.forecaster.list_predictions`'s own order), as plain dicts. `limit=None`
+    (the default) returns every remaining prediction from `offset` on.
+
+    The `(offset, limit)` slice is taken *before* the ``dataclasses.asdict`` conversion, not
+    after — an earlier version of this function converted every recorded prediction first and
+    only then sliced, paying to transform rows it was about to discard; the sibling
+    :func:`~dashboard.snapshot.items_at_path` was fixed to avoid exactly this shape one todo
+    earlier (T5.16's own code review), and this function repeated it until this fix.
+    """
+    page = paginate(list_predictions(store), offset=offset, limit=limit)
+    return [asdict(p) for p in page]
 
 
 def _candidate_dict(candidate: scout.Candidate) -> dict:
@@ -130,20 +152,18 @@ def candidates(
 def parity(store: Store) -> dict:
     """``{"cells": [...], "gaps": [...]}`` — the full engine × capability matrix
     (:func:`~src.parity.build_matrix`) plus every cross-engine gap
-    (:func:`~src.parity.find_gaps_for_all_targets`), both as plain dicts. Cheap: no LLM calls,
-    just a store scan plus grouping — safe to compute on every read, unlike :func:`candidates`.
+    (:func:`~src.parity.safe_find_gaps_for_all_targets`), both as plain dicts. Cheap: no LLM
+    calls, just a store scan plus grouping — safe to compute on every read, unlike
+    :func:`candidates`.
 
     A :class:`~src.parity.ParityError` (no ``"primary"``-role engine configured) degrades to an
-    empty ``gaps`` list rather than raising — the same graceful-degradation
-    :func:`~src.agents.scout.discover_from_store` already applies, so a read endpoint doesn't
-    500 over a config gap the matrix itself (which needs no target engine) doesn't have.
+    empty ``gaps`` list rather than raising, via the same shared helper
+    :func:`~src.agents.scout.discover_from_store` uses — so a read endpoint doesn't 500 over a
+    config gap the matrix itself (which needs no target engine) doesn't have, and the two real
+    call sites can't independently drift on how that degradation is handled.
     """
     cells = parity_module.build_matrix(store.query())
-    try:
-        gaps = parity_module.find_gaps_for_all_targets(cells)
-    except parity_module.ParityError as exc:
-        print(f"dashboard.api: skipping parity gaps: {exc}", file=sys.stderr)
-        gaps = []
+    gaps = parity_module.safe_find_gaps_for_all_targets(cells, caller="dashboard.api")
     return {"cells": [asdict(c) for c in cells], "gaps": [asdict(g) for g in gaps]}
 
 

@@ -61,6 +61,14 @@ from src.trends import trends_from_store
 DEFAULT_MAX_PRS_PER_NODE = 50
 
 
+def paginate(seq: list, *, offset: int, limit: int | None) -> list:
+    """`seq[offset:]` (unbounded) or `seq[offset:offset + limit]` — the one place this module's
+    own :func:`items_at_path` and :func:`~dashboard.api.predictions` slice a page from, so the
+    "what does `limit=None` mean" convention can't drift between two independent copies of the
+    same ternary (a code-review finding)."""
+    return seq[offset:] if limit is None else seq[offset : offset + limit]
+
+
 def _capped_node(node: TreeNode, *, path: CategoryPath, max_prs: int) -> dict:
     """`node` (see :class:`~src.agents.reporter_v1.TreeNode`) as a JSON-serializable dict, its
     own ``prs`` capped to `max_prs` — ``prs_total``/``prs_truncated`` tell the renderer/UI
@@ -84,6 +92,19 @@ def _capped_node(node: TreeNode, *, path: CategoryPath, max_prs: int) -> dict:
     }
 
 
+def capped_tree(store: Store, *, max_prs_per_node: int = DEFAULT_MAX_PRS_PER_NODE) -> list[dict]:
+    """The classified tree alone (counts + capped top-N leaf rows per node) — one
+    :func:`~src.agents.reporter_v1.tree_from_store` scan, nothing else. Factored out of
+    :func:`build_snapshot` (which also computes trends/forecasts) so a caller that only wants
+    the tree — e.g. :func:`~dashboard.api.tree` — isn't forced to also pay for (and then
+    discard) a second full store scan for trends plus a full prediction-log read, a code-review
+    finding on an earlier version of :mod:`dashboard.api` that also risked a tree-only read
+    crashing on an unrelated corrupt *prediction* record.
+    """
+    nodes = tree_from_store(store)
+    return [_capped_node(node, path=(node.name,), max_prs=max_prs_per_node) for node in nodes]
+
+
 def build_snapshot(store: Store, *, max_prs_per_node: int = DEFAULT_MAX_PRS_PER_NODE) -> dict:
     """Producing a plain, JSON-serializable dict — everything
     :func:`~dashboard.render.render_snapshot_page` needs to render a page, and everything
@@ -91,11 +112,11 @@ def build_snapshot(store: Store, *, max_prs_per_node: int = DEFAULT_MAX_PRS_PER_
     touching `store` again afterward.
 
     **At least two** independent full store scans, not one — see this module's own Known
-    limitations: one inside :func:`~src.agents.reporter_v1.tree_from_store` (plus a per-node
-    summary read), a second inside :func:`~src.trends.trends_from_store`.
+    limitations: one inside :func:`capped_tree` (via
+    :func:`~src.agents.reporter_v1.tree_from_store`, plus a per-node summary read), a second
+    inside :func:`~src.trends.trends_from_store`.
     """
-    nodes = tree_from_store(store)
-    tree = [_capped_node(node, path=(node.name,), max_prs=max_prs_per_node) for node in nodes]
+    tree = capped_tree(store, max_prs_per_node=max_prs_per_node)
     forecasts = [asdict(p) for p in list_predictions(store)]
     return {"tree": tree, "trends": trends_from_store(store), "forecasts": forecasts}
 
@@ -144,5 +165,5 @@ def items_at_path(
         path_list = list(path)
         items = [item for item in store.query() if item.get("path") == path_list]
     total = len(items)
-    page = items[offset:] if limit is None else items[offset : offset + limit]
+    page = paginate(items, offset=offset, limit=limit)
     return [pr_entry(item) for item in page], total
