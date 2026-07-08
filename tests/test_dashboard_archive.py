@@ -2,6 +2,11 @@
 
 Per the DEVPLAN todo: seeded daily reports → archive lists them newest-first; selecting a
 date returns that report.
+
+This module is a thin `Store` -> `data_dir` resolution wrapper over `src.report.list_reports`/
+`read_tree_report` (a code-review finding moved the actual filesystem-scanning logic there) --
+these tests confirm the wrapper composes correctly end to end; the traversal/corruption edge
+cases those functions themselves guard against are covered directly in `tests/test_report_cli.py`.
 """
 
 from __future__ import annotations
@@ -92,3 +97,15 @@ def test_archive_degrades_for_a_store_with_no_data_dir() -> None:
 
     assert archive.list_archived_reports(NoDirStore()) == []
     assert archive.open_archived_report(NoDirStore(), "2026-W02") is None
+
+
+def test_archive_honors_an_explicit_data_dir_override(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)  # store.data_dir has no reports
+    other_dir = tmp_path / "other"
+    report.generate_tree(
+        store, other_dir / "reports", when=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+
+    assert archive.list_archived_reports(store) == []
+    reports = archive.list_archived_reports(store, data_dir=other_dir)
+    assert [r["stamp"] for r in reports] == ["2026-W02"]

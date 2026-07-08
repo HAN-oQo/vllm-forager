@@ -143,3 +143,104 @@ def test_main_tree_and_default_reports_never_collide_on_filename(tmp_path, capsy
 def test_main_v0_and_tree_together_errors(tmp_path):
     with pytest.raises(SystemExit):
         report.main(["--data-dir", str(tmp_path), "--v0", "--tree"])
+
+
+# -------------------------------------------------------------- list_reports / read_tree_report
+
+
+def test_list_reports_returns_newest_first(tmp_path):
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, "x", path=["build"])])
+    report.generate_tree(
+        store, tmp_path / "reports", when=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    report.generate_tree(
+        store, tmp_path / "reports", when=datetime(2026, 6, 1, tzinfo=timezone.utc)
+    )
+
+    reports = report.list_reports(tmp_path)
+
+    assert [r["stamp"] for r in reports] == ["2026-W23", "2026-W02"]
+
+
+def test_list_reports_empty_before_any_report_generated(tmp_path):
+    assert report.list_reports(tmp_path) == []
+
+
+def test_list_reports_ignores_a_directory_named_like_a_report(tmp_path):
+    """Regression: an earlier version's glob had no is_file() guard, so a stray directory
+    ending in .tree.json (e.g. left by an interrupted write) would be listed, then raise
+    IsADirectoryError when a caller tried to open it via read_tree_report."""
+    store = JsonlStore(tmp_path)
+    report.generate_tree(
+        store, tmp_path / "reports", when=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    (tmp_path / "reports" / "2026-W99.tree.json").mkdir()
+
+    reports = report.list_reports(tmp_path)
+
+    assert [r["stamp"] for r in reports] == ["2026-W02"]
+
+
+def test_read_tree_report_returns_the_tree_content(tmp_path):
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1, "x", path=["build"])])
+    report.generate_tree(
+        store, tmp_path / "reports", when=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+
+    tree = report.read_tree_report(tmp_path, "2026-W02")
+
+    assert tree is not None
+    assert tree[0]["name"] == "build"
+    assert tree[0]["count"] == 1
+
+
+def test_read_tree_report_unknown_stamp_returns_none(tmp_path):
+    store = JsonlStore(tmp_path)
+    report.generate_tree(
+        store, tmp_path / "reports", when=datetime(2026, 1, 5, tzinfo=timezone.utc)
+    )
+    assert report.read_tree_report(tmp_path, "2026-W99") is None
+
+
+def test_read_tree_report_no_reports_dir_returns_none(tmp_path):
+    assert report.read_tree_report(tmp_path, "2026-W02") is None
+
+
+def test_read_tree_report_rejects_relative_path_traversal(tmp_path):
+    """Regression, empirically reproduced during code review: an earlier version passed
+    `stamp` through unvalidated, so "../secret/leaked" (relative traversal) could read a
+    .tree.json file outside reports_dir."""
+    (tmp_path / "secret").mkdir()
+    (tmp_path / "secret" / "leaked.tree.json").write_text('[{"leaked": true}]')
+
+    assert report.read_tree_report(tmp_path, "../secret/leaked") is None
+
+
+def test_read_tree_report_rejects_absolute_path_stamp(tmp_path):
+    """Regression, empirically reproduced during code review: an earlier version passed
+    `stamp` through unvalidated -- an absolute-path stamp made `reports_dir / stamp` discard
+    reports_dir entirely (pathlib semantics), reading an arbitrary file on disk."""
+    outside = tmp_path / "outside.tree.json"
+    outside.write_text('[{"leaked": true}]')
+
+    assert report.read_tree_report(tmp_path, str(outside).removesuffix(".tree.json")) is None
+
+
+def test_read_tree_report_corrupt_json_returns_none(tmp_path):
+    reports_dir = tmp_path / "reports"
+    reports_dir.mkdir()
+    (reports_dir / "2026-W02.tree.json").write_text("not valid json")
+
+    assert report.read_tree_report(tmp_path, "2026-W02") is None
+
+
+def test_read_tree_report_directory_at_the_expected_path_returns_none(tmp_path):
+    """A directory (not a file) at the exact expected path degrades to None rather than
+    raising IsADirectoryError -- part of the broadened, code-review-driven exception
+    handling (an earlier version only caught json.JSONDecodeError)."""
+    reports_dir = tmp_path / "reports"
+    (reports_dir / "2026-W02.tree.json").mkdir(parents=True)
+
+    assert report.read_tree_report(tmp_path, "2026-W02") is None
