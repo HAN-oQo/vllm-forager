@@ -38,8 +38,8 @@ from src.agents.forecaster import Prediction, list_predictions
 from src.agents.reporter import is_merged, repo_number_label
 from src.store.base import Store
 from src.taxonomy import LEVEL_SEPARATOR
-from src.trends import trends_from_store
 
+from . import api
 from .snapshot import build_snapshot
 
 # Only these schemes are ever rendered as a clickable href — GitHub-sourced items always carry
@@ -54,8 +54,11 @@ _NODE_CLASS_BY_DEPTH = ("cat", "sub")
 
 
 def render_trends(store: Store) -> dict[str, dict[str, int]]:
-    """Per-category, per-week activity counts (thin re-export of `trends.trends_from_store`)."""
-    return trends_from_store(store)
+    """Per-category, per-week activity counts. Delegates to `dashboard.api.trends` (T5.1) — an
+    earlier version called `trends.trends_from_store` directly, an independent byte-for-byte
+    duplicate of `api.trends`'s own body that a code-review finding flagged as exactly the
+    "two clean read APIs, not one" problem T5.1's own stated Why exists to avoid."""
+    return api.trends(store)
 
 
 def render_forecasts(store: Store) -> list[Prediction]:

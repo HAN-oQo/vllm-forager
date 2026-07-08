@@ -429,9 +429,7 @@ def discover_from_store(store: Store, *, per_domain_limit: int | None = None) ->
     aborting the good-first-issue/ROCm-reproducible sources too.
     """
     items = store.query()
-    try:
-        gaps = parity_module.find_gaps_for_all_targets(parity_module.build_matrix(items))
-    except parity_module.ParityError as exc:
-        print(f"scout: skipping parity gaps: {exc}", file=sys.stderr)
-        gaps = []
+    gaps = parity_module.safe_find_gaps_for_all_targets(
+        parity_module.build_matrix(items), caller="scout"
+    )
     return discover_candidates(items, gaps, per_domain_limit=per_domain_limit)

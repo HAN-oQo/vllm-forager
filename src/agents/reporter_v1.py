@@ -186,9 +186,11 @@ class TreeNode:
     at this node's path — a deeper item contributes to a `children` node instead, never both.
 
     ``count`` rolls up this node's own item count plus every descendant's (so a parent always
-    shows its subtree total, per T1.5.4's own "Why"). ``gaps`` is a placeholder — T2.4's parity
-    matrix (M2, not yet built) is the only planned source of gap data; every node reports 0
-    until that lands. A node with ``count == 0`` can never be constructed by :func:`build_tree`
+    shows its subtree total, per T1.5.4's own "Why"). ``gaps`` is a placeholder — every node
+    reports 0 here regardless. T2.4's parity matrix (:mod:`src.parity`) is now built and used
+    by :mod:`~src.agents.scout`, but nothing wires its gap data into a tree node yet — that's
+    T5.4's own todo ("Parity diagram"), not this function's. A node with ``count == 0`` can
+    never be constructed by :func:`build_tree`
     (it only ever creates a node because some item's path passes through it), so "empty
     branches pruned" is a structural guarantee, not a separate filtering step.
     """
