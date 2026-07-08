@@ -116,6 +116,26 @@ def test_propose_retirements_none_when_all_active(tmp_path) -> None:
     assert curator.propose_retirements(store, inactive_weeks=8, now=_NOW) == []
 
 
+def test_propose_retirements_uses_a_supplied_active_taxonomy_without_refetching(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A caller that already fetched the active taxonomy (e.g. dashboard.panels.
+    taxonomy_timeline, a code-review finding on that function) shouldn't pay for a second
+    identical get_active() read."""
+    store = JsonlStore(tmp_path)
+    active = taxonomy.create_taxonomy(store, ["build", "stale"])
+    store.upsert_items([_item("o/r", 1, category="build", created_at="2026-05-30T00:00:00Z")])
+
+    def _boom(*a, **k):
+        raise AssertionError("get_active should not be called when `active` is supplied")
+
+    monkeypatch.setattr(taxonomy, "get_active", _boom)
+
+    proposals = curator.propose_retirements(store, inactive_weeks=8, now=_NOW, active=active)
+
+    assert [p.category for p in proposals] == ["stale"]
+
+
 # --------------------------------------------------------------------- _cluster_items
 
 
