@@ -21,16 +21,26 @@ Known limitations (disclosed, not fixed here):
   opencode, ...), not just Claude Code — :func:`ingest` only ingests rows whose ``agent`` is
   ``"claude"`` (this project only ever invokes ``claude -p``), silently skipping any other
   tool's rows rather than misattributing them as this system's own spend.
-- Re-running :func:`ingest` against overlapping ``ccusage --json`` output (e.g. a nightly cron
-  re-querying a rolling window) re-records every session again — there is no idempotency key
-  checked against what's already in the KB, so re-ingesting the same session twice double-counts
-  it in :func:`src.cost.rollup`. A future caller should track "already-ingested session ids"
-  itself (e.g. via ``store.get_state``/``set_state``) if this becomes a real operational
-  problem; today's Test/e.g. only exercise a single ingest of a fixture.
+- **No idempotency, and this is not a hypothetical edge case**: ``ccusage session --json`` with
+  no ``--since``/``--until`` returns a node's *entire* historical session list every time it's
+  invoked (verified against a real run on this machine). The exact "a nightly `ccusage --json`
+  per node" operating mode this todo's own DEVPLAN ``e.g.`` describes would re-ingest every
+  session on every run, inflating :func:`src.cost.rollup`'s totals without bound from the very
+  first repeat invocation — not an "overlapping window" corner case. A naive fix (skip a
+  session id already seen) is *also wrong*: a session's reported totals are a cumulative
+  snapshot that keeps growing across turns, so "skip if seen" would freeze its cost at whatever
+  the first ingest happened to observe rather than update it. A correct fix needs either
+  ``ccusage --since <high-water-mark-of-lastActivity>`` tracked via ``store.get_state``/
+  ``set_state`` (matching ``src.orchestrator``'s own cursor pattern) on the *caller* side, or a
+  KB-level upsert-by-``(run_id, model)`` instead of :func:`src.cost.write_cost_record`'s
+  append-only write — neither exists yet. No scheduled caller (cron/script) invokes
+  :func:`ingest` today, so this cannot yet fire in practice; it becomes live the moment
+  something schedules repeat ingestion, which must implement one of the above first.
 """
 
 from __future__ import annotations
 
+import sys
 from datetime import datetime, timezone
 
 from . import cost
@@ -44,36 +54,39 @@ _CLAUDE_CODE_AGENT_LABEL = "claude"
 _SESSION_AGENT_TAG = "claude_code_session"
 
 
-def _normalize_timestamp(raw: str | None) -> str:
+def _normalize_timestamp(raw: object) -> str:
     """ccusage's `lastActivity` is ISO-8601 with milliseconds (``...T00:29:10.194Z``) --
     reformat to this codebase's own `recorded_at` convention so every record in the run-event
-    stream sorts/parses the same way. Falls back to the raw string (rather than raising) if it
-    doesn't parse -- `cost.rollup` already tolerates an unparseable `recorded_at` by bucketing
-    it under `"unknown"`."""
+    stream sorts/parses the same way. `raw` is treated as untrusted external input (parsed JSON
+    from a separately-versioned CLI, per this module's own docstring): a non-string value is
+    coerced via `str()` rather than crashing on a missing `.replace()` method, and a value with
+    no UTC offset (no trailing `Z`) is treated as UTC -- mirroring `src.agents.scout._parse_ts`
+    -- rather than shifted by `datetime.astimezone`'s "naive means local host time" default,
+    which would silently vary this function's output by whatever timezone happens to run it.
+    Falls back to the raw string on any parse failure (rather than raising) -- `cost.rollup`
+    already tolerates an unparseable `recorded_at` by bucketing it under `"unknown"`."""
     if not raw:
         return ""
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
     except ValueError:
-        return raw
-    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        return str(raw)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).strftime(cost.RECORDED_AT_FORMAT)
 
 
-def ingest(store: Store, ccusage_json: dict, *, loop: str | None = None) -> int:
-    """Ingest `ccusage session --json`'s already-parsed output into the cost run-event stream,
-    one record per ``(session, model)`` breakdown. Returns the number of records written.
-
-    Each session's own `period` (its session id) becomes every one of its records' `run_id`,
-    so a multi-model session's rows still stay correlated to one Claude Code invocation.
-    """
-    written = 0
-    for session in ccusage_json.get("session") or []:
-        if session.get("agent") != _CLAUDE_CODE_AGENT_LABEL:
-            continue
-        run_id = str(session.get("period") or "")
-        recorded_at = _normalize_timestamp((session.get("metadata") or {}).get("lastActivity"))
-        for breakdown in session.get("modelBreakdowns") or []:
-            record = {
+def _records_for_session(session: dict, *, loop: str | None) -> list[cost.CostRecord]:
+    """One :class:`~src.cost.CostRecord` per ``modelBreakdowns`` entry in `session`, or `[]` if
+    `session` isn't a real Claude Code session (see :func:`ingest`'s own agent filter)."""
+    if session.get("agent") != _CLAUDE_CODE_AGENT_LABEL:
+        return []
+    run_id = str(session.get("period") or "")
+    recorded_at = _normalize_timestamp((session.get("metadata") or {}).get("lastActivity"))
+    records: list[cost.CostRecord] = []
+    for breakdown in session.get("modelBreakdowns") or []:
+        records.append(
+            {
                 "stage": "cost",
                 "agent": _SESSION_AGENT_TAG,
                 "run_id": run_id,
@@ -87,6 +100,41 @@ def ingest(store: Store, ccusage_json: dict, *, loop: str | None = None) -> int:
                 "cost_usd": float(breakdown.get("cost") or 0.0),
                 "recorded_at": recorded_at,
             }
+        )
+    return records
+
+
+def ingest(store: Store, ccusage_json: dict, *, loop: str | None = None) -> int:
+    """Ingest `ccusage session --json`'s already-parsed output into the cost run-event stream,
+    one record per ``(session, model)`` breakdown. Returns the number of records *attempted*
+    (each write goes through :func:`src.cost.write_cost_record`, which is itself best-effort —
+    a KB-write failure is logged, not raised, so this count can exceed what's actually queryable
+    via ``store.list_runs(stage="cost")`` afterward if the KB was unwritable for part of a run).
+
+    Each session's own `period` (its session id) becomes every one of its records' `run_id`, so
+    a multi-model session's rows still stay correlated to one Claude Code invocation. A single
+    malformed session (unexpected field shapes) is skipped with a message to stderr rather than
+    aborting every other session in the same `ccusage_json` payload — matching this codebase's
+    established per-item failure isolation (e.g. `src.agents.analyst`'s per-item classification).
+    """
+    sessions = ccusage_json.get("session")
+    if sessions is None:
+        if ccusage_json:
+            print(
+                "cost_ccusage: no 'session' key in ccusage JSON "
+                f"(keys: {sorted(ccusage_json)}) -- did the ccusage schema change?",
+                file=sys.stderr,
+            )
+        return 0
+
+    attempted = 0
+    for session in sessions:
+        try:
+            records = _records_for_session(session, loop=loop)
+        except Exception as exc:
+            print(f"cost_ccusage: skipping a malformed session: {exc}", file=sys.stderr)
+            continue
+        for record in records:
             cost.write_cost_record(store, record)
-            written += 1
-    return written
+            attempted += 1
+    return attempted
