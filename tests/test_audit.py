@@ -243,6 +243,61 @@ def test_list_records_degrades_to_empty_for_a_store_with_no_data_dir():
     assert audit.list_records(NoDirStore()) == []  # must not raise, unlike a write
 
 
+def test_list_records_honors_an_explicit_data_dir_override(tmp_path):
+    """A caller pointed at a different store than `store.data_dir` itself (mirrors
+    `_resolve_data_dir`'s own write-path override) should read from its own explicit dir."""
+    store = JsonlStore(tmp_path)  # store.data_dir has no records
+    other_dir = tmp_path / "other"
+    fake = lambda r, s: {"issues": 1, "prs": 0, "total": 1}  # noqa: E731
+    audit.audit_repo(
+        store,
+        "o/r",
+        "2025-01-01T00:00:00Z",
+        remote_fetcher=fake,
+        checked_at="a",
+        data_dir=other_dir,
+    )
+
+    assert audit.list_records(store) == []
+    assert len(audit.list_records(store, data_dir=other_dir)) == 1
+
+
+def test_list_records_skips_a_corrupt_line_without_crashing(tmp_path):
+    """Regression: an earlier version raised uncaught on a single malformed line, taking down
+    the whole read -- write_record's append isn't atomic, so a crash mid-write can leave one."""
+    store = JsonlStore(tmp_path)
+    fake = lambda r, s: {"issues": 1, "prs": 0, "total": 1}  # noqa: E731
+    audit.audit_repo(store, "o/r", "2025-01-01T00:00:00Z", remote_fetcher=fake, checked_at="a")
+    sink = tmp_path / "audit" / "data_quality.jsonl"
+    with sink.open("a") as fh:
+        fh.write('{"repo": "o/r", "reason": "reconciliation", not valid json\n')
+    audit.audit_repo(store, "o/r", "2025-01-01T00:00:00Z", remote_fetcher=fake, checked_at="b")
+
+    records = audit.list_records(store)  # must not raise
+
+    assert [r["checked_at"] for r in records] == ["a", "b"]
+
+
+def test_list_records_splits_on_bare_newline_not_unicode_line_separators(tmp_path):
+    """Regression: an earlier version used str.splitlines(), which also breaks on
+    U+2028/U+2029/U+0085 -- write_record's ensure_ascii=False can leave one literally embedded
+    in a field, shattering one valid JSON record into unparseable fragments."""
+    store = JsonlStore(tmp_path)
+    repo_with_line_separator = "o" + "\u2028" + "r"
+    fake = lambda r, s: {"issues": 1, "prs": 0, "total": 1}  # noqa: E731
+    audit.audit_repo(
+        store,
+        repo_with_line_separator,
+        "2025-01-01T00:00:00Z",
+        remote_fetcher=fake,
+        checked_at="a",
+    )
+
+    records = audit.list_records(store)  # must not raise
+
+    assert records[0]["repo"] == repo_with_line_separator
+
+
 # ------------------------------------------------------------- live GraphQL smoke
 
 

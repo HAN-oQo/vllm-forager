@@ -9,11 +9,12 @@ drift-line/threshold-marker chart rendering is a further step, not this one -- s
 
 from __future__ import annotations
 
-from dataclasses import asdict
 from pathlib import Path
 
 from src import audit, rag_eval
 from src.store.base import Store
+
+from .api import asdict_with
 
 
 def data_quality_series(store: Store, *, data_dir: Path | None = None) -> list[dict]:
@@ -29,8 +30,6 @@ def data_quality_series(store: Store, *, data_dir: Path | None = None) -> list[d
 def rag_eval_series(store: Store) -> list[dict]:
     """Every recorded RAG-eval run (T1.8), oldest first, each with its own ``passed`` threshold
     flag included -- :attr:`~src.rag_eval.RagEvalScore.passed` is a computed ``@property``, not
-    a dataclass field, so ``dataclasses.asdict`` alone would silently drop it (mirrors
-    :func:`dashboard.api._candidate_dict`'s own identical fix for
-    :attr:`~src.agents.scout.Candidate.priority`).
+    a dataclass field, so ``dataclasses.asdict`` alone would silently drop it.
     """
-    return [{**asdict(score), "passed": score.passed} for score in rag_eval.list_scores(store)]
+    return [asdict_with(score, passed=score.passed) for score in rag_eval.list_scores(store)]

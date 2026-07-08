@@ -47,6 +47,8 @@ from pathlib import Path
 from src import gate
 from src.store.base import Store
 
+from .api import asdict_with
+
 
 def review_bundle(store: Store, repo: str, number: int) -> dict | None:
     """The full evidence bundle for one gate-ready candidate -- diff, risk badge, repro/verify
@@ -60,9 +62,8 @@ def review_bundle(store: Store, repo: str, number: int) -> dict | None:
 
 def _gate_result_dict(result: gate.GateResult) -> dict:
     """`result` as a plain dict, `draft_path` included as a `str` -- `asdict()` alone would
-    leave it as a `Path` object, not JSON-serializable (mirrors :func:`dashboard.api.
-    _candidate_dict`'s own "asdict, plus one field it gets wrong" shape)."""
-    return {**asdict(result), "draft_path": str(result.draft_path) if result.draft_path else None}
+    leave it as a `Path` object, not JSON-serializable."""
+    return asdict_with(result, draft_path=str(result.draft_path) if result.draft_path else None)
 
 
 def review_decision(
