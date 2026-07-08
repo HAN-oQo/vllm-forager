@@ -28,26 +28,31 @@ Known limitations, not fixed here (later M4 todos):
   own `run` body can call :func:`emit_heartbeat` any number of times while it's still working —
   but none of :mod:`src.orchestrator`'s real stages (``_collect``/``_intel``/``_contribution``)
   actually call it: they're thin wrappers around CLI ``main()`` calls with no natural place to
-  plug in progress reporting, the same disclosed gap as T4.4's ``items: None``. Practically,
-  this means :func:`~src.liveness.latest_status`'s staleness check can't distinguish "genuinely
-  hung" from "just a slow real stage" for the actual production pipeline yet — only a fake test
-  stage that calls `emit_heartbeat` itself exercises the full `started` → `heartbeat` →
-  `finished`/`failed` lifecycle end to end (:mod:`tests.test_liveness`). Wiring real heartbeats
-  into ``collector``/``analyst``/``forecaster``/``scout`` (per-page, per-item, or per-substep)
-  is a further refinement, not this todo's — and `stale_after_s` for the real pipeline should
-  stay generous until then (T3.19's own precedent: a real ``intel`` tick can run for hours).
-- ``"started"``/``"heartbeat"`` events always use the real wall clock, never `run_tick`'s own
-  `now` parameter — deliberately (see :func:`emit_heartbeat`'s docstring: staleness detection
-  needs real elapsed time, not the tick's own simulated one). This means a caller that passes a
-  `now` far from the real current time (every offline test does, and any future caller
-  "replaying" a historical tick would too) gets a KB with **internally inconsistent**
-  timestamps for that tick: the terminal event's `recorded_at` reflects `now`, but `started`/
-  `heartbeat` reflect whenever the tick actually, really ran. :func:`~src.liveness.latest_status`
-  reading such a mixed history back can misclassify (this is exactly why
-  :mod:`tests.test_liveness` never mixes a fixed `now` with the real-clock lifecycle events in
-  the same assertion — see its own module docstring). In real production use `now` always
-  defaults to the real clock (only tests override it), so this is a testing-ergonomics wrinkle,
-  not a live hazard — but worth knowing before building T5.8 on top of mixed-clock fixtures.
+  plug in progress reporting, the same disclosed gap as T4.4's ``items: None``. This is a real
+  gap against CLAUDE.md's own Guardrails wording ("every stage emits started→heartbeat→
+  finished/failed with its current step + intermediate output") — today only ``started`` and a
+  terminal event are real for the production pipeline; the ``heartbeat``/intermediate-output
+  part of that sentence is infrastructure-complete (:func:`emit_heartbeat`, exercised end to end
+  by a fake stage in :mod:`tests.test_liveness`) but has zero real callers yet. Practically, this
+  means :func:`~src.liveness.latest_status`'s staleness check can't distinguish "genuinely hung"
+  from "just a slow real stage" for the actual production pipeline until that wiring lands.
+  Wiring real heartbeats into ``collector``/``analyst``/``forecaster``/``scout`` (per-page,
+  per-item, or per-substep) is a further refinement, not this todo's — and `stale_after_s` for
+  the real pipeline should stay generous until then (T3.19's own precedent: a real ``intel``
+  tick can run for hours).
+- Every run-event timestamp this module writes (``"started"``, :func:`emit_heartbeat`'s
+  ``"heartbeat"``, and the terminal ``"ok"``/``"failed"`` event) samples the real wall clock
+  fresh, right when it's written — **not** `run_tick`'s own `now` parameter, which is used only
+  for cadence math (`_is_due`) and the last-run cursor `_is_due` itself reads back. An earlier
+  version of this code stamped the terminal event with the tick's `now` (captured once, before
+  any stage ran) instead — for a multi-stage tick where an earlier stage takes real time to run
+  (`_real_stages()`'s own collect → intel → contribution shape, with intel able to run for hours
+  per T3.19), that made a later stage's terminal event record a timestamp *earlier* than that
+  same stage's own `"started"` event: a real inversion, not just a tie, that made
+  :func:`~src.liveness.latest_status` misclassify a stage that had already finished as
+  `"running"`/`"stalled"`. Caught by this todo's own code review before it reached a demo; fixed
+  by always sampling the real clock for every run-event timestamp, keeping `now` scoped strictly
+  to scheduling decisions.
 - ``main()`` takes a host-local, non-blocking lock (:func:`~src.locking.run_lock`, T4.3) around
   a tick, so two overlapping invocations never race — but it's process-level only, not KB-level
   idempotency for a *half-finished* tick's own writes (a stage that partially wrote before a
@@ -198,9 +203,12 @@ def _best_effort(write: Callable[[], None], *, what: str) -> None:
         print(f"orchestrator: failed to {what}: {exc}", file=sys.stderr)
 
 
-def emit_heartbeat(store: Store, *, stage: str, step: str, output_tail: str = "") -> None:
+def emit_heartbeat(
+    store: Store, *, stage: str, step: str, output_tail: str = "", policy_version: int | None = None
+) -> None:
     """Record a `"heartbeat"` run event for `stage` (T4.5): its current step + a rolling tail
-    of intermediate output, while it's still working.
+    of intermediate output, while it's still working. Never raises -- a heartbeat is inherently
+    best-effort, the same as every other write `run_tick` makes.
 
     Callable directly by a stage's own `run` body -- it already receives `store` as its one
     argument, so no change to `Stage.run`'s signature was needed to support this. `run_tick`
@@ -208,13 +216,27 @@ def emit_heartbeat(store: Store, *, stage: str, step: str, output_tail: str = ""
     call from its point of view); a stage that wants heartbeats has to emit them itself, at
     whatever points in its own work make sense.
 
-    Uses the real wall clock (`datetime.now(timezone.utc)`), not a tick's own fixed `now` (see
+    Uses the real wall clock (`datetime.now(timezone.utc)`), not a tick's own `now` (see
     :func:`run_tick`) -- staleness detection (:func:`~src.liveness.latest_status`) is about real
     elapsed time since the last heartbeat, which can be meaningfully later than when the tick
-    itself started for a long-running stage. The active policy version is looked up fresh here
-    (not threaded in from the tick that's calling this stage) for the same reason T4.1 never
-    threaded policy into a stage's own scoring/prompting: `Stage.run` only receives `store`.
+    itself started for a long-running stage.
+
+    `policy_version` defaults to a fresh `get_active(store).version` lookup (two full state
+    reads on `JsonlStore` -- `get_active` itself plus the version lookup it does internally) if
+    not given explicitly; a caller that already knows the tick's own pinned version (`run_tick`
+    computes it once at the top of every tick) can pass it directly to skip that lookup
+    entirely -- nothing does yet, since `Stage.run` only receives `store`, the same reason T4.1
+    never threaded policy into a stage's own scoring/prompting either.
     """
+    try:
+        version = policy_version if policy_version is not None else get_active(store).version
+    except Exception as exc:
+        # A PolicyError (no policy bootstrapped yet) or any other lookup failure must degrade
+        # the same way a record_run failure does -- log and return, never raise, since a stage
+        # calling this mid-work has already done real work that must not be lost over a
+        # heartbeat's own bookkeeping failing.
+        print(f"orchestrator: failed to record heartbeat for {stage!r}: {exc}", file=sys.stderr)
+        return
     _best_effort(
         partial(
             store.record_run,
@@ -223,7 +245,7 @@ def emit_heartbeat(store: Store, *, stage: str, step: str, output_tail: str = ""
                 "status": "heartbeat",
                 "step": step,
                 "output_tail": output_tail,
-                "policy_version": get_active(store).version,
+                "policy_version": version,
                 "recorded_at": datetime.now(timezone.utc).strftime(_TS_FORMAT),
             },
         ),
@@ -254,16 +276,18 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
     `now` defaults to the real UTC clock; tests pass a fixed value for determinism. A naive
     (tzinfo-less) `now` is treated as UTC rather than raising a `TypeError` once compared
     against a stored (always UTC-aware) cursor — the common `datetime.utcnow()` idiom is naive.
+    `now` is used only for cadence math (`_is_due`) and the last-run cursor it reads back --
+    every run-event timestamp below always samples the real wall clock instead (see the module
+    docstring's Known limitations for why that distinction matters).
 
-    Each stage that's due/triggered gets a `"started"` run event (T4.5, real wall-clock
-    timestamp -- see :func:`emit_heartbeat`'s own docstring for why) right before it runs, then
-    exactly one terminal run event after it finishes (T4.4, `store.record_run`, best-effort,
-    stamped with the tick's own `now`): `{stage, status: "ok"|"failed", items, dur_s,
-    policy_version, recorded_at}` (`error` too, on failure). A stage that raises still gets its
-    `"failed"` event recorded before the exception propagates -- see the module docstring's
-    Known limitations for why this doesn't (yet) isolate later stages from an earlier failure. A
-    stage's own `run` body can additionally call :func:`emit_heartbeat` any number of times in
-    between, to report progress on a long-running stage -- `run_tick` itself never calls it.
+    Each stage that's due/triggered gets a `"started"` run event (T4.5) right before it runs,
+    then exactly one terminal run event after it finishes (T4.4, `store.record_run`,
+    best-effort): `{stage, status: "ok"|"failed", items, dur_s, policy_version, recorded_at}`
+    (`error` too, on failure). A stage that raises still gets its `"failed"` event recorded
+    before the exception propagates -- see the module docstring's Known limitations for why
+    this doesn't (yet) isolate later stages from an earlier failure. A stage's own `run` body
+    can additionally call :func:`emit_heartbeat` any number of times in between, to report
+    progress on a long-running stage -- `run_tick` itself never calls it.
 
     Raises:
         PolicyError: no policy has been created yet — mirrors :func:`~src.policy.get_active`'s
@@ -284,7 +308,19 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
             continue
 
         started = time.monotonic()
-        recorded_at = now.strftime(_TS_FORMAT)  # one timestamp string, reused below
+        # The tick's own `now` is used ONLY for the cadence cursor below -- `_is_due` compares
+        # a future tick's `now` against this same value, so they must share one clock model
+        # (real in production, fixed in a test). Every *run-event* timestamp in this loop
+        # (`started`, `emit_heartbeat`, and the terminal event below) instead always samples
+        # the real wall clock fresh, right when it's written -- staleness detection is about
+        # real elapsed time, and stamping a stage's terminal event with the *tick's* `now`
+        # (captured once, before any stage ran) used to make later stages in a multi-stage tick
+        # record a terminal timestamp *earlier* than their own "started" event whenever an
+        # earlier stage took real time to run (exactly `_real_stages()`'s own collect -> intel
+        # -> contribution shape, with intel able to run for hours per T3.19) -- a real
+        # production bug, caught by this PR's own review before it ever reached a demo, not
+        # just a test artifact.
+        cursor_at = now.strftime(_TS_FORMAT)
         _best_effort(
             partial(
                 store.record_run,
@@ -292,9 +328,6 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
                     "stage": stage.name,
                     "status": "started",
                     "policy_version": policy.version,
-                    # Real wall clock, not the tick's own `now` -- staleness detection cares
-                    # about actual elapsed time, which for a long-running stage can be well
-                    # past the instant this tick began.
                     "recorded_at": datetime.now(timezone.utc).strftime(_TS_FORMAT),
                 },
             ),
@@ -303,7 +336,6 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
         record = {
             "stage": stage.name,
             "policy_version": policy.version,
-            "recorded_at": recorded_at,
         }
         try:
             items = stage.run(store)
@@ -311,6 +343,7 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
             record["status"] = "failed"
             record["error"] = f"{type(exc).__name__}: {exc}"
             record["dur_s"] = round(time.monotonic() - started, 3)
+            record["recorded_at"] = datetime.now(timezone.utc).strftime(_TS_FORMAT)
             _best_effort(
                 partial(store.record_run, record),
                 what=f"record run event for {stage.name!r}",
@@ -320,13 +353,14 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
         record["status"] = "ok"
         record["items"] = items
         record["dur_s"] = round(time.monotonic() - started, 3)
+        record["recorded_at"] = datetime.now(timezone.utc).strftime(_TS_FORMAT)
         _best_effort(
             partial(store.record_run, record),
             what=f"record run event for {stage.name!r}",
         )
         if stage.interval_hours is not None:
             _best_effort(
-                partial(store.set_state, _last_run_key(stage.name), recorded_at),
+                partial(store.set_state, _last_run_key(stage.name), cursor_at),
                 what=f"advance last-run cursor for {stage.name!r}",
             )
         ran.append(stage.name)

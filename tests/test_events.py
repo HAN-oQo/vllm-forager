@@ -3,10 +3,16 @@
 Per the DEVPLAN todo: a pipeline tick writes a run event with the expected fields --
 `{stage, status, items/error, dur_s, policy_version, recorded_at}` -- to the KB's `runs`
 collection, for both a stage that succeeds and one that raises.
+
+`recorded_at` on the terminal event is the real wall clock (T4.5 made every run-event
+timestamp real-clock, not `run_tick`'s own `now` -- see `src/orchestrator.py`'s module
+docstring), so these tests check its *format*, not an exact value tied to the fixed `_NOW`
+below -- `_NOW` still matters for cadence math (`interval_hours`), just not for timestamps.
 """
 
 from __future__ import annotations
 
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -48,7 +54,7 @@ def test_run_tick_writes_a_run_event_with_the_expected_fields(store: JsonlStore)
     assert run["items"] == 42
     assert run["dur_s"] >= 0
     assert run["policy_version"] == 1
-    assert run["recorded_at"] == "2026-01-08T00:00:00Z"
+    assert re.fullmatch(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z", run["recorded_at"])
 
 
 def test_run_tick_writes_a_failed_run_event_when_a_stage_raises(store: JsonlStore) -> None:

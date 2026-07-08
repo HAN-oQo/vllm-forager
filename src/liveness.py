@@ -29,6 +29,7 @@ from __future__ import annotations
 from datetime import datetime
 
 from .orchestrator import _parse_last_run
+from .stages import latest_run
 
 _LIFECYCLE_STATUSES = {"started", "heartbeat"}
 _TERMINAL_STATUSES = {"ok", "failed"}
@@ -41,21 +42,27 @@ def latest_status(runs: list[dict], *, now: datetime, stale_after_s: float) -> s
     `store.list_runs(stage=...)` — this function doesn't filter by stage itself, so passing an
     unfiltered list mixes stages' histories into one classification).
 
-    Ties among same-`recorded_at` records break toward the terminal state -- `run_tick` records
-    a stage's terminal event strictly after its own last heartbeat (if any), but this handles
-    equal-resolution timestamps landing on the same second defensively rather than by luck of
-    dict/list ordering.
+    Reuses `stages.latest_run`'s own "find the most-recently-recorded run, by `recorded_at`"
+    convention (already shared by `engineer.py`/`self_review.py`/`gate.py`/etc.) rather than
+    re-deriving the same `max(..., key=recorded_at)` logic here, then layers T4.5's one extra
+    rule on top: ties among same-`recorded_at` records break toward the terminal state, since
+    `stages.latest_run`'s own `max()` (Python semantics: first-encountered element wins a tie)
+    would otherwise pick whichever of a same-second terminal/lifecycle pair happens to sort
+    first in `runs`' own order -- non-deterministic from this function's point of view. Real
+    same-second ties are possible: every run-event timestamp in this codebase has only
+    second-resolution (`"%Y-%m-%dT%H:%M:%SZ"`), so a fast stage's own "started" and terminal
+    events can legitimately land in the same rendered second.
     """
     if not runs:
         return "never run"
 
-    def _rank(run: dict) -> tuple[str, int]:
-        # (recorded_at, terminal-wins-a-tie) -- max() picks the last-sorting tuple, and a
-        # terminal status should win over a lifecycle one at an identical timestamp.
-        is_terminal = run.get("status") in _TERMINAL_STATUSES
-        return (run.get("recorded_at") or "", 1 if is_terminal else 0)
+    latest = latest_run(runs)
+    assert latest is not None  # `runs` is non-empty, so `latest_run` can't return None here
+    tied = [r for r in runs if (r.get("recorded_at") or "") == (latest.get("recorded_at") or "")]
+    terminal_tied = [r for r in tied if r.get("status") in _TERMINAL_STATUSES]
+    if terminal_tied:
+        latest = terminal_tied[0]
 
-    latest = max(runs, key=_rank)
     status = latest.get("status")
     if status in _TERMINAL_STATUSES:
         return status

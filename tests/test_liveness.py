@@ -4,13 +4,14 @@ Per the DEVPLAN todo: a stage emits started -> heartbeat -> finished with monoto
 timestamps; a stale heartbeat is classified `stalled`; an exception path records `failed`
 (nothing left silently "running").
 
-`started`/`heartbeat` events always use the real wall clock (`orchestrator.emit_heartbeat`'s
-own docstring), never a tick's own `now` parameter -- so a test exercising `run_tick`'s
-write side alongside `liveness.latest_status`'s read side never passes a fixed, far-away
-`now` to `run_tick` in the same assertion as those lifecycle events (that would mix two
-unrelated clocks -- see `src/orchestrator.py`'s own "Known limitations" note on this). The
-pure `liveness.latest_status` unit tests below, which construct `runs` dicts by hand instead
-of going through `run_tick`, are unaffected -- they choose their own consistent fixed clock.
+Every run-event timestamp `run_tick`/`emit_heartbeat` write always samples the real wall
+clock (see `src/orchestrator.py`'s module docstring: an earlier version stamped the terminal
+event with the tick's own `now` instead, which could make a stage's terminal timestamp sort
+*before* its own `started` timestamp for a multi-stage tick with an earlier slow stage -- a
+real bug, not a test artifact, fixed before this PR merged). `now` only affects cadence math
+now, not event timestamps, so the `run_tick` tests below don't need to fix it. The pure
+`liveness.latest_status` unit tests, which construct `runs` dicts by hand instead of going
+through `run_tick`, choose their own fixed clock for those hand-built timestamps.
 """
 
 from __future__ import annotations
@@ -40,10 +41,8 @@ def test_run_tick_emits_started_then_heartbeat_then_a_terminal_event_in_order(
     store: JsonlStore,
 ) -> None:
     """DEVPLAN's own worked example: a stage emits started -> heartbeat -> finished with
-    monotonic timestamps. No fixed `now` here -- `emit_heartbeat` uses the real wall clock
-    (see its own docstring for why), so mixing it with a fixed, far-away tick `now` would make
-    "monotonic" meaningless; letting `run_tick` use the real clock too keeps every event in
-    this one tick on the same clock."""
+    monotonic timestamps. No fixed `now` needed here -- every run-event timestamp samples the
+    real wall clock regardless of what `now` is (see this file's own module docstring)."""
 
     def _work(s: JsonlStore) -> int:
         orchestrator.emit_heartbeat(s, stage="collect", step="paging", output_tail="fetched 10")
@@ -94,6 +93,31 @@ def test_emit_heartbeat_survives_a_record_run_failure(
     orchestrator.emit_heartbeat(store, stage="intel", step="classifying")  # must not raise
 
     assert "failed to record heartbeat" in capsys.readouterr().err
+
+
+def test_emit_heartbeat_survives_no_active_policy(tmp_path, capsys) -> None:
+    """A heartbeat is inherently best-effort -- a PolicyError from the version lookup must
+    degrade the same way a record_run failure does, not propagate uncaught."""
+    store = JsonlStore(tmp_path)  # no policy.create_policy() call
+
+    orchestrator.emit_heartbeat(store, stage="intel", step="classifying")  # must not raise
+
+    assert "failed to record heartbeat" in capsys.readouterr().err
+    assert store.list_runs() == []  # never attempted the write -- there was nothing to record
+
+
+def test_emit_heartbeat_accepts_an_explicit_policy_version_to_skip_the_lookup(
+    store: JsonlStore,
+) -> None:
+    """A future caller that already knows the tick's own pinned version (run_tick computes it
+    once per tick) can pass it directly instead of paying for a fresh get_active(store) lookup
+    -- update_policy() to version 2 here, then confirm passing policy_version=1 explicitly is
+    honored rather than silently overridden by the (now different) active version."""
+    policy.update_policy(store, scoring_weights={"risk": 2.0})  # now active: policy@2
+
+    orchestrator.emit_heartbeat(store, stage="intel", step="classifying", policy_version=1)
+
+    assert store.list_runs(stage="intel")[0]["policy_version"] == 1
 
 
 # --------------------------------------------------------------------- read side (liveness)
@@ -155,17 +179,29 @@ def test_latest_status_unparseable_timestamp_is_stalled_not_running() -> None:
     assert liveness.latest_status(runs, now=_NOW, stale_after_s=600) == "stalled"
 
 
+def test_latest_status_a_terminal_event_wins_a_tie_at_the_same_recorded_at() -> None:
+    """Real same-second ties are possible -- every run-event timestamp has only
+    second-resolution, so a fast stage's own `started` and terminal events can legitimately
+    land in the same rendered second. `stages.latest_run`'s own `max()` alone would pick
+    whichever happens to be first in `runs`' own order (Python `max()` semantics); the
+    terminal-status tie-break must win regardless of list order."""
+    tied_at = "2026-01-08T11:00:00Z"
+    heartbeat_first = [
+        {"status": "heartbeat", "recorded_at": tied_at},
+        {"status": "ok", "recorded_at": tied_at},
+    ]
+    ok_first = [
+        {"status": "ok", "recorded_at": tied_at},
+        {"status": "heartbeat", "recorded_at": tied_at},
+    ]
+    assert liveness.latest_status(heartbeat_first, now=_NOW, stale_after_s=600) == "ok"
+    assert liveness.latest_status(ok_first, now=_NOW, stale_after_s=600) == "ok"
+
+
 def test_run_tick_and_liveness_integration_classifies_a_completed_tick_as_ok(
     store: JsonlStore,
 ) -> None:
-    """End-to-end: run_tick's own written events, read back through liveness.latest_status.
-
-    No fixed `now` passed to `run_tick` here, matching the lifecycle-order test above: the
-    terminal event's `recorded_at` uses whatever `now` the tick ran with, while `started`/
-    `heartbeat` always use the real wall clock (`emit_heartbeat`'s own docstring) -- mixing a
-    fixed, arbitrarily-far-away `now` with those real timestamps would make "is the latest
-    event recent" nonsensical, exactly the scenario this test used to (accidentally) exercise
-    before this comment was added."""
+    """End-to-end: run_tick's own written events, read back through liveness.latest_status."""
     stage = orchestrator.Stage("collect", lambda _s: 1, interval_hours=24)
 
     orchestrator.run_tick(store, [stage])
