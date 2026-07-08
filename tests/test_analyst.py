@@ -329,7 +329,7 @@ def test_analyze_store_batch_size_classifies_same_domain_items_in_one_call(
 
     def fake_complete(prompt, **kwargs):
         calls.append(prompt)
-        return {"paths": [["post-training"], ["eval"]]}
+        return {"paths": [{"index": 0, "path": ["post-training"]}, {"index": 1, "path": ["eval"]}]}
 
     monkeypatch.setattr(llm, "complete", fake_complete)
 
@@ -351,7 +351,8 @@ def test_analyze_store_batch_size_chunks_a_domain_larger_than_the_batch(
 
     def fake_complete(prompt, **kwargs):
         calls.append(prompt)
-        return {"paths": [["post-training"]] * prompt.count("Item ")}
+        n = prompt.count("Item ")
+        return {"paths": [{"index": i, "path": ["post-training"]} for i in range(n)]}
 
     monkeypatch.setattr(llm, "complete", fake_complete)
 
@@ -375,7 +376,9 @@ def test_analyze_store_batch_size_isolates_domain_fallbacks_from_llm_batches(
             _item("verl-project/verl", 1, "needs an llm call"),
         ]
     )
-    monkeypatch.setattr(llm, "complete", lambda *a, **k: {"paths": [["post-training"]]})
+    monkeypatch.setattr(
+        llm, "complete", lambda *a, **k: {"paths": [{"index": 0, "path": ["post-training"]}]}
+    )
 
     classified = analyst.analyze_store(store, batch_size=10)
 
@@ -385,12 +388,12 @@ def test_analyze_store_batch_size_isolates_domain_fallbacks_from_llm_batches(
     assert by_repo["verl-project/verl"]["path"] == ["rl", "post-training"]
 
 
-def test_analyze_store_batch_size_skips_a_failing_batch_and_persists_other_domains(
+def test_analyze_store_batch_size_a_failing_batch_that_also_fails_on_retry_persists_other_domains(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A batch-level LLMError skips every item in that batch (coarser than the unbatched
-    per-item isolation, see analyze_store's own docstring) but must not affect other domains'
-    batches."""
+    """A batch-level LLMError doesn't just drop the whole chunk (see the retry-rescue test
+    below) -- but an item that ALSO fails on its own per-item retry is still left pending, and
+    a failure in one domain must not affect another domain's batch."""
     store = JsonlStore(tmp_path)
     create_taxonomy(store, [["rl", "post-training"], ["speech", "rocm"]])
     store.upsert_items(
@@ -401,9 +404,9 @@ def test_analyze_store_batch_size_skips_a_failing_batch_and_persists_other_domai
     )
 
     def flaky_complete(prompt, **kwargs):
-        if "rl item" in prompt:
-            raise llm.LLMError("simulated batch failure")
-        return {"paths": [["rocm"]]}
+        if "rl item" in prompt:  # fails both the batch call and its per-item retry
+            raise llm.LLMError("simulated persistent failure")
+        return {"paths": [{"index": 0, "path": ["rocm"]}]}
 
     monkeypatch.setattr(llm, "complete", flaky_complete)
 
@@ -413,6 +416,35 @@ def test_analyze_store_batch_size_skips_a_failing_batch_and_persists_other_domai
     assert classified[0]["repo"] == "vllm-project/vllm"
     stored = {item["repo"]: item for item in store.query()}
     assert "path" not in stored["verl-project/verl"]  # left pending for a future retry
+
+
+def test_analyze_store_batch_size_rescues_a_transient_batch_failure_via_per_item_retry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch-level LLMError falls back to classify_item per item in that chunk -- a
+    transient failure that only hit the batch call (not the individual items) must not cost
+    any item its classification, unlike a naive 'skip the whole chunk' response."""
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    store.upsert_items(
+        [
+            _item("verl-project/verl", 1, "item one"),
+            _item("verl-project/verl", 2, "item two"),
+        ]
+    )
+
+    def flaky_complete(prompt, *, json_schema=None, **kwargs):
+        if json_schema is analyst._BATCH_PATH_SCHEMA:
+            raise llm.LLMError("simulated transient batch failure")
+        return {"path": ["post-training"]}  # the per-item retry path succeeds
+
+    monkeypatch.setattr(llm, "complete", flaky_complete)
+
+    classified = analyst.analyze_store(store, batch_size=10)
+
+    by_number = {item["number"]: item for item in classified}
+    assert by_number[1]["path"] == ["rl", "post-training"]
+    assert by_number[2]["path"] == ["rl", "post-training"]
 
 
 def test_analyze_store_backfills_path_for_a_pre_t1_5_2_flat_category_item(

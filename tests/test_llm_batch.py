@@ -106,6 +106,38 @@ def test_cache_system_populates_cache_token_fields_on_a_hit(monkeypatch):
 
     assert result.meta.cache_creation_tokens == 100
     assert result.meta.cache_read_tokens == 400
+    # Anthropic bills cache tokens separately from input_tokens -- both total_tokens and
+    # cost_usd must include them, not just the plain input/output tokens.
+    assert result.meta.total_tokens == 5 + 3 + 100 + 400
+    expected_cost = (
+        5 / 1e6 * 3.0  # input
+        + 3 / 1e6 * 15.0  # output
+        + 100 / 1e6 * 3.0 * 1.25  # cache write
+        + 400 / 1e6 * 3.0 * 0.1  # cache read
+    )
+    assert result.meta.cost_usd == pytest.approx(expected_cost)
+
+
+def test_a_call_with_no_cache_tokens_has_the_same_cost_as_before_this_feature(monkeypatch):
+    """Regression guard: a normal (non-cached) call's cost/total_tokens must be unaffected by
+    the cache-token accounting added alongside it."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.setattr(
+        llm.requests,
+        "post",
+        lambda *a, **k: _FakeResp(
+            {
+                "content": [{"type": "text", "text": "ok"}],
+                "usage": {"input_tokens": 100, "output_tokens": 50},
+                "model": "claude-sonnet-5",
+            }
+        ),
+    )
+
+    result = llm.complete_detailed("hi", provider="claude_api")
+
+    assert result.meta.total_tokens == 150
+    assert result.meta.cost_usd == pytest.approx(llm._estimate_cost("claude-sonnet-5", 100, 50))
 
 
 def test_cache_system_is_a_no_op_for_claude_cli(monkeypatch):
@@ -170,6 +202,46 @@ def test_submit_message_batch_requires_an_api_key(monkeypatch):
         llm.submit_message_batch([llm.BatchRequest(custom_id="a", prompt="x")])
 
 
+def test_submit_message_batch_ignores_llm_model_env_var(monkeypatch):
+    """Regression: submit_message_batch always targets claude_api regardless of LLM_PROVIDER --
+    reading the shared LLM_MODEL env var (meant for whatever provider is *currently*
+    configured, e.g. a local vLLM deployment's served model name) would submit an
+    Anthropic-incompatible model id with no explicit `model=` override."""
+    captured: dict = {}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+    monkeypatch.setenv("LLM_PROVIDER", "local")
+    monkeypatch.setenv("LLM_MODEL", "my-local-vllm-model")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["body"] = json
+        return _FakeResp({"id": "batch_1"})
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+
+    llm.submit_message_batch([llm.BatchRequest(custom_id="a", prompt="x")])
+
+    assert captured["body"]["requests"][0]["params"]["model"] == "claude-sonnet-5"
+
+
+def test_batch_request_cache_system_sends_a_cache_control_breakpoint(monkeypatch):
+    captured: dict = {}
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "key")
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        captured["body"] = json
+        return _FakeResp({"id": "batch_1"})
+
+    monkeypatch.setattr(llm.requests, "post", fake_post)
+
+    llm.submit_message_batch(
+        [llm.BatchRequest(custom_id="a", prompt="x", system="preamble", cache_system=True)]
+    )
+
+    assert captured["body"]["requests"][0]["params"]["system"] == [
+        {"type": "text", "text": "preamble", "cache_control": {"type": "ephemeral"}}
+    ]
+
+
 def _batch_result_line(custom_id: str, *, succeeded: bool, text: str = "", error: str = "") -> str:
     if succeeded:
         result = {
@@ -227,6 +299,23 @@ def test_parse_message_batch_results_empty_input_returns_empty_dict():
     assert llm.parse_message_batch_results("") == {}
 
 
+def test_parse_message_batch_results_skips_a_line_with_a_non_object_result(capsys):
+    """Regression: a "result" value that parses as valid JSON but isn't an object (a string,
+    null, etc.) must be skipped, not crash the whole parse via an uncaught AttributeError on
+    `.get`."""
+    jsonl = "\n".join(
+        [
+            json.dumps({"custom_id": "bad", "result": "not-an-object"}),
+            _batch_result_line("a", succeeded=True, text="ok"),
+        ]
+    )
+
+    results = llm.parse_message_batch_results(jsonl)  # must not raise
+
+    assert list(results) == ["a"]
+    assert "skipping a malformed batch-result line" in capsys.readouterr().err
+
+
 # --------------------------------------------------------------------- classify_batch
 
 
@@ -249,7 +338,13 @@ def test_classify_batch_returns_per_item_labels_aligned_to_their_inputs(
         captured["prompt"] = prompt
         captured["system"] = system
         captured["cache_system"] = cache_system
-        return {"paths": [["post-training"], ["streaming"], []]}
+        return {
+            "paths": [
+                {"index": 0, "path": ["post-training"]},
+                {"index": 1, "path": ["streaming"]},
+                {"index": 2, "path": []},
+            ]
+        }
 
     monkeypatch.setattr(analyst.llm, "complete", fake_complete)
 
@@ -276,13 +371,43 @@ def test_classify_batch_returns_per_item_labels_aligned_to_their_inputs(
     assert "post-training" not in captured["prompt"]  # not duplicated into the user prompt
 
 
+def test_classify_batch_uses_a_precomputed_system_prompt_when_given(
+    store: JsonlStore, monkeypatch: pytest.MonkeyPatch
+):
+    """analyze_store computes the system prompt once per domain and reuses it across a
+    domain's chunks -- classify_batch must send it as-is, not recompute its own."""
+    taxonomy.create_taxonomy(store, [["speech", "post-training"]])
+    active = taxonomy.get_active(store)
+    captured: dict = {}
+
+    def fake_complete(prompt, *, system=None, **kw):
+        captured["system"] = system
+        return {"paths": [{"index": 0, "path": []}]}
+
+    monkeypatch.setattr(analyst.llm, "complete", fake_complete)
+
+    analyst.classify_batch(
+        [{"repo": "vllm-project/vllm", "number": 1, "title": "a", "body": ""}],
+        active,
+        domain="speech",
+        root_options=active.children(("speech",)),
+        system_prompt="a precomputed system prompt",
+    )
+
+    assert captured["system"] == "a precomputed system prompt"
+
+
 def test_classify_batch_short_reply_falls_back_to_domain_only_for_missing_entries(
     store: JsonlStore, monkeypatch: pytest.MonkeyPatch
 ):
     taxonomy.create_taxonomy(store, [["speech", "post-training"]])
     active = taxonomy.get_active(store)
 
-    monkeypatch.setattr(analyst.llm, "complete", lambda *a, **k: {"paths": [["post-training"]]})
+    monkeypatch.setattr(
+        analyst.llm,
+        "complete",
+        lambda *a, **k: {"paths": [{"index": 0, "path": ["post-training"]}]},
+    )
 
     items = [
         {"repo": "vllm-project/vllm", "number": 1, "title": "a", "body": ""},
@@ -295,6 +420,40 @@ def test_classify_batch_short_reply_falls_back_to_domain_only_for_missing_entrie
 
     assert results[0]["path"] == ["speech", "post-training"]
     assert results[1]["path"] == ["speech"]  # no entry at index 1 -- falls back, not an error
+
+
+def test_classify_batch_ignores_a_reordered_or_duplicated_reply_via_explicit_index(
+    store: JsonlStore, monkeypatch: pytest.MonkeyPatch
+):
+    """Regression: a reply that reorders entries, duplicates an index, or includes an
+    out-of-range index must not silently misalign a later item to the wrong classification --
+    each entry is correlated by its own `index`, not array position."""
+    taxonomy.create_taxonomy(store, [["speech", "post-training"], ["speech", "streaming"]])
+    active = taxonomy.get_active(store)
+    monkeypatch.setattr(
+        analyst.llm,
+        "complete",
+        lambda *a, **k: {
+            "paths": [
+                {"index": 1, "path": ["streaming"]},  # reordered: index 1 appears first
+                {"index": 0, "path": ["post-training"]},
+                {"index": 0, "path": ["streaming"]},  # duplicate index 0 -- first one wins
+                {"index": 99, "path": ["post-training"]},  # out of range -- ignored
+            ]
+        },
+    )
+
+    items = [
+        {"repo": "vllm-project/vllm", "number": 1, "title": "a", "body": ""},
+        {"repo": "vllm-project/vllm", "number": 2, "title": "b", "body": ""},
+    ]
+
+    results = analyst.classify_batch(
+        items, active, domain="speech", root_options=active.children(("speech",))
+    )
+
+    assert results[0]["path"] == ["speech", "post-training"]  # index 0 -- unaffected by reorder
+    assert results[1]["path"] == ["speech", "streaming"]  # index 1
 
 
 def test_classify_batch_raises_llmerror_and_classifies_nothing(

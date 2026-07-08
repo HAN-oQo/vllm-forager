@@ -40,7 +40,7 @@ import time
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Protocol
 
 import requests
 
@@ -135,13 +135,36 @@ _PRICES_PER_MTOK: dict[str, tuple[float, float]] = {
     "claude-haiku-4-5": (1.0, 5.0),
 }
 
+# Anthropic prices a prompt-cache write/read as a multiplier of the model's own base *input*
+# rate, for the default 5-minute "ephemeral" cache (this module never sets an extended-TTL
+# beta header — see `_run_claude_api`'s `cache_system` handling). These ratios (a write costs
+# more than a plain input token; a read costs much less) have been stable since prompt caching's
+# public launch, but — like `_PRICES_PER_MTOK` itself — are an editable estimate, not a live
+# lookup; verify against Anthropic's current pricing page if this drifts. Getting this wrong
+# only skews the *estimate* `_estimate_cost` produces for the bandit/cost rows — claude_cli
+# still reports its own exact provider-billed cost regardless.
+_CACHE_WRITE_MULTIPLIER = 1.25
+_CACHE_READ_MULTIPLIER = 0.1
 
-def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> float:
+
+def _estimate_cost(
+    model: str,
+    prompt_tokens: int,
+    completion_tokens: int,
+    *,
+    cache_creation_tokens: int = 0,
+    cache_read_tokens: int = 0,
+) -> float:
     """Estimate USD cost from the price table; unknown model → 0.0.
 
     The API echoes a *resolved* model id (e.g. ``claude-sonnet-5-20260514``) that won't match
     the bare-alias table keys, so on an exact miss fall back to the longest table key that is
     a prefix of ``model``. Without this the estimate is silently 0 for every real API call.
+
+    ``cache_creation_tokens``/``cache_read_tokens`` (T4.11) are priced separately from
+    ``prompt_tokens`` — Anthropic's ``usage.input_tokens`` explicitly excludes them, so omitting
+    them here would silently drop the exact tokens ``cache_system=True`` exists to spend on
+    (see :data:`_CACHE_WRITE_MULTIPLIER`/:data:`_CACHE_READ_MULTIPLIER`).
     """
     rate = _PRICES_PER_MTOK.get(model)
     if rate is None:
@@ -151,7 +174,12 @@ def _estimate_cost(model: str, prompt_tokens: int, completion_tokens: int) -> fl
     if rate is None:
         return 0.0
     price_in, price_out = rate
-    return prompt_tokens / 1e6 * price_in + completion_tokens / 1e6 * price_out
+    return (
+        prompt_tokens / 1e6 * price_in
+        + completion_tokens / 1e6 * price_out
+        + cache_creation_tokens / 1e6 * price_in * _CACHE_WRITE_MULTIPLIER
+        + cache_read_tokens / 1e6 * price_in * _CACHE_READ_MULTIPLIER
+    )
 
 
 def _env_int(name: str, default: int) -> int:
@@ -200,6 +228,17 @@ def _json_directive(schema: dict) -> str:
     )
 
 
+def _merge_json_directive(system: str | None, json_schema: dict | None) -> str | None:
+    """`system` with :func:`_json_directive`'s instruction appended, if `json_schema` is given
+    — the exact "fold a schema directive into the system prompt" rule both
+    :func:`complete_detailed` (the synchronous path) and :func:`_batch_request_params` (the
+    Message Batches path, T4.11) need identically, factored out so the two can't drift."""
+    if json_schema is None:
+        return system
+    directive = _json_directive(json_schema)
+    return f"{system}\n\n{directive}" if system else directive
+
+
 def _parse_json_object(text: str) -> dict:
     """Parse a model reply into a dict, tolerating a ```json fenced block. Raise on failure."""
     stripped = text.strip()
@@ -232,6 +271,54 @@ def _post(url: str, headers: dict, body: dict, timeout: float) -> dict:
     if not isinstance(data, dict):
         raise LLMError(f"{url} returned a non-object JSON body")
     return data
+
+
+def _parse_claude_message(
+    message: dict, *, provider: str, latency_s: float = 0.0, cost_multiplier: float = 1.0
+) -> tuple[str, CallMeta]:
+    """Extract reply text + :class:`CallMeta` from one Anthropic Messages-API-shaped
+    ``message`` object — the shape a synchronous ``/v1/messages`` response body *is*, and a
+    completed Message Batch entry's own ``message`` field also is (see
+    :func:`_llm_result_from_batch_message`). Shared by both so a fix to content/usage
+    extraction (a new content-block type, a renamed usage field, ...) only has one place to
+    land instead of drifting between the synchronous and batch paths.
+
+    ``cost_multiplier`` scales the estimate (:func:`_estimate_cost`) for a caller that already
+    knows its own rate differs from the synchronous price — :data:`_BATCH_DISCOUNT` for a
+    completed batch entry, ``1.0`` (no change) for a normal call.
+    """
+    blocks = message.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    usage = message.get("usage") or {}
+    prompt_tokens = int(usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("output_tokens") or 0)
+    cache_creation_tokens = int(usage.get("cache_creation_input_tokens") or 0)
+    cache_read_tokens = int(usage.get("cache_read_input_tokens") or 0)
+    model = str(message.get("model") or "")
+    meta = CallMeta(
+        provider=provider,
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        # Cache tokens are billed separately from `input_tokens` (Anthropic's own semantics
+        # explicitly exclude them) -- omitting them here would undercount real spend/usage for
+        # every `cache_system=True` call, which is the whole point of that flag existing.
+        total_tokens=prompt_tokens + completion_tokens + cache_creation_tokens + cache_read_tokens,
+        latency_s=latency_s,
+        cost_usd=(
+            _estimate_cost(
+                model,
+                prompt_tokens,
+                completion_tokens,
+                cache_creation_tokens=cache_creation_tokens,
+                cache_read_tokens=cache_read_tokens,
+            )
+            * cost_multiplier
+        ),
+        cache_creation_tokens=cache_creation_tokens,
+        cache_read_tokens=cache_read_tokens,
+    )
+    return text, meta
 
 
 def _run_claude_cli(
@@ -327,24 +414,12 @@ def _run_claude_api(
     data = _post(f"{base}/v1/messages", headers, body, timeout)
     latency = time.monotonic() - start
 
-    blocks = data.get("content") or []
-    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-    usage = data.get("usage") or {}
-    prompt_tokens = int(usage.get("input_tokens") or 0)
-    completion_tokens = int(usage.get("output_tokens") or 0)
-    model_used = str(data.get("model") or model)
-    meta = CallMeta(
-        provider="claude_api",
-        model=model_used,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        latency_s=latency,
-        cost_usd=_estimate_cost(model_used, prompt_tokens, completion_tokens),
-        cache_creation_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
-    )
-    return text, meta
+    # The API may not echo `model` (observed to always do so today, but not contractually
+    # guaranteed) -- `data` alone wouldn't know the originally-requested `model` to fall back
+    # to, so patch it in before handing off to the shared parser.
+    if not data.get("model"):
+        data = {**data, "model": model}
+    return _parse_claude_message(data, provider="claude_api", latency_s=latency)
 
 
 def _run_local(
@@ -401,10 +476,26 @@ def _run_local(
     return str(text), meta
 
 
-# Provider dispatch table — the single place that maps LLM_PROVIDER → implementation. `...`
-# (not the previous precise positional signature) since every runner now also takes a
-# keyword-only `cache_system: bool` (T4.11) that only `_run_claude_api` actually uses.
-_RUNNERS: dict[str, Callable[..., tuple[str, CallMeta]]] = {
+class _Runner(Protocol):
+    """The exact call signature every entry in :data:`_RUNNERS` must match — a `Protocol`
+    (not `Callable[..., tuple[str, CallMeta]]`) so mypy still catches a future runner with a
+    wrong/missing/reordered parameter (including the keyword-only `cache_system`, T4.11) at
+    review time, the same precision the dispatch table had before `cache_system` was added.
+    """
+
+    def __call__(
+        self,
+        prompt: str,
+        system: str | None,
+        model: str | None,
+        timeout: float,
+        *,
+        cache_system: bool,
+    ) -> tuple[str, CallMeta]: ...
+
+
+# Provider dispatch table — the single place that maps LLM_PROVIDER → implementation.
+_RUNNERS: dict[str, _Runner] = {
     "claude_cli": _run_claude_cli,
     "claude_api": _run_claude_api,
     "local": _run_local,
@@ -456,9 +547,7 @@ def complete_detailed(
             f"unknown LLM_PROVIDER {resolved_provider!r}; expected one of {sorted(_RUNNERS)}"
         )
 
-    if json_schema is not None:
-        directive = _json_directive(json_schema)
-        system = f"{system}\n\n{directive}" if system else directive
+    system = _merge_json_directive(system, json_schema)
 
     text, meta = runner(
         prompt, system, _model_for(resolved_provider), resolved_timeout, cache_system=cache_system
@@ -526,26 +615,32 @@ class BatchRequest:
     `custom_id` must be unique within the batch — it's what
     :func:`parse_message_batch_results` correlates a result back to the request that produced
     it (Anthropic doesn't guarantee results are returned in submission order).
+
+    `cache_system` mirrors ``complete``'s own param — see :func:`_run_claude_api`'s docstring;
+    it's meaningful here too (a batch of otherwise-independent requests sharing one large,
+    stable `system` preamble is exactly the caching pattern `classify_batch` uses).
     """
 
     custom_id: str
     prompt: str
     system: str | None = None
     json_schema: dict | None = None
+    cache_system: bool = False
 
 
 def _batch_request_params(req: BatchRequest, model: str) -> dict[str, Any]:
-    system = req.system
-    if req.json_schema is not None:
-        directive = _json_directive(req.json_schema)
-        system = f"{system}\n\n{directive}" if system else directive
+    system = _merge_json_directive(req.system, req.json_schema)
     params: dict[str, Any] = {
         "model": model,
         "max_tokens": _env_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
         "messages": [{"role": "user", "content": req.prompt}],
     }
     if system:
-        params["system"] = system
+        params["system"] = (
+            [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+            if req.cache_system
+            else system
+        )
     return params
 
 
@@ -554,7 +649,9 @@ def submit_message_batch(
 ) -> str:
     """Submit `requests` as one Anthropic Message Batch (``POST /v1/messages/batches``) and
     return the batch's id. See this section's own module-level comment for what's not yet
-    implemented (polling/fetching results).
+    implemented (polling/fetching results). Always talks to the Anthropic API directly,
+    regardless of ``LLM_PROVIDER`` — there is no ``claude_cli``/``local`` equivalent to dispatch
+    to (see this section's own module-level comment).
 
     Raises:
         LLMError: missing ``ANTHROPIC_API_KEY`` or a transport/HTTP failure.
@@ -562,7 +659,11 @@ def submit_message_batch(
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
         raise LLMError("submit_message_batch requires ANTHROPIC_API_KEY (claude_api only)")
-    resolved_model = model or _model_for("claude_api") or "claude-sonnet-5"
+    # NOT `_model_for("claude_api")`: that reads the shared `LLM_MODEL` env var, which names
+    # whatever provider `LLM_PROVIDER` is *currently* configured to (e.g. a `local` vLLM
+    # deployment's served model name) -- meaningless, or actively wrong, for a call that always
+    # targets Anthropic regardless of the active provider.
+    resolved_model = model or "claude-sonnet-5"
     base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
     headers = {
         "x-api-key": key,
@@ -584,24 +685,11 @@ def submit_message_batch(
 
 def _llm_result_from_batch_message(message: dict) -> LLMResult:
     """A completed batch entry's own ``message`` object, shaped like a normal (non-batch)
-    Messages API response — reuses the same content/usage extraction :func:`_run_claude_api`
-    already does for a synchronous call."""
-    blocks = message.get("content") or []
-    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
-    usage = message.get("usage") or {}
-    prompt_tokens = int(usage.get("input_tokens") or 0)
-    completion_tokens = int(usage.get("output_tokens") or 0)
-    model = str(message.get("model") or "")
-    meta = CallMeta(
-        provider="claude_api",
-        model=model,
-        prompt_tokens=prompt_tokens,
-        completion_tokens=completion_tokens,
-        total_tokens=prompt_tokens + completion_tokens,
-        latency_s=0.0,  # a batch has no single-request latency to report
-        cost_usd=_estimate_cost(model, prompt_tokens, completion_tokens) * _BATCH_DISCOUNT,
-        cache_creation_tokens=int(usage.get("cache_creation_input_tokens") or 0),
-        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+    Messages API response — actually reuses :func:`_parse_claude_message`, the same
+    content/usage extraction :func:`_run_claude_api` uses for a synchronous call, priced at
+    :data:`_BATCH_DISCOUNT` of the synchronous estimate."""
+    text, meta = _parse_claude_message(
+        message, provider="claude_api", cost_multiplier=_BATCH_DISCOUNT
     )
     return LLMResult(content=text, meta=meta)
 
@@ -636,6 +724,8 @@ def parse_message_batch_results(results_jsonl: str) -> dict[str, LLMResult | LLM
             entry = json.loads(line)
             custom_id = entry["custom_id"]
             result = entry["result"]
+            if not isinstance(result, dict):
+                raise TypeError(f"'result' must be an object, got {type(result).__name__}")
         except (json.JSONDecodeError, KeyError, TypeError) as exc:
             print(f"llm: skipping a malformed batch-result line: {exc}", file=sys.stderr)
             continue
