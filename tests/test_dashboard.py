@@ -285,12 +285,14 @@ def test_render_page_includes_trends_and_forecasts(tmp_path: Path) -> None:
 class _FakeResponse:
     """A duck-typed stand-in for BaseHTTPRequestHandler's response-writing surface.
 
-    do_GET only touches ``send_response``/``send_header``/``end_headers``/``wfile.write`` — this
-    records those calls so the exception-handling branch can be tested without opening a real
-    socket or constructing a full (socket-backed) BaseHTTPRequestHandler.
+    do_GET only touches ``self.path``/``send_response``/``send_header``/``end_headers``/
+    ``wfile.write`` — this records those calls so the exception-handling branch can be tested
+    without opening a real socket or constructing a full (socket-backed)
+    BaseHTTPRequestHandler.
     """
 
-    def __init__(self) -> None:
+    def __init__(self, path: str = "/") -> None:
+        self.path = path
         self.status: int | None = None
         self.headers: dict[str, str] = {}
         self.body = b""

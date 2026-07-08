@@ -132,7 +132,7 @@ def evidence_url(item: dict) -> str:
     """`item`'s own ``url``, or a synthesized canonical GitHub link (GitHub redirects
     ``/issues/N`` ↔ ``/pull/N``) if it has none — so every caller gets the identical
     URL-or-synthesized-fallback treatment from one place, rather than each reimplementing it
-    (shared by :func:`_cite` here and :func:`~src.agents.reporter_v1._pr_entry`).
+    (shared by :func:`_cite` here and :func:`~src.agents.reporter_v1.pr_entry`).
 
     Known limitation: if `item` has no ``url`` AND is also missing ``repo``/``number``, this
     returns ``""`` — an item that arrives with none of the three has no evidence to construct
@@ -161,9 +161,10 @@ def repo_number_label(item: dict) -> str:
     """``repo#number`` for `item`, ``?`` for a missing or present-but-``None`` field.
 
     Shared by :func:`_cite` here and by ``dashboard.render``'s PR/issue rows, since a
-    caller-built dict (e.g. reporter_v1's ``_pr_entry``) may set ``repo``/``number`` to `None`
-    rather than omitting them — ``.get(key, "?")`` alone wouldn't catch that, so both
-    "missing" and "present but None" must be checked explicitly here, once, for every caller.
+    caller-built dict (e.g. reporter_v1's :func:`~src.agents.reporter_v1.pr_entry`) may set
+    ``repo``/``number`` to `None` rather than omitting them — ``.get(key, "?")`` alone wouldn't
+    catch that, so both "missing" and "present but None" must be checked explicitly here, once,
+    for every caller.
     """
     repo = item.get("repo") or "?"
     number = item.get("number")

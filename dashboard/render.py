@@ -21,11 +21,13 @@ a ``merged``/``merged_at`` field, so a PR's chip treats "closed" as "merged" —
 -merging PR would be mislabeled. Distinguishing the two needs a collector change (capturing
 GitHub's own ``merged``/``merged_at`` fields), out of scope for a dashboard-rendering todo.
 
-Known limitation (not fixed here): every request re-derives the tree (one `Store.query()`) and
-trends (a second, independent `Store.query()`), plus one `get_state()` per taxonomy tree node
-for its summary and one per historical prediction — no caching, batching, or cross-section
-sharing anywhere. See `dashboard/server.py`'s own docstring; fixing this needs a caching layer
-this thin M1 slice doesn't have.
+T5.16: :func:`render_page` now builds one :func:`~dashboard.snapshot.build_snapshot` (still one
+full store scan — that part isn't fixed here, see that module's own docstring for what would
+be) and renders from it via :func:`render_snapshot_page`, a pure ``dict -> str`` function with
+no `Store` import at all. The rendering step itself is now bounded regardless of KB size: each
+tree node's own leaf rows are capped at :data:`~dashboard.snapshot.DEFAULT_MAX_PRS_PER_NODE` in
+the snapshot already, with a "show N more" control per truncated node fetching the rest from
+:mod:`dashboard.server`'s ``/api/node-prs`` endpoint on demand — never embedded in the page.
 """
 
 from __future__ import annotations
@@ -34,9 +36,11 @@ from html import escape
 
 from src.agents.forecaster import Prediction, list_predictions
 from src.agents.reporter import is_merged, repo_number_label
-from src.agents.reporter_v1 import TreeNode, tree_from_store
 from src.store.base import Store
+from src.taxonomy import LEVEL_SEPARATOR
 from src.trends import trends_from_store
+
+from .snapshot import build_snapshot
 
 # Only these schemes are ever rendered as a clickable href — GitHub-sourced items always carry
 # an http(s) url (see reporter.evidence_url), but this dashboard has no auth and renders
@@ -111,21 +115,49 @@ def _gap_chip_html(gaps: int) -> str:
     return f'<span class="tag-gap">{escape(label)}</span>'
 
 
-def _tree_node_html(node: TreeNode, depth: int) -> str:
+def _more_prs_html(node: dict) -> str:
+    """T5.16: a "show N more" control for a node whose own leaf rows were capped by
+    :func:`~dashboard.snapshot.build_snapshot` — clicking it fetches the rest, page by page,
+    from :mod:`dashboard.server`'s ``/api/node-prs`` endpoint (see ``_TREE_SCRIPT``'s own
+    handler) rather than ever embedding them in the page. Absent entirely for a node that
+    wasn't truncated — no dead control for the common (small) case."""
+    if not node["prs_truncated"]:
+        return ""
+    remaining = node["prs_total"] - len(node["prs"])
+    path = escape(LEVEL_SEPARATOR.join(node["path"]))
+    # `data-limit` (not a hardcoded page size in the JS fetch) reuses the exact page size
+    # already implied by a truncated node's own capped `prs` length -- so a future change to
+    # `DEFAULT_MAX_PRS_PER_NODE` only needs updating in one place, not also in `_TREE_SCRIPT`.
+    page_size = len(node["prs"])
+    return (
+        f'<button class="btn more" data-path="{path}" data-offset="{page_size}" '
+        f'data-limit="{page_size}">'
+        f"Show {remaining} more"
+        "</button>"
+    )
+
+
+def _tree_node_html(node: dict, depth: int) -> str:
     """One collapsible ``<details>`` node: name, count, an optional gap chip and summary
-    line, its own cited PR rows, then its children — recursively, matching the mockup's
-    대(大) → 소(summary) → 소소 → PRs nesting."""
-    summary_html = f'<div class="summary-line">{escape(node.summary)}</div>' if node.summary else ""
-    prs_html = "".join(_pr_row_html(pr) for pr in node.prs)
-    kids_html = "".join(_tree_node_html(child, depth + 1) for child in node.children)
+    line, its own cited PR rows (capped — see :func:`_more_prs_html`), then its children —
+    recursively, matching the mockup's 대(大) → 소(summary) → 소소 → PRs nesting.
+
+    `node` is the snapshot's own dict shape (:func:`~dashboard.snapshot.build_snapshot`), not
+    a :class:`~src.agents.reporter_v1.TreeNode` — this function never touches a `Store`.
+    """
+    summary_html = (
+        f'<div class="summary-line">{escape(node["summary"])}</div>' if node["summary"] else ""
+    )
+    prs_html = "".join(_pr_row_html(pr) for pr in node["prs"]) + _more_prs_html(node)
+    kids_html = "".join(_tree_node_html(child, depth + 1) for child in node["children"])
     body = prs_html + kids_html
     kids_wrapped = f'<div class="kids">{body}</div>' if body else ""
     open_attr = " open" if depth == 0 else ""
     return (
         f'<details class="{_node_class(depth)}"{open_attr}>'
         '<summary><span class="chev">▶</span>'
-        f'<span class="name">{escape(node.name)}</span>'
-        f'<span class="count">{node.count}</span>{_gap_chip_html(node.gaps)}</summary>'
+        f'<span class="name">{escape(node["name"])}</span>'
+        f'<span class="count">{node["count"]}</span>{_gap_chip_html(node["gaps"])}</summary>'
         f"{summary_html}{kids_wrapped}"
         "</details>"
     )
@@ -148,8 +180,11 @@ _TREE_CONTROLS = (
 )
 
 
-def _tree_section_html(store: Store) -> str:
+def _tree_section_html(tree: list[dict]) -> str:
     """The collapsible report tree, or a placeholder when the store has no items at all.
+
+    `tree` is :func:`~dashboard.snapshot.build_snapshot`'s own ``"tree"`` list of node dicts —
+    this function never touches a `Store`.
 
     Known limitation (inherited from T1.5.4's `build_tree`, not fixed here): an item with no
     classified ``path`` yet is folded into a real ``Other`` root node, not treated as "nothing
@@ -158,18 +193,18 @@ def _tree_section_html(store: Store) -> str:
     Distinguishing those two would mean `build_tree` (or this function) telling "never
     classified" apart from "classified into Other" — a `build_tree` change, out of scope here.
     """
-    nodes = tree_from_store(store)
-    if not nodes:
+    if not tree:
         return _section(
             "Report tree",
             "<p>No classified items yet — run <code>python -m src.analyze</code>.</p>",
         )
-    tree_html = "".join(_tree_node_html(node, 0) for node in nodes)
+    tree_html = "".join(_tree_node_html(node, 0) for node in tree)
     return _section("Report tree", f'{_TREE_CONTROLS}<div id="tree">{tree_html}</div>')
 
 
-def _trends_section_html(store: Store) -> str:
-    series = render_trends(store)
+def _trends_section_html(series: dict[str, dict[str, int]]) -> str:
+    """`series` is :func:`~dashboard.snapshot.build_snapshot`'s own ``"trends"`` dict — this
+    function never touches a `Store`."""
     if not series:
         return _section("Trends", "<p>No classified items yet.</p>")
 
@@ -190,17 +225,18 @@ def _bar_html(week: str, count: int, max_count: int) -> str:
     )
 
 
-def _forecasts_section_html(store: Store) -> str:
-    predictions = render_forecasts(store)
+def _forecasts_section_html(predictions: list[dict]) -> str:
+    """`predictions` is :func:`~dashboard.snapshot.build_snapshot`'s own ``"forecasts"`` list
+    (each a ``dataclasses.asdict(Prediction)`` dict) — this function never touches a `Store`."""
     if not predictions:
         return _section("Forecast log", "<p>No predictions recorded yet.</p>")
 
     rows = "".join(
         "<tr>"
-        f"<td>{escape(p.claim)}</td>"
-        f"<td>{p.prob:.2f}</td>"
-        f"<td>{escape(p.due_date)}</td>"
-        f"<td>{escape(', '.join(p.evidence))}</td>"
+        f"<td>{escape(p['claim'])}</td>"
+        f"<td>{p['prob']:.2f}</td>"
+        f"<td>{escape(p['due_date'])}</td>"
+        f"<td>{escape(', '.join(p['evidence']))}</td>"
         "</tr>"
         for p in predictions
     )
@@ -213,6 +249,17 @@ def _forecasts_section_html(store: Store) -> str:
 
 # The expand/collapse + filter behavior, adapted directly from the approved
 # docs/design/report-tree-mockup.html (same element shapes: #tree, .pr, .btn[data-all], #q).
+# T5.16 adds one more control this script drives: `.btn.more` (see `_more_prs_html`) fetches
+# the next page of a truncated node's own rows from `/api/node-prs` instead of ever having
+# them embedded in the page — `prRowHtml`/`escHtml`/`safeHref` mirror `_pr_row_html`/`escape`/
+# `_safe_href`'s templates client-side since the endpoint returns JSON rows
+# (`src.agents.reporter_v1.pr_entry`'s shape), not pre-rendered HTML, matching the same "read
+# layer stays plain data, rendering is a client concern" split T5.1 aims for. Known limitation,
+# not fixed here (code-review finding): this is a real, disclosed duplication, not just an
+# inherent language-boundary cost — the endpoint *could* return pre-rendered HTML fragments
+# instead of JSON to avoid it, at the cost of coupling the read layer to HTML rendering. If
+# `_pr_row_html`/`_state_chip`'s chip-class rules ever change, this JS copy must be updated by
+# hand or paginated rows will render different chips/labels than the initially-embedded ones.
 _TREE_SCRIPT = """
 document.querySelectorAll('.btn[data-all]').forEach(function(b){
   b.addEventListener('click',function(){
@@ -247,6 +294,41 @@ if(q){
     });
   });
 }
+function escHtml(s){
+  return String(s).replace(/[&<>"']/g, function(c){
+    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c];
+  });
+}
+function safeHref(u){
+  return (u && (u.indexOf('http://')===0 || u.indexOf('https://')===0)) ? u : '';
+}
+function prRowHtml(pr){
+  var chipClass='issue', chipLabel='issue';
+  if(pr.type==='pr'){
+    if(pr.state==='closed'){ chipClass='merged'; chipLabel='merged'; }
+    else { chipClass='open'; chipLabel='open pr'; }
+  }
+  var id=(pr.repo||'?')+'#'+(pr.number!==null&&pr.number!==undefined?pr.number:'?');
+  return '<div class="pr"><span class="id">'+escHtml(id)+'</span>'+
+    '<span class="t"><a href="'+escHtml(safeHref(pr.url))+'">'+escHtml(pr.title||'')+'</a></span>'+
+    '<span class="chip '+chipClass+'">'+escHtml(chipLabel)+'</span></div>';
+}
+document.querySelectorAll('.btn.more').forEach(function(b){
+  b.addEventListener('click', function(){
+    var path=b.dataset.path, offset=parseInt(b.dataset.offset, 10), limit=b.dataset.limit;
+    var url='/api/node-prs?path='+encodeURIComponent(path)+'&offset='+offset+'&limit='+limit;
+    fetch(url).then(function(r){ return r.json(); }).then(function(data){
+      var html=data.prs.map(prRowHtml).join('');
+      b.insertAdjacentHTML('beforebegin', html);
+      var next=offset+data.prs.length;
+      if(next>=data.total){ b.remove(); }
+      else{
+        b.dataset.offset=String(next);
+        b.textContent='Show '+(data.total-next)+' more';
+      }
+    });
+  });
+});
 """
 
 # CSS variables + tree rules adapted directly from the approved mockup — the design spec.
@@ -333,14 +415,23 @@ details[open]>summary>.chev{transform:rotate(90deg)}
 .chip.issue{color:var(--issue);background:var(--issue-soft)}
 .tag-gap{font-size:.66rem;font-weight:600;color:var(--gap);background:var(--gap-soft);
   border:1px solid var(--gap);border-radius:5px;padding:.02rem .38rem;margin-left:.4rem}
+.btn.more{margin:.32rem 0 .32rem 1.8rem;font-size:.78rem}
 .hidden{display:none !important}
 """
 
 
-def render_page(store: Store) -> str:
-    """The full dashboard page: the collapsible report tree + per-category trends + the
-    forecast log."""
-    body = _tree_section_html(store) + _trends_section_html(store) + _forecasts_section_html(store)
+def render_snapshot_page(snapshot: dict) -> str:
+    """The full dashboard page rendered from an already-built
+    :func:`~dashboard.snapshot.build_snapshot` dict — the collapsible report tree + per-category
+    trends + the forecast log. Pure ``dict -> str``: no `Store` import, no KB access at all
+    (T5.16) — a page can be rendered from a snapshot loaded straight off disk
+    (:func:`~dashboard.snapshot.load_snapshot`) with zero further store reads.
+    """
+    body = (
+        _tree_section_html(snapshot["tree"])
+        + _trends_section_html(snapshot["trends"])
+        + _forecasts_section_html(snapshot["forecasts"])
+    )
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
         "<title>vllm-forager dashboard</title>"
@@ -348,3 +439,11 @@ def render_page(store: Store) -> str:
         "<h1>vllm-forager dashboard</h1>" + body + f"<script>{_TREE_SCRIPT}</script>"
         "</body></html>"
     )
+
+
+def render_page(store: Store) -> str:
+    """The full dashboard page, built straight from `store` — one
+    :func:`~dashboard.snapshot.build_snapshot` (still one full store scan; see that module's
+    own docstring) then :func:`render_snapshot_page`. Unchanged signature/behavior for existing
+    callers; the *rendering* step itself is now bounded regardless of KB size (T5.16)."""
+    return render_snapshot_page(build_snapshot(store))

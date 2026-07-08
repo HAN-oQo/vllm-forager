@@ -213,7 +213,7 @@ class TreeNode:
         }
 
 
-def _pr_entry(item: dict) -> dict:
+def pr_entry(item: dict) -> dict:
     """The minimal, JSON-serializable shape one leaf PR/issue carries in a tree node: enough
     for T1.5.5's dashboard to render a cited row + a merged/open/issue state chip, without
     bloating ``tree.json`` with every raw item field (body text, labels, etc.).
@@ -224,6 +224,9 @@ def _pr_entry(item: dict) -> dict:
     them (not omitted) — :func:`~src.agents.reporter._cite`, called on this dict by
     :func:`render_tree_markdown`, treats a `None` value the same as a missing key (renders
     ``?``), so this never surfaces a Python-literal ``None`` in report text.
+
+    Public (not ``_pr_entry``) since T5.16: :mod:`dashboard.snapshot`'s ``items_at_path`` calls
+    this directly too, for the same "one leaf row" shape a paginated dashboard endpoint returns.
     """
     return {
         "repo": item.get("repo"),
@@ -233,6 +236,19 @@ def _pr_entry(item: dict) -> dict:
         "state": item.get("state"),
         "type": item.get("type"),
     }
+
+
+def is_unclassified_or_other(path: object) -> bool:
+    """True if `path` (an item's raw ``"path"`` field) belongs in the flat ``Other`` bucket —
+    missing/not-yet-classified, or explicitly classified :data:`~src.agents.reporter.OTHER`.
+
+    Public (not inlined) since T5.16: :func:`build_tree` and
+    :func:`~dashboard.snapshot.items_at_path` both need the *identical* rule (an item the tree
+    counts under ``Other`` must be the same population a paginated ``Other`` page returns) —
+    two independent copies previously risked silently drifting apart if one were ever updated
+    without the other.
+    """
+    return not isinstance(path, list) or not path or path == [OTHER]
 
 
 def build_tree(
@@ -265,9 +281,10 @@ def build_tree(
 
     for item in items:
         path = item.get("path")
-        if not isinstance(path, list) or not path or path == [OTHER]:
+        if is_unclassified_or_other(path):
             other_items.append(item)
             continue
+        assert isinstance(path, list)  # is_unclassified_or_other's own contract guarantees this
         path_t = tuple(path)
         exact.setdefault(path_t, []).append(item)
         for depth in range(len(path_t)):
@@ -283,7 +300,7 @@ def build_tree(
             count=len(own) + sum(child.count for child in children),
             gaps=0,
             children=children,
-            prs=tuple(_pr_entry(item) for item in own),
+            prs=tuple(pr_entry(item) for item in own),
         )
 
     tree = [make_node((name,)) for name in children_of.get((), {})]
@@ -295,7 +312,7 @@ def build_tree(
                 count=len(other_items),
                 gaps=0,
                 children=(),
-                prs=tuple(_pr_entry(item) for item in other_items),
+                prs=tuple(pr_entry(item) for item in other_items),
             )
         )
     return tree
