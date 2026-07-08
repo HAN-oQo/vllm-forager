@@ -246,3 +246,46 @@ def test_real_stages_bounds_intel_and_contribution_per_domain_limit(monkeypatch)
 
     assert "--per-domain-limit" in calls["analyze"]
     assert "--per-domain-limit" in calls["candidates"]
+
+
+def test_real_stages_attribute_cost_records_by_agent(
+    store: JsonlStore, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T4.8: `cost.agent_context` wraps each real sub-call inside `_intel`/`_contribution` --
+    an `llm.complete` call made from inside `analyze.main`/`candidates.main` during a real tick
+    must land in the KB tagged with the right agent. The test above passes `store=None` and its
+    mocked CLIs never call `llm.complete`, so it can't catch a mislabeled or dropped cost
+    record; this one drives a real `llm.complete` call through each wrapper with a real store."""
+    from src import analyze as analyze_module
+    from src import candidates as candidates_module
+    from src import forecast as forecast_module
+    from src import llm
+    from src import report as report_module
+
+    monkeypatch.setenv("LLM_BASE_URL", "http://vllm:8000/v1")
+    monkeypatch.setenv("LLM_MODEL", "my-model")
+
+    class _FakeResp:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": "hi"}}]}
+
+    monkeypatch.setattr(llm.requests, "post", lambda *a, **k: _FakeResp())
+    monkeypatch.setattr(analyze_module, "main", lambda argv: llm.complete("x", provider="local"))
+    monkeypatch.setattr(forecast_module, "main", lambda argv: 0)
+    monkeypatch.setattr(report_module, "main", lambda argv: 0)
+    monkeypatch.setattr(candidates_module, "main", lambda argv: llm.complete("y", provider="local"))
+
+    stages = {stage.name: stage for stage in orchestrator._real_stages()}
+    stages["intel"].run(store)
+    stages["contribution"].run(store)
+
+    runs = store.list_runs(stage="cost")
+    assert {r["agent"] for r in runs} == {"analyst", "scout"}
+    assert {r["loop"] for r in runs} == {"intel", "contribution"}
+    # forecast.main/report.main made no llm.complete call, so no "forecaster"/"reporter" agent
+    # is recorded here -- only analyze.main's stub did.
+    intel_run_ids = {r["run_id"] for r in runs if r["loop"] == "intel"}
+    assert len(intel_run_ids) == 1  # one run_id shared across all of _intel's sub-calls
