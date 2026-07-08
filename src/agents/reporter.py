@@ -132,7 +132,7 @@ def evidence_url(item: dict) -> str:
     """`item`'s own ``url``, or a synthesized canonical GitHub link (GitHub redirects
     ``/issues/N`` ↔ ``/pull/N``) if it has none — so every caller gets the identical
     URL-or-synthesized-fallback treatment from one place, rather than each reimplementing it
-    (shared by :func:`_cite` here and :func:`~src.agents.reporter_v1._pr_entry`).
+    (shared by :func:`_cite` here and :func:`~src.agents.reporter_v1.pr_entry`).
 
     Known limitation: if `item` has no ``url`` AND is also missing ``repo``/``number``, this
     returns ``""`` — an item that arrives with none of the three has no evidence to construct

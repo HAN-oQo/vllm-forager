@@ -213,7 +213,7 @@ class TreeNode:
         }
 
 
-def _pr_entry(item: dict) -> dict:
+def pr_entry(item: dict) -> dict:
     """The minimal, JSON-serializable shape one leaf PR/issue carries in a tree node: enough
     for T1.5.5's dashboard to render a cited row + a merged/open/issue state chip, without
     bloating ``tree.json`` with every raw item field (body text, labels, etc.).
@@ -224,6 +224,9 @@ def _pr_entry(item: dict) -> dict:
     them (not omitted) — :func:`~src.agents.reporter._cite`, called on this dict by
     :func:`render_tree_markdown`, treats a `None` value the same as a missing key (renders
     ``?``), so this never surfaces a Python-literal ``None`` in report text.
+
+    Public (not ``_pr_entry``) since T5.16: :mod:`dashboard.snapshot`'s ``items_at_path`` calls
+    this directly too, for the same "one leaf row" shape a paginated dashboard endpoint returns.
     """
     return {
         "repo": item.get("repo"),
@@ -283,7 +286,7 @@ def build_tree(
             count=len(own) + sum(child.count for child in children),
             gaps=0,
             children=children,
-            prs=tuple(_pr_entry(item) for item in own),
+            prs=tuple(pr_entry(item) for item in own),
         )
 
     tree = [make_node((name,)) for name in children_of.get((), {})]
@@ -295,7 +298,7 @@ def build_tree(
                 count=len(other_items),
                 gaps=0,
                 children=(),
-                prs=tuple(_pr_entry(item) for item in other_items),
+                prs=tuple(pr_entry(item) for item in other_items),
             )
         )
     return tree
