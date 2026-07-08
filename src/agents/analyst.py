@@ -93,6 +93,15 @@ into the incremental window). Now the collector's re-normalized record simply do
 ``path``/``category``, and the store-level merge leaves the existing value alone — which also
 means the "delta" check above no longer treats a re-clobbered item as unclassified again, so a
 re-collected item doesn't get repeatedly and wastefully re-sent through ``llm.complete``.
+
+**T4.11 (batching):** :func:`classify_batch` classifies several same-domain items in one
+``llm.complete`` call (opt into it via :func:`analyze_store`'s ``batch_size``, or
+``python -m src.analyze --batch-size N``) — purely additive, the original per-item
+:func:`classify_item` path is unchanged and stays the default. Known limitation, not fixed
+here: nothing wires ``batch_size`` into ``src/orchestrator.py``'s real ``_intel`` stage yet, so
+the real weekly-cadence pipeline still classifies one call per item until a future todo passes
+that flag through — the same "infrastructure built, real-stage integration deferred" shape
+T4.4's heartbeat mechanism already has in this codebase.
 """
 
 from __future__ import annotations
@@ -111,6 +120,32 @@ _PATH_SCHEMA = {
     "type": "object",
     "properties": {"path": {"type": "array", "items": {"type": "string"}}},
     "required": ["path"],
+}
+
+# T4.11: one path per item, same order as the batch's own items.
+# Each entry carries its own `index` rather than relying on array position -- a code-review
+# finding: an LLM reply that drops, duplicates, or reorders an entry anywhere before the last
+# position (a realistic failure mode for a numbered-list task, more likely as batch size grows)
+# would otherwise silently misalign every later item to the wrong classification with no way to
+# detect it. Correlating by an explicit id mirrors exactly how llm.py's own Message Batches path
+# uses `custom_id` for the identical reason ("Anthropic doesn't guarantee results are returned
+# in submission order").
+_BATCH_PATH_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "paths": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "index": {"type": "integer"},
+                    "path": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["index", "path"],
+            },
+        }
+    },
+    "required": ["paths"],
 }
 
 # How much of an item's body to feed the model — enough for context without an unbounded
@@ -141,12 +176,18 @@ def _known_subpaths(taxonomy: Taxonomy, domain: str) -> tuple[str, ...]:
     )
 
 
+def _item_text(item: dict) -> tuple[str, str]:
+    """`(title, body)`, body truncated to :data:`_BODY_CHARS` — the one place both
+    :func:`_path_prompt` and :func:`_batch_items_prompt` pull an item's prompt-facing text from,
+    so a future change to the truncation/extraction rule can't land in only one of them."""
+    return item.get("title") or "", (item.get("body") or "")[:_BODY_CHARS]
+
+
 def _path_prompt(item: dict, taxonomy: Taxonomy, domain: str) -> str:
     """The classification prompt for one item: title + a body excerpt + the known subpaths
     under its deterministic `domain` root (T3.15) — the domain itself is never asked of the
     model; see module docstring."""
-    title = item.get("title") or ""
-    body = (item.get("body") or "")[:_BODY_CHARS]
+    title, body = _item_text(item)
     known_subpaths = ", ".join(_known_subpaths(taxonomy, domain)) or "(none yet)"
     return (
         f"Classify the following GitHub issue/PR into a subcategory under the {domain!r} "
@@ -159,6 +200,99 @@ def _path_prompt(item: dict, taxonomy: Taxonomy, domain: str) -> str:
         "nothing more specific than the domain itself applies.\n\n"
         f"Title: {title}\n\nBody: {body}"
     )
+
+
+def _batch_system_prompt(taxonomy: Taxonomy, domain: str) -> str:
+    """The T4.11 batched-classify system prompt: everything that stays the same across every
+    batch under `domain` until the taxonomy itself changes (the instructions and the
+    known-subpaths hint) — split out from the per-batch user prompt (:func:`_batch_items_prompt`)
+    so it can be sent as an Anthropic prompt-cache breakpoint (``llm.complete``'s
+    ``cache_system=True``, see :func:`classify_batch`); the per-item titles/bodies, the part
+    that actually varies call to call, stay in the user prompt, where caching wouldn't help.
+    """
+    known_subpaths = ", ".join(_known_subpaths(taxonomy, domain)) or "(none yet)"
+    return (
+        f"Classify each of a numbered list of GitHub issues/PRs into a subcategory under the "
+        f"{domain!r} domain of a taxonomy tree. Known subcategory paths under this domain "
+        f"(root > ... > leaf, domain prefix omitted): {known_subpaths}.\n\n"
+        'Respond with a JSON object {"paths": [...]} containing exactly one entry per item — '
+        'each entry is {"index": N, "path": [...]}, where N is the 0-based "Item N" number you '
+        "were given (so your reply is correct even if you skip, reorder, or only answer some "
+        'items) and "path" is a JSON array of level names *beneath* the domain, root first '
+        '(e.g. ["post-training", "PPO"]). Use an existing path exactly where it fits; return a '
+        "shorter path if only confident about higher levels, or an empty array if nothing more "
+        "specific than the domain applies."
+    )
+
+
+def _batch_items_prompt(items: list[dict]) -> str:
+    """The per-batch user prompt: just the numbered items themselves — see
+    :func:`_batch_system_prompt` for the shared instructions/hint, kept separate so it can be
+    cached instead of resent (and re-billed at full price) on every batch."""
+    lines = []
+    for i, item in enumerate(items):
+        title, body = _item_text(item)
+        lines.append(f"Item {i}:\nTitle: {title}\n\nBody: {body}")
+    return "\n\n".join(lines)
+
+
+def classify_batch(
+    items: list[dict],
+    taxonomy: Taxonomy,
+    *,
+    domain: str,
+    root_options: tuple[str, ...],
+    system_prompt: str | None = None,
+) -> list[dict]:
+    """Classify `items` (all sharing `domain`, all needing an LLM call — i.e. `root_options` is
+    non-empty, matching :func:`classify_item`'s own domain/no-subcategories short-circuits) in
+    ONE ``llm.complete`` call instead of one call per item — the T4.11 cost-cut this DEVPLAN
+    todo asks for. The shared instructions/known-subpaths hint are sent as a cached system
+    prompt (:func:`_batch_system_prompt`, ``cache_system=True``); only the per-item
+    titles/bodies vary per call. Returns one classified record per item, same order as `items`,
+    via the same :func:`_validated_subpath`/:func:`_classified_record` machinery
+    :func:`classify_item` uses for a single item.
+
+    `system_prompt`, if given, is used as-is instead of recomputing
+    :func:`_batch_system_prompt` — :func:`analyze_store` computes it once per domain and passes
+    it to every chunk of that domain, since it's otherwise identical across chunks (an
+    unnecessary repeated :func:`_known_subpaths` scan of the whole taxonomy per chunk).
+
+    Each reply entry carries its own ``index`` (see :data:`_BATCH_PATH_SCHEMA`) rather than
+    being trusted by array position — an entry with a missing/out-of-range/duplicate `index` is
+    ignored (that item falls back to just `domain`, the same as a short/empty reply), so a
+    reply that drops, reorders, or duplicates entries can't silently misalign a later item to
+    the wrong classification.
+
+    Raises:
+        llm.LLMError: the completion call failed — ALL of `items` are then left unclassified
+            by this call, a coarser failure granularity than :func:`classify_item`'s per-item
+            isolation (see :func:`analyze_store`'s own docstring for why this tradeoff is
+            accepted for a batched call, and how it's mitigated there with a per-item retry).
+    """
+    reply = llm.complete(
+        _batch_items_prompt(items),
+        system=(
+            system_prompt if system_prompt is not None else _batch_system_prompt(taxonomy, domain)
+        ),
+        json_schema=_BATCH_PATH_SCHEMA,
+        cache_system=True,
+    )
+    raw_entries = reply.get("paths") if isinstance(reply, dict) else None
+    paths_by_index: dict[int, object] = {}
+    for entry in raw_entries if isinstance(raw_entries, list) else []:
+        if not isinstance(entry, dict):
+            continue
+        index = entry.get("index")
+        if isinstance(index, int) and index not in paths_by_index:
+            paths_by_index[index] = entry.get("path")
+    results = []
+    for i, item in enumerate(items):
+        sublevels = _validated_subpath(
+            paths_by_index.get(i), taxonomy, prefix=(domain,), root_options=root_options
+        )
+        results.append(_classified_record(item, (domain, *sublevels), taxonomy.version))
+    return results
 
 
 def _validated_subpath(
@@ -268,7 +402,14 @@ def _sample_per_domain(items: list[dict], limit: int) -> list[dict]:
     return sampled
 
 
-def analyze_store(store: Store, *, per_domain_limit: int | None = None) -> list[dict]:
+def _chunked(items: list[dict], size: int) -> list[list[dict]]:
+    """`items` split into consecutive chunks of at most `size`, preserving order."""
+    return [items[i : i + size] for i in range(0, len(items), size)]
+
+
+def analyze_store(
+    store: Store, *, per_domain_limit: int | None = None, batch_size: int | None = None
+) -> list[dict]:
     """Classify every not-yet-classified item in `store` and write the results back.
 
     "Delta" = items with no ``path`` key yet, so a rerun only classifies what an earlier run
@@ -289,14 +430,28 @@ def analyze_store(store: Store, *, per_domain_limit: int | None = None) -> list[
     "classified 0 item(s)" a genuinely empty backlog would (indistinguishable operator footgun,
     caught on T3.19's own code review).
 
+    `batch_size` (T4.11) groups items that actually need an LLM call (i.e. not one of
+    :func:`classify_item`'s own no-LLM-call short-circuits — an untracked repo or a
+    domain with no subcategories yet) into same-domain chunks of at most `batch_size`,
+    classifying each chunk in ONE :func:`classify_batch` call instead of one call per item.
+    `None` (the default) keeps the original per-item :func:`classify_item` path, unchanged —
+    this is purely additive; nothing here changes unless a caller opts in. A failing *batch*
+    doesn't just drop every item in it: each item in that chunk is retried individually via
+    :func:`classify_item`, so a transient hiccup degrades back to the same per-item isolation
+    the unbatched path already has (only an item that *also* fails on its own retry is skipped
+    and left pending). Must be a positive int if given — same rejected-footgun reasoning as
+    `per_domain_limit`.
+
     Returns the newly-classified items (``[]`` if there was nothing to do).
 
     Raises:
-        ValueError: `per_domain_limit` is given and isn't a positive int.
+        ValueError: `per_domain_limit` or `batch_size` is given and isn't a positive int.
         TaxonomyError: there are pending items but no taxonomy has been created yet.
     """
     if per_domain_limit is not None and per_domain_limit <= 0:
         raise ValueError(f"per_domain_limit must be a positive int, got {per_domain_limit!r}")
+    if batch_size is not None and batch_size <= 0:
+        raise ValueError(f"batch_size must be a positive int, got {batch_size!r}")
     pending = [item for item in store.query() if "path" not in item]
     if per_domain_limit is not None:
         pending = _sample_per_domain(pending, per_domain_limit)
@@ -305,14 +460,62 @@ def analyze_store(store: Store, *, per_domain_limit: int | None = None) -> list[
 
     active = get_active_taxonomy(store)
     classified = []
-    for item in pending:
-        try:
-            classified.append(classify_item(item, active))
-        except llm.LLMError as exc:
-            print(
-                f"analyst: skipping {item.get('repo')}#{item.get('number')}: {exc}",
-                file=sys.stderr,
-            )
+
+    if batch_size is None:
+        for item in pending:
+            try:
+                classified.append(classify_item(item, active))
+            except llm.LLMError as exc:
+                print(
+                    f"analyst: skipping {item.get('repo')}#{item.get('number')}: {exc}",
+                    file=sys.stderr,
+                )
+    else:
+        needs_llm: dict[str, list[dict]] = defaultdict(list)
+        # Cached per domain (not recomputed per item/chunk) -- `Taxonomy.children` scans the
+        # whole taxonomy, and every item/chunk of the same domain would otherwise repeat it.
+        root_options_by_domain: dict[str, tuple[str, ...]] = {}
+        for item in pending:
+            domain = _domain_of_item(item)
+            root_options = () if domain is None else root_options_by_domain.get(domain)
+            if domain is not None and root_options is None:
+                root_options = active.children((domain,))
+                root_options_by_domain[domain] = root_options
+            if domain is None or not root_options:
+                # Both of classify_item's own short-circuits -- no LLM call either way, so
+                # reuse it rather than re-deriving the same two fallback branches here.
+                classified.append(classify_item(item, active))
+                continue
+            needs_llm[domain].append(item)
+        for domain, domain_items in needs_llm.items():
+            root_options = root_options_by_domain[domain]
+            system_prompt = _batch_system_prompt(active, domain)  # once per domain, not per chunk
+            for chunk in _chunked(domain_items, batch_size):
+                try:
+                    classified.extend(
+                        classify_batch(
+                            chunk,
+                            active,
+                            domain=domain,
+                            root_options=root_options,
+                            system_prompt=system_prompt,
+                        )
+                    )
+                except llm.LLMError as exc:
+                    print(
+                        f"analyst: batch of {len(chunk)} item(s) under domain {domain!r} "
+                        f"failed ({exc}) -- retrying one at a time",
+                        file=sys.stderr,
+                    )
+                    for item in chunk:
+                        try:
+                            classified.append(classify_item(item, active))
+                        except llm.LLMError as item_exc:
+                            print(
+                                f"analyst: skipping {item.get('repo')}#{item.get('number')}: "
+                                f"{item_exc}",
+                                file=sys.stderr,
+                            )
 
     if classified:
         store.upsert_items(classified)

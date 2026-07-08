@@ -305,6 +305,148 @@ def test_analyze_store_per_domain_limit_rejects_non_positive(tmp_path) -> None:
         analyst.analyze_store(store, per_domain_limit=0)
 
 
+def test_analyze_store_batch_size_rejects_non_positive(tmp_path) -> None:
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    with pytest.raises(ValueError, match="positive int"):
+        analyst.analyze_store(store, batch_size=0)
+
+
+def test_analyze_store_batch_size_classifies_same_domain_items_in_one_call(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """T4.11: batch_size groups same-domain items needing an LLM call into one
+    llm.complete call per chunk instead of one call per item."""
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"], ["rl", "eval"]])
+    store.upsert_items(
+        [
+            _item("verl-project/verl", 1, "PPO trainer regression"),
+            _item("verl-project/verl", 2, "eval harness bug"),
+        ]
+    )
+    calls = []
+
+    def fake_complete(prompt, **kwargs):
+        calls.append(prompt)
+        return {"paths": [{"index": 0, "path": ["post-training"]}, {"index": 1, "path": ["eval"]}]}
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    classified = analyst.analyze_store(store, batch_size=10)
+
+    assert len(calls) == 1  # one call classified both items
+    by_number = {item["number"]: item for item in classified}
+    assert by_number[1]["path"] == ["rl", "post-training"]
+    assert by_number[2]["path"] == ["rl", "eval"]
+
+
+def test_analyze_store_batch_size_chunks_a_domain_larger_than_the_batch(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    store.upsert_items([_item("verl-project/verl", n, f"item {n}") for n in range(1, 4)])
+    calls = []
+
+    def fake_complete(prompt, **kwargs):
+        calls.append(prompt)
+        n = prompt.count("Item ")
+        return {"paths": [{"index": i, "path": ["post-training"]} for i in range(n)]}
+
+    monkeypatch.setattr(llm, "complete", fake_complete)
+
+    classified = analyst.analyze_store(store, batch_size=2)
+
+    assert len(calls) == 2  # 3 items, batch_size=2 -> chunks of [2, 1]
+    assert len(classified) == 3
+
+
+def test_analyze_store_batch_size_isolates_domain_fallbacks_from_llm_batches(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An untracked-repo item (OTHER) and a no-subcategories-yet domain item never enter a
+    batch or trigger an LLM call, exactly like the unbatched path."""
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    store.upsert_items(
+        [
+            _item("o/r", 1, "untracked repo"),  # -> OTHER, no LLM call
+            _item("huggingface/diffusers", 1, "no subcats yet"),  # omin has none -> domain-only
+            _item("verl-project/verl", 1, "needs an llm call"),
+        ]
+    )
+    monkeypatch.setattr(
+        llm, "complete", lambda *a, **k: {"paths": [{"index": 0, "path": ["post-training"]}]}
+    )
+
+    classified = analyst.analyze_store(store, batch_size=10)
+
+    by_repo = {item["repo"]: item for item in classified}
+    assert by_repo["o/r"]["path"] == [analyst.OTHER]
+    assert by_repo["huggingface/diffusers"]["path"] == ["omni"]
+    assert by_repo["verl-project/verl"]["path"] == ["rl", "post-training"]
+
+
+def test_analyze_store_batch_size_a_failing_batch_that_also_fails_on_retry_persists_other_domains(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch-level LLMError doesn't just drop the whole chunk (see the retry-rescue test
+    below) -- but an item that ALSO fails on its own per-item retry is still left pending, and
+    a failure in one domain must not affect another domain's batch."""
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"], ["speech", "rocm"]])
+    store.upsert_items(
+        [
+            _item("verl-project/verl", 1, "rl item"),
+            _item("vllm-project/vllm", 1, "speech item"),
+        ]
+    )
+
+    def flaky_complete(prompt, **kwargs):
+        if "rl item" in prompt:  # fails both the batch call and its per-item retry
+            raise llm.LLMError("simulated persistent failure")
+        return {"paths": [{"index": 0, "path": ["rocm"]}]}
+
+    monkeypatch.setattr(llm, "complete", flaky_complete)
+
+    classified = analyst.analyze_store(store, batch_size=10)
+
+    assert len(classified) == 1
+    assert classified[0]["repo"] == "vllm-project/vllm"
+    stored = {item["repo"]: item for item in store.query()}
+    assert "path" not in stored["verl-project/verl"]  # left pending for a future retry
+
+
+def test_analyze_store_batch_size_rescues_a_transient_batch_failure_via_per_item_retry(
+    tmp_path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A batch-level LLMError falls back to classify_item per item in that chunk -- a
+    transient failure that only hit the batch call (not the individual items) must not cost
+    any item its classification, unlike a naive 'skip the whole chunk' response."""
+    store = JsonlStore(tmp_path)
+    create_taxonomy(store, [["rl", "post-training"]])
+    store.upsert_items(
+        [
+            _item("verl-project/verl", 1, "item one"),
+            _item("verl-project/verl", 2, "item two"),
+        ]
+    )
+
+    def flaky_complete(prompt, *, json_schema=None, **kwargs):
+        if json_schema is analyst._BATCH_PATH_SCHEMA:
+            raise llm.LLMError("simulated transient batch failure")
+        return {"path": ["post-training"]}  # the per-item retry path succeeds
+
+    monkeypatch.setattr(llm, "complete", flaky_complete)
+
+    classified = analyst.analyze_store(store, batch_size=10)
+
+    by_number = {item["number"]: item for item in classified}
+    assert by_number[1]["path"] == ["rl", "post-training"]
+    assert by_number[2]["path"] == ["rl", "post-training"]
+
+
 def test_analyze_store_backfills_path_for_a_pre_t1_5_2_flat_category_item(
     tmp_path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

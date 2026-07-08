@@ -58,10 +58,23 @@ def main(argv: list[str] | None = None) -> int:
             "retarget, T3.19). Must be a positive int."
         ),
     )
+    ap.add_argument(
+        "--batch-size",
+        type=_positive_int,
+        default=None,
+        help=(
+            "Classify at most N same-domain pending items per llm.complete call instead of one "
+            "call per item (T4.11) -- cuts classification LLM spend at the source. Default: "
+            "unbatched, one call per item, unchanged from before this flag existed. Must be a "
+            "positive int."
+        ),
+    )
     args = ap.parse_args(argv)
 
     store, _ = resolve_store(args.data_dir)
-    classified = analyst.analyze_store(store, per_domain_limit=args.per_domain_limit)
+    classified = analyst.analyze_store(
+        store, per_domain_limit=args.per_domain_limit, batch_size=args.batch_size
+    )
     print(f"classified {len(classified)} item(s)")
     return 0
 
