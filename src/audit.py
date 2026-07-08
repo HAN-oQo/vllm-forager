@@ -151,6 +151,26 @@ def write_record(data_dir: Path, record: dict, *, checked_at: str) -> Path:
     return path
 
 
+def list_records(store: Store, *, data_dir: Path | None = None) -> list[dict]:
+    """Every recorded ``data_quality`` guardrail check (reconciliation + cursor-stall records,
+    each already carrying its own ``flagged`` boolean — computed once, at write time, by
+    :func:`reconcile`/:func:`record_stall`, not re-derived here), oldest first.
+
+    `data_dir` resolves the same way :func:`_resolve_data_dir` does for a write, but degrades
+    to ``[]`` instead of raising when it can't be resolved (no explicit `data_dir` and `store`
+    exposes none) or the sink doesn't exist yet (a fresh KB that has never run an audit check) —
+    a read endpoint (T5.7's dashboard guardrail panel) shouldn't 500 over a config gap or a
+    not-yet-populated sink the way a write correctly still refuses to guess past.
+    """
+    resolved = data_dir if data_dir is not None else getattr(store, "data_dir", None)
+    if resolved is None:
+        return []
+    path = _data_quality_path(resolved)
+    if not path.exists():
+        return []
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+
 def _resolve_data_dir(store: Store, data_dir: Path | None, *, caller: str) -> Path:
     """`data_dir` if given, else the store's ``data_dir`` (JsonlStore) — else raise loudly.
 

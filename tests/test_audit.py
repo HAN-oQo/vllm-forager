@@ -214,6 +214,35 @@ def test_stall_recorded_requires_data_dir_for_non_jsonl_store(tmp_path):
         )
 
 
+# --------------------------------------------------------------------- list_records
+
+
+def test_list_records_returns_every_recorded_check_oldest_first(tmp_path):
+    store = JsonlStore(tmp_path)
+    store.upsert_items([_item("o/r", 1)])
+    fake = lambda r, s: {"issues": 1, "prs": 0, "total": 1}  # noqa: E731
+    audit.audit_repo(store, "o/r", "2025-01-01T00:00:00Z", remote_fetcher=fake, checked_at="a")
+    audit.record_stall(store, "o/r", "2025-01-01T00:00:00Z", remote_fetcher=fake, checked_at="b")
+
+    records = audit.list_records(store)
+
+    assert [r["checked_at"] for r in records] == ["a", "b"]
+    assert records[0]["reason"] == "reconciliation"
+    assert records[1]["reason"] == "cursor_stall"
+
+
+def test_list_records_empty_before_any_check_has_run(tmp_path):
+    store = JsonlStore(tmp_path)
+    assert audit.list_records(store) == []
+
+
+def test_list_records_degrades_to_empty_for_a_store_with_no_data_dir():
+    class NoDirStore:
+        pass  # no `data_dir` attribute — mimics a future non-JSONL Store
+
+    assert audit.list_records(NoDirStore()) == []  # must not raise, unlike a write
+
+
 # ------------------------------------------------------------- live GraphQL smoke
 
 
