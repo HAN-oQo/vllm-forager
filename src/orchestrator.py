@@ -24,9 +24,11 @@ is what lets :mod:`tests.test_orchestrator` exercise cadence/trigger routing wit
 and fake agents, with no real network/LLM call anywhere in the offline test suite.
 
 Known limitations, not fixed here (later M4 todos):
-- No run events (T4.4) or liveness heartbeats (T4.5) are written yet — :func:`run_tick` only
-  returns an in-memory :class:`TickResult`; persisting a per-stage audit trail to the KB is
-  T4.4/T4.5's job, layered onto this same routing skeleton.
+- No liveness heartbeats yet (T4.5) — :func:`run_tick` (T4.4) records exactly one run event
+  per stage, after it finishes (:func:`_record_run_best_effort`, ``store.record_run``), not a
+  `started` → `heartbeat` → `finished` lifecycle: a stage that's genuinely still running looks
+  identical, from the KB's own run history, to one that's silently hung, since neither has a
+  recorded event yet. T4.5's staleness-checked heartbeat lifecycle is what tells those apart.
 - ``main()`` takes a host-local, non-blocking lock (:func:`~src.locking.run_lock`, T4.3) around
   a tick, so two overlapping invocations never race — but it's process-level only, not KB-level
   idempotency for a *half-finished* tick's own writes (a stage that partially wrote before a
@@ -38,13 +40,20 @@ Known limitations, not fixed here (later M4 todos):
   to do the expensive work. A better trigger heuristic is a future refinement, not this todo's.
   It also only checks the two label/keyword-matched sources, not Scout's third (parity-gap)
   source, so a real parity-gap-only candidate with no matching open issue never triggers a run.
-- :func:`run_tick` has no per-stage exception isolation (unlike every LLM-calling agent module
-  in this codebase, e.g. :mod:`src.agents.analyst`/:mod:`src.agents.scout`, which isolate
-  per-item failures): one stage raising aborts the whole tick, including stages later in the
-  list that don't depend on it. Retrofitting this is expected to land alongside T4.4 (run
-  events), which needs a try/except boundary around each stage anyway to record a per-stage
-  status. ``main()`` only catches this at the CLI boundary (see below), so a direct
-  :func:`run_tick` caller still sees the exception.
+- :func:`run_tick` (T4.4) now records a ``status: "failed"`` run event for a stage that raises
+  — but still re-raises afterward, so a failing stage still aborts the whole tick, including
+  stages later in `stages` that don't depend on it (unlike every LLM-calling agent module in
+  this codebase, e.g. :mod:`src.agents.analyst`/:mod:`src.agents.scout`, which isolate
+  per-item failures and keep going). Full per-stage isolation — continuing to the next stage
+  after recording a failure — is a further refinement, not this todo's; ``main()`` only catches
+  this at the CLI boundary (see below), so a direct :func:`run_tick` caller still sees the
+  exception, now alongside a KB record of what failed.
+- Real stages' run events always carry ``items: None`` — ``collector.main``/``analyze.main``/
+  ``forecast.main``/``report.main``/``candidates.main`` only *print* their counts, they don't
+  return them, so getting a real count would mean bypassing each CLI's ``main()`` (and, for
+  "contribution", re-implementing its console output to avoid losing it) rather than just
+  wrapping it. `Stage.run`'s ``int | None`` return **is** wired all the way into the recorded
+  run event — see :mod:`tests.test_events` — real stages just don't populate it yet.
 - ``_real_stages()``'s real "intel"/"contribution" wrappers pass a fixed, conservative
   ``--per-domain-limit`` into ``analyze.main``/``candidates.main`` (see
   :data:`_INTEL_PER_DOMAIN_LIMIT`/:data:`_CONTRIBUTION_PER_DOMAIN_LIMIT`) rather than running
@@ -58,6 +67,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -101,11 +111,12 @@ class Stage:
 
     `run` is the stage's actual work, an explicit callable — never imported and invoked
     directly inside this module — so a test can inject a fake stage without patching a real
-    agent module's globals.
+    agent module's globals. Its return value (an item count, or `None` if not known/applicable)
+    is folded into the run event :func:`run_tick` records for this stage (T4.4).
     """
 
     name: str
-    run: Callable[[Store], None]
+    run: Callable[[Store], int | None]
     interval_hours: float | None = None
     trigger: Callable[[Store], bool] | None = None
 
@@ -144,6 +155,22 @@ def _parse_last_run(raw: str) -> datetime | None:
         return None
 
 
+def _record_run_best_effort(store: Store, record: dict) -> None:
+    """`store.record_run(record)`, logging (not raising) on failure -- a KB-write hiccup must
+    never crash a tick after a stage's real work already happened. Deliberately a small local
+    helper rather than reusing `src.stages.record_run_best_effort`: that one requires `repo`/
+    `number` (it's scoped to M3's per-item pipeline stages), which an orchestrator-level,
+    whole-stage run event has neither of.
+    """
+    try:
+        store.record_run(record)
+    except Exception as exc:
+        print(
+            f"orchestrator: failed to record run event for {record.get('stage')!r}: {exc}",
+            file=sys.stderr,
+        )
+
+
 def _is_due(store: Store, stage: Stage, now: datetime) -> tuple[bool, str]:
     """Whether `stage` should run this tick, and a short reason either way."""
     if stage.interval_hours is None:
@@ -168,6 +195,12 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
     (tzinfo-less) `now` is treated as UTC rather than raising a `TypeError` once compared
     against a stored (always UTC-aware) cursor — the common `datetime.utcnow()` idiom is naive.
 
+    Each stage that's due/triggered gets one run event recorded to the KB (T4.4,
+    `store.record_run`, best-effort): `{stage, status: "ok"|"failed", items, dur_s,
+    policy_version, recorded_at}` (`error` too, on failure). A stage that raises still gets its
+    `"failed"` event recorded before the exception propagates -- see the module docstring's
+    Known limitations for why this doesn't (yet) isolate later stages from an earlier failure.
+
     Raises:
         PolicyError: no policy has been created yet — mirrors :func:`~src.policy.get_active`'s
             own contract; an orchestrator tick with nothing to pin isn't a state this function
@@ -185,7 +218,35 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
         if not due:
             skipped[stage.name] = reason
             continue
-        stage.run(store)
+
+        started = time.monotonic()
+        try:
+            items = stage.run(store)
+        except Exception as exc:
+            _record_run_best_effort(
+                store,
+                {
+                    "stage": stage.name,
+                    "status": "failed",
+                    "error": str(exc),
+                    "dur_s": round(time.monotonic() - started, 3),
+                    "policy_version": policy.version,
+                    "recorded_at": now.strftime(_TS_FORMAT),
+                },
+            )
+            raise
+
+        _record_run_best_effort(
+            store,
+            {
+                "stage": stage.name,
+                "status": "ok",
+                "items": items,
+                "dur_s": round(time.monotonic() - started, 3),
+                "policy_version": policy.version,
+                "recorded_at": now.strftime(_TS_FORMAT),
+            },
+        )
         if stage.interval_hours is not None:
             store.set_state(_last_run_key(stage.name), now.strftime(_TS_FORMAT))
         ran.append(stage.name)

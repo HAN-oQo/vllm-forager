@@ -571,10 +571,32 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
     `run_tick` — never invokes it at all, i.e. no stage runs and no write is even attempted, not just no write is
     observed). `docs/RUNBOOK.md`'s "Overlap" section and `scripts/orchestrator.sh`'s header comment were updated
     to describe the lock living in `main()` now, not the shell script.
-- [ ] **T4.4 Run events** — per-stage run records (stage, status, counts, duration) to KB for the dashboard.
+- [x] **T4.4 Run events** — per-stage run records (stage, status, counts, duration) to KB for the dashboard.
   - **Why:** the audit trail — "what ran, when, how much, how long" — that the dashboard and any debugging read from.
   - **e.g.:** a tick writes `{stage: collect, status: ok, items: 42, dur_s: 31}` to the `runs` collection.
   - **Test:** `tests/test_events.py` — a pipeline tick writes a run event with the expected fields.
+  - **Note:** `run_tick` (`src/orchestrator.py`) now times each due/triggered stage (`time.monotonic()`) and
+    records exactly one run event to `store.record_run` (via a new local `_record_run_best_effort` — logs, never
+    raises, on a KB-write failure, so a write hiccup can't discard a stage's already-completed real work):
+    `{stage, status: "ok"|"failed", items, dur_s, policy_version, recorded_at}` (`error` instead of `items` on
+    failure). `Stage.run`'s return type widened from `Callable[[Store], None]` to `Callable[[Store], int | None]`
+    — an optional item count folded straight into the recorded event; every existing fake stage in
+    `tests/test_orchestrator.py` already returned `None` (a lambda's/`list.append`'s own return value), so this
+    was a non-breaking widening, not a rewrite. A stage that raises still gets a `"failed"` event recorded (with
+    `error: str(exc)`) **before** the exception re-propagates — `run_tick` does not (yet) isolate a failing
+    stage from later ones in the same tick; that's a further refinement the module docstring's Known Limitations
+    now calls out explicitly, distinct from T4.5's own job (heartbeats + staleness detection, not just
+    before/after events). `_record_run_best_effort` is a small local helper rather than reusing
+    `src.stages.record_run_best_effort`: that one requires `repo`/`number` (M3's per-item pipeline stages scope),
+    which a whole-stage orchestrator run event has neither of. Real stages (`_real_stages()`'s `_collect`/
+    `_intel`/`_contribution`) all report `items: None` for now — `collector.main`/`analyze.main`/`forecast.main`/
+    `report.main`/`candidates.main` only *print* their counts rather than returning them, and wiring a real count
+    through would mean bypassing each CLI's `main()` (losing `candidates.main`'s console output for "contribution"
+    without re-implementing it) rather than just wrapping it, a bigger refactor left for later. `tests/
+    test_events.py` verifies the exact DEVPLAN worked example (`items: 42`, etc.), a `None` item count, the
+    failed-status path (`error` present, no `items` key), no event for a skipped stage, one event per stage per
+    tick, and that a `store.record_run` failure itself doesn't lose the stage's already-recorded `TickResult.ran`
+    membership.
 - [ ] **T4.5 Liveness: heartbeat + intermediate output (know what's running)** — every stage/agent writes its lifecycle to KB `runs`: `started` → periodic `heartbeat` (current step + a rolling tail of intermediate output) → `finished` / `failed`, each stamped with the active `policy@v`; a run is **stalled** if its last heartbeat is older than `N × expected_interval`. Powers the T5.8 health panel.
   - **Why:** a crash must never look like "still running" — the dashboard has to distinguish alive / stalled / failed (with partial output) or you can't trust what you see.
   - **e.g.:** the engineer stage dies mid-build → its record shows `failed` (or `stalled` if silent), not a frozen "running".
