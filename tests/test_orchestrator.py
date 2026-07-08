@@ -193,3 +193,56 @@ def test_run_tick_one_stage_failing_does_not_block_earlier_stages_from_being_rec
     assert calls == ["collect"]
     # collect's cursor was persisted even though the tick as a whole raised later
     assert store.get_state("orchestrator:last_run:collect") is not None
+
+
+# --------------------------------------------------------------------- corrupted state / clock
+
+
+def test_is_due_treats_a_corrupted_last_run_cursor_as_never_run(store: JsonlStore) -> None:
+    store.set_state("orchestrator:last_run:collect", "not-a-timestamp")
+    stage = orchestrator.Stage("collect", lambda _s: None, interval_hours=24)
+
+    due, reason = orchestrator._is_due(store, stage, _NOW)
+
+    assert (due, reason) == (True, "never run")
+
+
+def test_run_tick_normalizes_a_naive_now_to_utc(store: JsonlStore) -> None:
+    calls: list[str] = []
+    stage = _recording_stage("collect", calls, interval_hours=24)
+    naive_now = _NOW.replace(tzinfo=None)
+
+    orchestrator.run_tick(store, [stage], now=naive_now)
+    calls.clear()
+    result = orchestrator.run_tick(store, [stage], now=naive_now + timedelta(hours=1))
+
+    assert calls == []  # not due yet -- no naive/aware TypeError on the second tick
+    assert "collect" in result.skipped
+
+
+# --------------------------------------------------------------------- real stage wiring
+
+
+def test_real_stages_bounds_intel_and_contribution_per_domain_limit(monkeypatch) -> None:
+    """T3.19 hit a multi-hour, unbounded, one-LLM-call-per-item cost hazard on a large KB --
+    the orchestrator's real intel/contribution stages must never call analyze.main/
+    candidates.main unbounded."""
+    from src import analyze as analyze_module
+    from src import candidates as candidates_module
+    from src import forecast as forecast_module
+    from src import report as report_module
+
+    calls: dict[str, list[str]] = {}
+    monkeypatch.setattr(analyze_module, "main", lambda argv: calls.setdefault("analyze", argv))
+    monkeypatch.setattr(forecast_module, "main", lambda argv: 0)
+    monkeypatch.setattr(report_module, "main", lambda argv: 0)
+    monkeypatch.setattr(
+        candidates_module, "main", lambda argv: calls.setdefault("candidates", argv)
+    )
+
+    stages = {stage.name: stage for stage in orchestrator._real_stages()}
+    stages["intel"].run(None)
+    stages["contribution"].run(None)
+
+    assert "--per-domain-limit" in calls["analyze"]
+    assert "--per-domain-limit" in calls["candidates"]
