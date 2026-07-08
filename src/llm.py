@@ -31,11 +31,13 @@ credential, transport error, non-zero CLI exit, or non-JSON output in JSON mode 
 
 from __future__ import annotations
 
+import contextvars
 import json
 import os
 import subprocess
 import time
 from collections.abc import Callable
+from contextlib import contextmanager
 from dataclasses import dataclass
 from typing import Any
 
@@ -80,6 +82,35 @@ class LLMResult:
 
     content: str | dict
     meta: CallMeta
+
+
+# T4.8 cost capture: every agent reaches the model through `complete`/`complete_detailed`
+# (this module's own docstring), so this is the one place a `CallMeta` can be observed for
+# *every* call without threading a store/agent-id through each of the ~10 call sites across
+# `src/agents/*.py`. A caller wraps a unit of work in `cost_context(sink)`; `sink` receives
+# every `CallMeta` produced by a `complete`/`complete_detailed` call made anywhere in that
+# dynamic scope (including nested calls inside a helper this module doesn't know about).
+# `ContextVar` (not a plain module global) so nested/concurrent `cost_context` scopes in
+# different tasks/threads don't clobber each other's sink.
+_cost_sink: contextvars.ContextVar[Callable[[CallMeta], None] | None] = contextvars.ContextVar(
+    "_cost_sink", default=None
+)
+
+
+@contextmanager
+def cost_context(sink: Callable[[CallMeta], None]):
+    """Install `sink` to receive every `CallMeta` from a `complete`/`complete_detailed` call
+    made within this ``with`` block, then restore whatever sink (if any) was active before.
+
+    `sink` must not raise — it runs synchronously right after a successful call, and an
+    exception here would surface as if the LLM call itself had failed. `src.cost.record_cost`
+    (the real T4.8 sink) is itself best-effort for this reason.
+    """
+    token = _cost_sink.set(sink)
+    try:
+        yield
+    finally:
+        _cost_sink.reset(token)
 
 
 DEFAULT_PROVIDER = "claude_cli"
@@ -387,6 +418,11 @@ def complete_detailed(
 
     text, meta = runner(prompt, system, _model_for(resolved_provider), resolved_timeout)
     content: str | dict = _parse_json_object(text) if json_schema is not None else text
+
+    sink = _cost_sink.get()
+    if sink is not None:
+        sink(meta)
+
     return LLMResult(content=content, meta=meta)
 
 
