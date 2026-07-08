@@ -66,8 +66,8 @@ def test_pipeline_diagram_defaults_now_to_the_real_clock(tmp_path: Path) -> None
 
 
 def test_pipeline_diagram_plane_ids_match_the_real_orchestrator_stages() -> None:
-    """Regression: `_PLANES`'s ids are a second, hand-maintained copy of `_real_stages()`'s
+    """Regression: `PLANES`'s ids are a second, hand-maintained copy of `_real_stages()`'s
     own `Stage.name` values (a code-review finding) -- this guards against the two drifting
     apart silently if a real orchestrator stage is ever renamed or added."""
     real_names = {stage.name for stage in orchestrator._real_stages()}
-    assert {plane["id"] for plane in pipeline_diagram._PLANES} == real_names
+    assert {plane["id"] for plane in pipeline_diagram.PLANES} == real_names
