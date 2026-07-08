@@ -24,7 +24,7 @@ from __future__ import annotations
 
 import sys
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .store.base import Store
 
@@ -44,6 +44,23 @@ def week_stamp(when: datetime | None = None) -> str:
     """
     when = when or datetime.now(timezone.utc)
     return when.strftime("%G-W%V")
+
+
+def last_n_weeks(weeks: int, *, now: datetime | None = None) -> list[str]:
+    """The `weeks` ISO week-stamps ending at (and including) `now`'s own week, oldest first —
+    the dense window a chart walks, as opposed to :func:`category_trends`'s own sparse
+    ``{week: count}`` series (only weeks with activity present).
+
+    Lives here, not in a dashboard module, for the same reason :func:`week_stamp` does (see
+    this module's own docstring): a pure, dependency-free ``int -> list[str]`` function every
+    M5 dashboard chart needs (T5.3's own worked example: 12 rolling weeks) belongs at the
+    lowest altitude that can serve every future consumer, not duplicated per caller (a
+    code-review finding: an earlier version of this helper lived as a private function in
+    :mod:`dashboard.trend_charts`, the exact "two independently-maintained copies of the same
+    rule" risk this project already hit once for `collection_stats`/`src.stats.summarize`).
+    """
+    when = now or datetime.now(timezone.utc)
+    return [week_stamp(when - timedelta(weeks=i)) for i in reversed(range(weeks))]
 
 
 def _created_week(item: dict) -> str | None:
