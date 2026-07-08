@@ -23,13 +23,17 @@ can't force one page to re-embed the exact "render everything" cost this todo re
 main page). Response: ``{"prs": [...], "total": N, "offset": O, "limit": L}``.
 
 Known limitations of this thin M1 slice (not fixed here — acceptable for a single-user, local,
-read-only tool; would need addressing before any wider/production use):
-- Every request re-scans the **entire** store (`Store.query()`), re-reads the **entire**
-  prediction log (one `get_state()` per historical prediction), and — since T1.5.5 —
-  re-fetches a `get_state()` per taxonomy tree node for its stored summary — no caching layer
-  sits in front of a request yet (T5.16 bounds the *rendered/transferred* size, not the
-  store-read cost of building one snapshot; a scheduled precomputed-snapshot job, per
-  `dashboard.snapshot`'s own docstring, is what would fix the read cost too, not done here).
+read-only tool; would need addressing before any wider/production use — see
+:mod:`dashboard.snapshot`'s own docstring for the full detail behind these two):
+- Every request re-scans the **entire** store at least twice (`build_snapshot`'s own two
+  independent full scans), and every ``/api/node-prs`` request (including every "show N more"
+  click) triggers **another** full, unfiltered scan of its own (`items_at_path`) — pagination
+  here bounds response size and per-row transform work, not the number of store reads. No
+  caching layer sits in front of a request yet; a scheduled precomputed-snapshot job is what
+  would fix the read cost, not done here.
+- Pagination is offset-based against a live-re-sorted collection — an item's `updated_at`
+  changing between an initial page load and a later "show more" click for the same node can
+  shift the sort order enough to duplicate or skip a row on the next page.
 - The server is single-threaded (:class:`~http.server.HTTPServer`, not
   ``ThreadingHTTPServer``), so one slow request (a large KB, a slow Firestore round trip)
   blocks every other concurrent client until it completes.
@@ -67,6 +71,7 @@ def _parse_int(values: list[str] | None, default: int) -> int:
 
 
 def _respond(handler: BaseHTTPRequestHandler, status: int, body: bytes, content_type: str) -> None:
+    """Write a complete HTTP response (status + headers + body) to `handler`'s socket."""
     handler.send_response(status)
     handler.send_header("Content-Type", content_type)
     handler.send_header("Content-Length", str(len(body)))
@@ -75,6 +80,7 @@ def _respond(handler: BaseHTTPRequestHandler, status: int, body: bytes, content_
 
 
 def _serve_page(handler: BaseHTTPRequestHandler, store: Store) -> None:
+    """``GET /`` (and anything else not matched by another route) — the full dashboard page."""
     try:
         page = render_page(store).encode("utf-8")
     except Exception:  # noqa: BLE001 — any render/store failure must still get a response
@@ -90,14 +96,23 @@ def _serve_page(handler: BaseHTTPRequestHandler, store: Store) -> None:
 
 
 def _serve_node_prs(handler: BaseHTTPRequestHandler, store: Store) -> None:
-    """``GET /api/node-prs`` — see this module's own docstring."""
+    """``GET /api/node-prs`` — see this module's own docstring.
+
+    The whole response (the read, the JSON encode, and the write) is one try/except, matching
+    :func:`_serve_page`'s own "any failure still gets a response" invariant — a first version
+    of this only guarded the `items_at_path` call, so a `json.dumps` failure on an unexpected
+    item shape (a code-review finding) would have dropped the connection instead.
+    """
     query = parse_qs(urlsplit(handler.path).query)
     raw_path = (query.get("path") or [""])[0]
     path = tuple(level for level in raw_path.split(LEVEL_SEPARATOR) if level)
     offset = max(_parse_int(query.get("offset"), 0), 0)
     limit = min(max(_parse_int(query.get("limit"), _DEFAULT_PAGE_LIMIT), 1), _MAX_PAGE_LIMIT)
     try:
-        items = items_at_path(store, path)
+        page, total = items_at_path(store, path, offset=offset, limit=limit)
+        body = json.dumps({"prs": page, "total": total, "offset": offset, "limit": limit}).encode(
+            "utf-8"
+        )
     except Exception:  # noqa: BLE001 — a corrupt KB record must still get a response
         traceback.print_exc()
         _respond(
@@ -107,14 +122,6 @@ def _serve_node_prs(handler: BaseHTTPRequestHandler, store: Store) -> None:
             "text/plain; charset=utf-8",
         )
         return
-    body = json.dumps(
-        {
-            "prs": items[offset : offset + limit],
-            "total": len(items),
-            "offset": offset,
-            "limit": limit,
-        }
-    ).encode("utf-8")
     _respond(handler, 200, body, "application/json; charset=utf-8")
 
 

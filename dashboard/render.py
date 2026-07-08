@@ -125,8 +125,13 @@ def _more_prs_html(node: dict) -> str:
         return ""
     remaining = node["prs_total"] - len(node["prs"])
     path = escape(LEVEL_SEPARATOR.join(node["path"]))
+    # `data-limit` (not a hardcoded page size in the JS fetch) reuses the exact page size
+    # already implied by a truncated node's own capped `prs` length -- so a future change to
+    # `DEFAULT_MAX_PRS_PER_NODE` only needs updating in one place, not also in `_TREE_SCRIPT`.
+    page_size = len(node["prs"])
     return (
-        f'<button class="btn more" data-path="{path}" data-offset="{len(node["prs"])}">'
+        f'<button class="btn more" data-path="{path}" data-offset="{page_size}" '
+        f'data-limit="{page_size}">'
         f"Show {remaining} more"
         "</button>"
     )
@@ -246,10 +251,15 @@ def _forecasts_section_html(predictions: list[dict]) -> str:
 # docs/design/report-tree-mockup.html (same element shapes: #tree, .pr, .btn[data-all], #q).
 # T5.16 adds one more control this script drives: `.btn.more` (see `_more_prs_html`) fetches
 # the next page of a truncated node's own rows from `/api/node-prs` instead of ever having
-# them embedded in the page — `_prRowHtml` mirrors `_pr_row_html`'s template client-side since
-# the endpoint returns JSON rows (`src.agents.reporter_v1.pr_entry`'s shape), not pre-rendered
-# HTML, matching the same "read layer stays plain data, rendering is a client concern" split
-# T5.1 aims for.
+# them embedded in the page — `prRowHtml`/`escHtml`/`safeHref` mirror `_pr_row_html`/`escape`/
+# `_safe_href`'s templates client-side since the endpoint returns JSON rows
+# (`src.agents.reporter_v1.pr_entry`'s shape), not pre-rendered HTML, matching the same "read
+# layer stays plain data, rendering is a client concern" split T5.1 aims for. Known limitation,
+# not fixed here (code-review finding): this is a real, disclosed duplication, not just an
+# inherent language-boundary cost — the endpoint *could* return pre-rendered HTML fragments
+# instead of JSON to avoid it, at the cost of coupling the read layer to HTML rendering. If
+# `_pr_row_html`/`_state_chip`'s chip-class rules ever change, this JS copy must be updated by
+# hand or paginated rows will render different chips/labels than the initially-embedded ones.
 _TREE_SCRIPT = """
 document.querySelectorAll('.btn[data-all]').forEach(function(b){
   b.addEventListener('click',function(){
@@ -305,8 +315,8 @@ function prRowHtml(pr){
 }
 document.querySelectorAll('.btn.more').forEach(function(b){
   b.addEventListener('click', function(){
-    var path=b.dataset.path, offset=parseInt(b.dataset.offset, 10);
-    var url='/api/node-prs?path='+encodeURIComponent(path)+'&offset='+offset+'&limit=50';
+    var path=b.dataset.path, offset=parseInt(b.dataset.offset, 10), limit=b.dataset.limit;
+    var url='/api/node-prs?path='+encodeURIComponent(path)+'&offset='+offset+'&limit='+limit;
     fetch(url).then(function(r){ return r.json(); }).then(function(data){
       var html=data.prs.map(prRowHtml).join('');
       b.insertAdjacentHTML('beforebegin', html);

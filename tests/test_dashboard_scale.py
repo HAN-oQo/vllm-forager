@@ -184,9 +184,10 @@ def test_node_prs_endpoint_serves_the_other_bucket_with_no_path_param(tmp_path: 
 def test_items_at_path_returns_the_pr_entry_shape(tmp_path: Path) -> None:
     store = _store_with_n_items(tmp_path, n=1)
 
-    items = snap.items_at_path(store, ("cat",))
+    page, total = snap.items_at_path(store, ("cat",))
 
-    assert items == [
+    assert total == 1
+    assert page == [
         {
             "repo": "o/r",
             "number": 0,
@@ -196,6 +197,26 @@ def test_items_at_path_returns_the_pr_entry_shape(tmp_path: Path) -> None:
             "type": "issue",
         }
     ]
+
+
+def test_items_at_path_slices_before_mapping_to_pr_entry(tmp_path: Path) -> None:
+    """A page request only transforms the rows actually returned, not every match -- offset
+    and limit are applied before `pr_entry`, not after (a code-review efficiency finding)."""
+    store = _store_with_n_items(tmp_path, n=10)
+
+    page, total = snap.items_at_path(store, ("cat",), offset=8, limit=5)
+
+    assert total == 10
+    assert [pr["number"] for pr in page] == [8, 9]  # only 2 remain past offset 8
+
+
+def test_items_at_path_limit_none_returns_every_remaining_item(tmp_path: Path) -> None:
+    store = _store_with_n_items(tmp_path, n=5)
+
+    page, total = snap.items_at_path(store, ("cat",), offset=2)
+
+    assert total == 5
+    assert [pr["number"] for pr in page] == [2, 3, 4]
 
 
 # --------------------------------------------------------------------- precomputed snapshot

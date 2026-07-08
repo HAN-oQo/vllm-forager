@@ -161,9 +161,10 @@ def repo_number_label(item: dict) -> str:
     """``repo#number`` for `item`, ``?`` for a missing or present-but-``None`` field.
 
     Shared by :func:`_cite` here and by ``dashboard.render``'s PR/issue rows, since a
-    caller-built dict (e.g. reporter_v1's ``_pr_entry``) may set ``repo``/``number`` to `None`
-    rather than omitting them — ``.get(key, "?")`` alone wouldn't catch that, so both
-    "missing" and "present but None" must be checked explicitly here, once, for every caller.
+    caller-built dict (e.g. reporter_v1's :func:`~src.agents.reporter_v1.pr_entry`) may set
+    ``repo``/``number`` to `None` rather than omitting them — ``.get(key, "?")`` alone wouldn't
+    catch that, so both "missing" and "present but None" must be checked explicitly here, once,
+    for every caller.
     """
     repo = item.get("repo") or "?"
     number = item.get("number")

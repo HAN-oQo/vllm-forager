@@ -238,6 +238,19 @@ def pr_entry(item: dict) -> dict:
     }
 
 
+def is_unclassified_or_other(path: object) -> bool:
+    """True if `path` (an item's raw ``"path"`` field) belongs in the flat ``Other`` bucket —
+    missing/not-yet-classified, or explicitly classified :data:`~src.agents.reporter.OTHER`.
+
+    Public (not inlined) since T5.16: :func:`build_tree` and
+    :func:`~dashboard.snapshot.items_at_path` both need the *identical* rule (an item the tree
+    counts under ``Other`` must be the same population a paginated ``Other`` page returns) —
+    two independent copies previously risked silently drifting apart if one were ever updated
+    without the other.
+    """
+    return not isinstance(path, list) or not path or path == [OTHER]
+
+
 def build_tree(
     items: list[dict], summary_lookup: Callable[[CategoryPath], str | None] = lambda path: None
 ) -> list[TreeNode]:
@@ -268,9 +281,10 @@ def build_tree(
 
     for item in items:
         path = item.get("path")
-        if not isinstance(path, list) or not path or path == [OTHER]:
+        if is_unclassified_or_other(path):
             other_items.append(item)
             continue
+        assert isinstance(path, list)  # is_unclassified_or_other's own contract guarantees this
         path_t = tuple(path)
         exact.setdefault(path_t, []).append(item)
         for depth in range(len(path_t)):

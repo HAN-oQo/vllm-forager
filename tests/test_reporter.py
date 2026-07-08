@@ -88,7 +88,7 @@ def test_repo_number_label_present_values():
 
 
 def test_repo_number_label_treats_none_same_as_missing():
-    # a caller-built dict (e.g. reporter_v1's `_pr_entry`) may set these to None rather than
+    # a caller-built dict (e.g. reporter_v1's `pr_entry`) may set these to None rather than
     # omitting them — both must render the same "?" placeholder.
     assert reporter.repo_number_label({"repo": None, "number": None}) == "?#?"
     assert reporter.repo_number_label({}) == "?#?"
