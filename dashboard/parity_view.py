@@ -42,20 +42,24 @@ def parity_matrix(store: Store) -> dict:
     result = api.parity(store)
     cells_by_key = {(cell["engine"], cell["capability"]): cell for cell in result["cells"]}
     gap_targets = {(gap["target_engine"], gap["capability"]) for gap in result["gaps"]}
+    _absent_cell = {"present": False, "evidence": None}
 
-    engines = sorted({cell["engine"] for cell in result["cells"]} | {t for t, _ in gap_targets})
+    engines = sorted(
+        {cell["engine"] for cell in result["cells"]}
+        | {gap["target_engine"] for gap in result["gaps"]}
+    )
     capabilities = sorted({cell["capability"] for cell in result["cells"]})
 
     cells = []
     for engine in engines:
         for capability in capabilities:
-            cell = cells_by_key.get((engine, capability))
+            cell = cells_by_key.get((engine, capability), _absent_cell)
             cells.append(
                 {
                     "engine": engine,
                     "capability": capability,
-                    "present": cell["present"] if cell else False,
-                    "evidence": cell["evidence"] if cell else None,
+                    "present": cell["present"],
+                    "evidence": cell["evidence"],
                     "is_gap": (engine, capability) in gap_targets,
                 }
             )
