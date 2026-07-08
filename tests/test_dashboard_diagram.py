@@ -65,6 +65,22 @@ def test_pipeline_diagram_defaults_now_to_the_real_clock(tmp_path: Path) -> None
     assert {n["id"] for n in diagram["nodes"]} == {"kb", "collect", "intel", "contribution"}
 
 
+def test_pipeline_diagram_accepts_a_naive_now(tmp_path: Path) -> None:
+    """Regression: an earlier version didn't normalize a naive `now` to UTC (unlike
+    src.orchestrator.run_tick's own identical handling of this same common idiom), crashing
+    with 'can't subtract offset-naive and offset-aware datetimes' (found while reviewing
+    dashboard.health, T5.8, which shares this same gap)."""
+    store = JsonlStore(tmp_path)
+    store.record_run({"stage": "collect", "status": "ok", "recorded_at": "2026-01-08T11:59:00Z"})
+    naive_now = datetime(2026, 1, 8, 12, 0, 0)  # no tzinfo
+
+    diagram = pipeline_diagram.pipeline_diagram(store, now=naive_now, stale_after_s=600)
+
+    assert {n["id"]: n["status"] for n in diagram["nodes"] if n["id"] == "collect"} == {
+        "collect": "ok"
+    }
+
+
 def test_pipeline_diagram_plane_ids_match_the_real_orchestrator_stages() -> None:
     """Regression: `PLANES`'s ids are a second, hand-maintained copy of `_real_stages()`'s
     own `Stage.name` values (a code-review finding) -- this guards against the two drifting

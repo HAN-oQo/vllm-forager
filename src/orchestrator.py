@@ -173,13 +173,19 @@ def _last_run_key(stage_name: str) -> str:
     return f"{_LAST_RUN_KEY_PREFIX}{stage_name}"
 
 
-def _parse_last_run(raw: str) -> datetime | None:
+def parse_last_run(raw: str) -> datetime | None:
     """Parse a stored last-run cursor, or `None` if it's not in the expected format.
 
     A malformed cursor (a hand-edited state file, a future format change, a partial write) is
     treated as "no cursor" by :func:`_is_due` rather than raised — the same recoverable-corrupt-
     timestamp convention as :func:`~src.pr_followup._parse_ts`, so one bad state value can't
     crash an otherwise-healthy tick.
+
+    Public (not `_parse_last_run`) since this is also the one place a stored run-event
+    timestamp gets parsed back for :mod:`src.liveness`/:mod:`dashboard.health` — a code-review
+    finding that a private helper had quietly grown two external consumers reaching past its
+    leading underscore, the same inconsistency the `_PLANES` -> `PLANES` promotion in
+    :mod:`dashboard.pipeline_diagram` (T5.8) had just fixed one function away.
     """
     try:
         return datetime.strptime(raw, _TS_FORMAT).replace(tzinfo=timezone.utc)
@@ -261,7 +267,7 @@ def _is_due(store: Store, stage: Stage, now: datetime) -> tuple[bool, str]:
         return (True, "triggered") if stage.trigger(store) else (False, "no trigger")
 
     last = store.get_state(_last_run_key(stage.name))
-    parsed = _parse_last_run(last) if last is not None else None
+    parsed = parse_last_run(last) if last is not None else None
     if parsed is None:
         return True, "never run"
     elapsed_hours = (now - parsed).total_seconds() / 3600
