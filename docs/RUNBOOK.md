@@ -192,3 +192,49 @@ merge like any PR. Network / auth / rate-limit failures change nothing — just 
 > Run the scheduler from a **separate clone/worktree** than an active `/dev-loop` session so triage's git
 > operations can't collide with in-progress dev work. `claude -p` needs `claude`+`gh` authenticated for the cron
 > user; otherwise triage degrades to alert-only (the scheduled run + health still work).
+
+## Running the M4 orchestrator (product agent runtime — T4.2)
+
+The **product agent runtime** (distinct from Developer Claude above — see the "Two Claudes on `ce-master`" note
+under Topology) is `python -m src.orchestrator --once`: one tick that pins the active `policy@v` and routes to
+whichever of collect/intel/contribution is due or triggered (`src/orchestrator.py`, T4.1). It is **not** a live
+Claude session — it's a plain Python process, scheduled like the collector's cron fallback above.
+
+**tmux (observe/attach, matches the topology diagram's `forager` session):**
+
+```bash
+# on ce-master
+tmux new -s forager
+cd vllm-forager && source .venv/bin/activate
+watch -n 60 ./scripts/orchestrator.sh   # or run it directly for a one-off tick
+```
+
+Detach with `Ctrl-b d`; re-attach any time with `tmux attach -t forager` to see live output. Killing/restarting
+the session is safe — the orchestrator has no long-lived state outside the KB (`orchestrator:last_run:*`), so a
+restart just resumes from whatever's due next tick.
+
+**cron (simple, no sudo — the actual "always-on" mechanism):** `scripts/orchestrator.sh` runs one tick, streams
+progress to the terminal + `data/logs/orchestrator-<ts>.log` (mirrors `scripts/collect.sh`), and pings
+`scripts/notify.sh` on a non-zero exit.
+
+```bash
+crontab -e
+# hourly -- cheaper than computing each stage's own cadence in cron; run_tick itself decides
+# per-stage whether collect (daily)/intel (weekly)/contribution (triggered) actually run this
+# tick, so firing more often than any one stage's cadence just means more no-op ticks, not
+# extra work.
+7 * * * *  cd ~/vllm-forager && scripts/orchestrator.sh >> data/logs/orchestrator-cron.log 2>&1
+```
+
+> **Prerequisite:** `python -m src.orchestrator --once` requires an active policy
+> (`src.policy.create_policy()` already called against this KB) — it exits `1` with a clear
+> message on stderr otherwise, rather than crashing (T4.1's PR #95 review). Bootstrap one first
+> if this is a brand-new KB.
+
+**Restart after a crash/reboot:** nothing to restore — re-run `scripts/orchestrator.sh` (manually, via cron, or
+by re-attaching to `tmux new -s forager`); the KB's `orchestrator:last_run:*` cursors are the only state, and a
+gap in ticks just means the next one finds more stages due/triggered, not corrupted state.
+
+**Known gaps, not yet built (later M4 todos):** no lock against two ticks overlapping (T4.3), no per-stage run
+events/heartbeats in the KB yet (T4.4/T4.5) — so today "is it alive?" means checking whether cron/tmux is still
+running and reading the log, not a dashboard health panel.

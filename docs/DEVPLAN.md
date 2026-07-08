@@ -518,10 +518,26 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **e.g.:** a tick pins `policy@v4`, runs collect (daily), classify+report (weekly), skips contribution unless a candidate triggers it.
   - **Test:** `tests/test_orchestrator.py` — fake clock + fake agents → correct routing per cadence; gate respected.
   - **Note:** `run_tick(store, stages, now=...)` pins `policy.get_active(store)` once per tick, then routes each `Stage` by its own kind — a **cadence** stage (`interval_hours` set) runs when its own `orchestrator:last_run:{name}` cursor shows enough time elapsed (or it's never run), a **triggered** stage (`trigger` callable set) runs only when that callable returns `True` this tick, never on a schedule. `Stage.__post_init__` raises `OrchestratorError` if neither is set, so a misconfigured stage fails loudly instead of silently never running. Real agent entry points are never imported/called inside `run_tick` itself — `_real_stages()` wraps `collector.main`/`analyze.main`+`forecast.main`+`report.main`/`candidates.main` as injectable `Stage`s, so `tests/test_orchestrator.py` exercises routing with fake stages and a fixed clock, no network/LLM call anywhere in the offline suite. `python -m src.orchestrator --once` has no `--data-dir` override (unlike most CLIs here) — `collector.py` itself doesn't accept one, so an override would let the orchestrator's own routing decisions disagree with which KB the real stages actually touch; both always resolve the same ambient `get_store()` backend. The contribution stage's real trigger (`_has_open_rocm_or_good_first_issue`) is a cheap, no-LLM proxy check (any open issue `scout._candidate_source` would match) rather than calling `scout.discover_from_store` itself just to decide whether to call it. Demo (real `run_tick`/`Stage`/`JsonlStore`, not mocked, against a scratch KB — the real `--once` CLI isn't run here since it would hit live GitHub across all 16 `config.REPOS` repos plus a full unclassified-item LLM pass): a fresh KB's first tick runs all three stages; a tick 1h later skips `collect`/`intel` (not due) but still runs `contribution` (still triggered by a seeded ROCm-labeled open issue); a tick 8 days later runs all three again — matching this todo's own `collect (daily), classify+report (weekly), skips contribution unless a candidate triggers it` example exactly. Known limitations, deferred to later M4 todos: no run events (T4.4) or heartbeats (T4.5) persisted yet, no overlap locking (T4.3), engineer/gate aren't wired into the contribution stage yet (Scout only).
-- [ ] **T4.2 Scheduler + tmux runbook** — launch on `ce-master` under tmux (cron/systemd); runbook in `docs/`.
+- [x] **T4.2 Scheduler + tmux runbook** — launch on `ce-master` under tmux (cron/systemd); runbook in `docs/`.
   - **Why:** "always-on" is the essence of the project — it must survive disconnects/restarts, not depend on a laptop staying open.
   - **e.g.:** cron kicks the orchestrator daily in a tmux session on ce-master; `docs/RUNBOOK.md` says how to attach/restart.
   - **Test:** `tests/test_schedule_dryrun.py` — a dry-run tick runs end-to-end without error (agents stubbed).
+  - **Note:** `scripts/orchestrator.sh` runs one `python -m src.orchestrator --once` tick, streaming progress to
+    the terminal + `data/logs/orchestrator-<ts>.log` (mirrors `scripts/collect.sh`'s shape) and pinging
+    `scripts/notify.sh` on a non-zero exit — no `set -e`, so a failure is logged/notified before the script exits.
+    `docs/RUNBOOK.md`'s new "Running the M4 orchestrator" section documents both launch paths: a `tmux new -s
+    forager` session (matches the topology diagram's already-named `forager` session) for observing/attaching, and
+    an hourly cron entry as the actual always-on mechanism — hourly rather than matching any one stage's own
+    cadence, since `run_tick` itself already decides per-stage whether collect (daily)/intel (weekly)/contribution
+    (triggered) actually run this tick, so extra cron firings just become cheap no-op ticks. `tests/
+    test_schedule_dryrun.py` exercises `orchestrator.main(["--once"])` itself end-to-end (not just `run_tick` in
+    isolation, already covered by `tests/test_orchestrator.py`) — argument parsing, `get_store()` resolution
+    (monkeypatched to a scratch `JsonlStore`), and the printed summary — with every real agent CLI (`collector.
+    main`, `analyze.main`, `forecast.main`, `report.main`, `candidates.main`) stubbed out, confirming a dry-run
+    tick both runs all-due stages on a fresh KB and skips not-yet-due cadence stages on an immediate second tick,
+    with no network/LLM call anywhere in the test. Known gaps carried over from T4.1 and called out in the
+    runbook: no overlap locking (T4.3) or run events/heartbeats (T4.4/T4.5) yet, so "is it alive?" today means
+    checking the tmux session/cron log, not a dashboard health panel.
 - [ ] **T4.3 Locking / idempotency** — overlapping runs don't double-write.
   - **Why:** a scheduled run + a manual run (or a slow run overlapping the next tick) must not corrupt the KB with duplicates.
   - **e.g.:** a second run starts while the first is mid-flight → it backs off; no item written twice.
