@@ -114,6 +114,20 @@ def _priced_cost_usd(meta: llm.CallMeta) -> float:
     return meta.prompt_tokens / 1e6 * price_in + meta.completion_tokens / 1e6 * price_out
 
 
+def write_cost_record(store: Store, record: dict) -> None:
+    """Append `record` (already shaped for the cost run-event stream) via ``store.record_run``,
+    best-effort — a KB write hiccup must never crash a caller that already has its (billed)
+    cost data. Shared by :func:`record_cost` (T4.8, one ``llm`` call) and
+    :mod:`src.cost_ccusage` (T4.9, one ``ccusage`` session/model row) — both build their own
+    ``record`` dict from a different source, then hand it to this one write primitive.
+    """
+    try:
+        store.record_run(record)
+    except Exception as exc:
+        agent = record.get("agent")
+        print(f"cost: failed to record cost for agent={agent!r}: {exc}", file=sys.stderr)
+
+
 def record_cost(
     store: Store,
     *,
@@ -125,10 +139,11 @@ def record_cost(
     """Persist one cost record for a completed ``llm`` call, best-effort — a KB write hiccup
     must never turn into a crash for the agent that already got its (billed) LLM reply.
 
-    The whole body is guarded, not just the ``store.record_run`` call: ``llm.cost_context``'s
-    own contract is that ``sink`` (built from this function) must never raise — a bug in
-    ``_priced_cost_usd`` or the record's construction must degrade the same way a KB-write
-    failure does, not propagate back into ``llm.py`` and fail an otherwise-successful call.
+    The whole body is guarded, not just :func:`write_cost_record`'s own ``store.record_run``
+    call: ``llm.cost_context``'s contract is that ``sink`` (built from this function) must
+    never raise — a bug in ``_priced_cost_usd`` or the record's construction must degrade the
+    same way a KB-write failure does, not propagate back into ``llm.py`` and fail an
+    otherwise-successful call.
     """
     try:
         record = {
@@ -144,9 +159,10 @@ def record_cost(
             "cost_usd": _priced_cost_usd(meta),
             "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
         }
-        store.record_run(record)
     except Exception as exc:
         print(f"cost: failed to record cost for agent={agent!r}: {exc}", file=sys.stderr)
+        return
+    write_cost_record(store, record)
 
 
 def agent_context(store: Store, *, agent: str, loop: str, run_id: str):
