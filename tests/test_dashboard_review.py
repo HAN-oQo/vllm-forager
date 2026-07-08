@@ -155,3 +155,66 @@ def test_review_decision_never_submits_even_if_a_prior_draft_exists(tmp_path: Pa
 def test_review_decision_returns_none_when_not_gate_ready(tmp_path: Path) -> None:
     store = JsonlStore(tmp_path)
     assert review.review_decision(store, "o/r", 1, approve=True) is None
+
+
+def test_review_decision_uses_an_existing_composed_narrative(tmp_path: Path) -> None:
+    """Regression: an earlier version always fell back to the raw bundle.format() dump, even
+    when a maintainer-grade T3.9 narrative (passing T3.10 quality) already existed for the
+    exact verify attempt being approved."""
+    store = _store_ready_for_gate(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_author",
+            "title": "[Bugfix] composed title",
+            "body": "composed maintainer-grade body",
+            "verify_recorded_at": "2025-12-31T00:00:00Z",
+            "recorded_at": "2026-01-02T00:00:00Z",
+        }
+    )
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "pr_quality",
+            "votes": [{"acceptable": True, "reason": "ok"}],
+            "approve_count": 1,
+            "total_votes": 1,
+            "passes": True,
+            "pr_author_recorded_at": "2026-01-02T00:00:00Z",
+            "recorded_at": "2026-01-03T00:00:00Z",
+        }
+    )
+
+    result = review.review_decision(store, "o/r", 1, approve=True)
+
+    assert result is not None
+    assert result["quality_passed"] is True
+    draft_content = Path(result["draft_path"]).read_text()
+    assert draft_content == "composed maintainer-grade body"
+
+
+def test_review_decision_falls_back_to_the_raw_bundle_without_a_narrative(tmp_path: Path) -> None:
+    store = _store_ready_for_gate(tmp_path)
+
+    result = review.review_decision(store, "o/r", 1, approve=True)
+
+    assert result is not None
+    assert result["quality_passed"] is None
+    draft_content = Path(result["draft_path"]).read_text()
+    assert "vLLM crashes on gfx90a with fp8" in draft_content  # bundle.format()'s own rendering
+
+
+def test_review_decision_honors_a_custom_pr_drafts_dir(tmp_path: Path) -> None:
+    """Regression: an earlier version never threaded pr_drafts_dir through, so every draft
+    landed under gate's own module-level default regardless of the caller's own data dir --
+    the exact bug class gate.py's own module docstring says already bit the CLI once."""
+    store = _store_ready_for_gate(tmp_path)
+    custom_dir = tmp_path / "custom_drafts"
+
+    result = review.review_decision(store, "o/r", 1, approve=True, pr_drafts_dir=custom_dir)
+
+    assert result is not None
+    assert result["draft_path"].startswith(str(custom_dir))
+    assert Path(result["draft_path"]).exists()
