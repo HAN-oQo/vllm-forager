@@ -206,25 +206,32 @@ Claude session — it's a plain Python process, scheduled like the collector's c
 # on ce-master
 tmux new -s forager
 cd vllm-forager && source .venv/bin/activate
-watch -n 60 ./scripts/orchestrator.sh   # or run it directly for a one-off tick
+./scripts/orchestrator.sh   # one tick, streamed live; cron (below) is what makes it recurring
 ```
 
-Detach with `Ctrl-b d`; re-attach any time with `tmux attach -t forager` to see live output. Killing/restarting
-the session is safe — the orchestrator has no long-lived state outside the KB (`orchestrator:last_run:*`), so a
-restart just resumes from whatever's due next tick.
+Detach with `Ctrl-b d`; re-attach any time with `tmux attach -t forager` to check on it or `tail -f
+data/logs/orchestrator-*.log` for the most recent tick. Don't loop `scripts/orchestrator.sh` on a short interval
+(e.g. `watch -n 60`) alongside the cron entry below — see the overlap note under Known gaps.
 
 **cron (simple, no sudo — the actual "always-on" mechanism):** `scripts/orchestrator.sh` runs one tick, streams
-progress to the terminal + `data/logs/orchestrator-<ts>.log` (mirrors `scripts/collect.sh`), and pings
-`scripts/notify.sh` on a non-zero exit.
+progress to the terminal + `data/logs/orchestrator-<ts>.log`, and pings `scripts/notify.sh` on a non-zero exit
+(does **not** yet mirror `scripts/collect.sh`'s `data/last_run.json` health record, start/success pings, or
+`triage.sh` self-heal call — see Known gaps).
 
 ```bash
 crontab -e
-# hourly -- cheaper than computing each stage's own cadence in cron; run_tick itself decides
-# per-stage whether collect (daily)/intel (weekly)/contribution (triggered) actually run this
-# tick, so firing more often than any one stage's cadence just means more no-op ticks, not
-# extra work.
-7 * * * *  cd ~/vllm-forager && scripts/orchestrator.sh >> data/logs/orchestrator-cron.log 2>&1
+# daily at 04:37 UTC (deliberately off the hour, after collect's 04:07 slot) -- matching
+# collect (config.COLLECT_INTERVAL_HOURS=24) and this todo's own DEVPLAN example. Firing more
+# often does NOT reduce to "cheap no-op ticks" for every stage: the contribution stage has no
+# cadence cursor at all (src/orchestrator.py's Stage/_is_due) -- it reruns its LLM-scoring pass
+# every tick it's triggered on, which for 16 actively-developed repos is close to always. A
+# tighter cron interval multiplies real LLM/API cost, not just wasted CPU.
+37 4 * * *  cd ~/vllm-forager && scripts/orchestrator.sh >> data/logs/orchestrator-cron.log 2>&1
 ```
+
+> **If you're adopting the orchestrator's own `collect` stage, drop the standalone `scripts/collect.sh` cron
+> entry** (above, in "Scheduling the collector") instead of running both — they'd fetch on two independent,
+> uncoordinated schedules/cursors, doubling GitHub API load with no error from either side.
 
 > **Prerequisite:** `python -m src.orchestrator --once` requires an active policy
 > (`src.policy.create_policy()` already called against this KB) — it exits `1` with a clear
@@ -235,6 +242,16 @@ crontab -e
 by re-attaching to `tmux new -s forager`); the KB's `orchestrator:last_run:*` cursors are the only state, and a
 gap in ticks just means the next one finds more stages due/triggered, not corrupted state.
 
-**Known gaps, not yet built (later M4 todos):** no lock against two ticks overlapping (T4.3), no per-stage run
-events/heartbeats in the KB yet (T4.4/T4.5) — so today "is it alive?" means checking whether cron/tmux is still
+**Overlap:** `scripts/orchestrator.sh` takes a non-blocking `flock` on `data/orchestrator.lock` before running a
+tick — a second invocation while one is already in flight (e.g. a slow-running intel stage still going when cron
+fires again, or a manual run colliding with cron) backs off immediately (exit 0, nothing run) instead of racing
+`JsonlStore`'s non-atomic state-file read/modify/write. This is a process-level guard only, not T4.3's KB-level
+idempotency — still avoid stacking a tight manual loop (e.g. `watch -n 60`) on top of the cron entry, since a
+constant stream of concurrent attempts is more backoff noise than the lock is meant to absorb.
+
+**Known gaps, not yet built (later M4 todos):** no KB-level idempotency for overlapping/interrupted writes (T4.3
+— `scripts/orchestrator.sh`'s `flock` only prevents two *ticks* from running at once, it doesn't make a
+half-finished tick's writes safe to resume), no per-stage run events/heartbeats in the KB yet (T4.4/T4.5), and no
+local health-record file analogous to `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the collector
+specifically) — so today "is it alive?" means checking whether cron/tmux is still
 running and reading the log, not a dashboard health panel.

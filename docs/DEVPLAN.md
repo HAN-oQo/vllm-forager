@@ -523,21 +523,32 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **e.g.:** cron kicks the orchestrator daily in a tmux session on ce-master; `docs/RUNBOOK.md` says how to attach/restart.
   - **Test:** `tests/test_schedule_dryrun.py` — a dry-run tick runs end-to-end without error (agents stubbed).
   - **Note:** `scripts/orchestrator.sh` runs one `python -m src.orchestrator --once` tick, streaming progress to
-    the terminal + `data/logs/orchestrator-<ts>.log` (mirrors `scripts/collect.sh`'s shape) and pinging
-    `scripts/notify.sh` on a non-zero exit — no `set -e`, so a failure is logged/notified before the script exits.
-    `docs/RUNBOOK.md`'s new "Running the M4 orchestrator" section documents both launch paths: a `tmux new -s
-    forager` session (matches the topology diagram's already-named `forager` session) for observing/attaching, and
-    an hourly cron entry as the actual always-on mechanism — hourly rather than matching any one stage's own
-    cadence, since `run_tick` itself already decides per-stage whether collect (daily)/intel (weekly)/contribution
-    (triggered) actually run this tick, so extra cron firings just become cheap no-op ticks. `tests/
-    test_schedule_dryrun.py` exercises `orchestrator.main(["--once"])` itself end-to-end (not just `run_tick` in
-    isolation, already covered by `tests/test_orchestrator.py`) — argument parsing, `get_store()` resolution
-    (monkeypatched to a scratch `JsonlStore`), and the printed summary — with every real agent CLI (`collector.
-    main`, `analyze.main`, `forecast.main`, `report.main`, `candidates.main`) stubbed out, confirming a dry-run
-    tick both runs all-due stages on a fresh KB and skips not-yet-due cadence stages on an immediate second tick,
-    with no network/LLM call anywhere in the test. Known gaps carried over from T4.1 and called out in the
-    runbook: no overlap locking (T4.3) or run events/heartbeats (T4.4/T4.5) yet, so "is it alive?" today means
-    checking the tmux session/cron log, not a dashboard health panel.
+    the terminal + `data/logs/orchestrator-<ts>.log` and pinging `scripts/notify.sh` on a non-zero exit (a generic
+    message + log path, not raw log content, since that's forwarded to a third-party endpoint) — no `set -e`, so a
+    failure is logged/notified before the script exits. It also takes a non-blocking `flock` on
+    `data/orchestrator.lock` before running: `run_tick` has no per-stage exception isolation and the contribution
+    stage has no cadence cursor at all (T4.1's own disclosed limitations), so two overlapping ticks racing
+    `JsonlStore`'s non-atomic state-file read/modify/write was a real, not hypothetical, risk once a schedule
+    exists at all — a second invocation now backs off immediately (exit 0) instead of racing. `docs/RUNBOOK.md`'s
+    new "Running the M4 orchestrator" section documents both launch paths: a `tmux new -s forager` session
+    (matches the topology diagram's already-named `forager` session) for observing/attaching (a one-off tick, not
+    a tight `watch` loop — that would fight the flock guard for no benefit), and a **daily** cron entry — daily,
+    matching this todo's own worked example and `config.COLLECT_INTERVAL_HOURS`, not hourly: the contribution
+    stage's lack of a cadence cursor means a tighter interval reruns its LLM-scoring pass every tick it's
+    triggered on (close to always, for 16 actively-developed repos), multiplying real LLM/API cost rather than
+    producing "cheap no-op ticks." The runbook also flags that adopting the orchestrator's own `collect` stage
+    means dropping the standalone `scripts/collect.sh` cron entry, not running both (two independent, uncoordinated
+    collection cursors). `tests/test_schedule_dryrun.py` exercises `orchestrator.main(["--once"])` itself
+    end-to-end (not just `run_tick` in isolation, already covered by `tests/test_orchestrator.py`) — argument
+    parsing, `get_store()` resolution (monkeypatched to a scratch `JsonlStore`), and the printed summary — with
+    every real agent CLI (`collector.main`, `analyze.main`, `forecast.main`, `report.main`, `candidates.main`)
+    stubbed out, confirming a dry-run tick both runs all-due stages on a fresh KB and skips not-yet-due cadence
+    stages on an immediate second tick, with no network/LLM call anywhere in the test. Known gaps carried over
+    from T4.1 and called out in the runbook: the `flock` guard is process-level only, not T4.3's KB-level
+    idempotency for a half-finished tick's writes; no per-stage run events/heartbeats in the KB yet (T4.4/T4.5);
+    and no local health-record file analogous to `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the
+    collector specifically) — so "is it alive?" today means checking the tmux session/cron log, not a dashboard
+    health panel.
 - [ ] **T4.3 Locking / idempotency** — overlapping runs don't double-write.
   - **Why:** a scheduled run + a manual run (or a slow run overlapping the next tick) must not corrupt the KB with duplicates.
   - **e.g.:** a second run starts while the first is mid-flight → it backs off; no item written twice.

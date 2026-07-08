@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import pytest
 
+from src import analyze as analyze_module
 from src import candidates as candidates_module
 from src import collector as collector_module
 from src import forecast as forecast_module
@@ -22,14 +23,22 @@ pytestmark = pytest.mark.m4
 
 
 @pytest.fixture
-def _stub_real_agents(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Stub every real agent CLI `main()` `_real_stages()` wires up, recording call order --
-    so a dry-run tick never touches the network or an LLM."""
+def store(tmp_path) -> JsonlStore:
+    """A KB with an active policy -- the minimum `run_tick` needs to pin a version at all."""
+    s = JsonlStore(tmp_path)
+    taxonomy.create_taxonomy(s, ["rocm-build"])
+    policy.create_policy(s, scoring_weights={}, prompt_templates={}, active_taxonomy_version=1)
+    return s
+
+
+@pytest.fixture
+def _stub_real_agents(monkeypatch: pytest.MonkeyPatch, store: JsonlStore) -> list[str]:
+    """Stub every real agent CLI `main()` `_real_stages()` wires up, recording call order, and
+    point `orchestrator.get_store()` at the fixture's scratch KB -- so a dry-run tick never
+    touches the network, an LLM, or the ambient (real) data dir."""
     calls: list[str] = []
+    monkeypatch.setattr(orchestrator, "get_store", lambda: store)
     monkeypatch.setattr(collector_module, "main", lambda argv: calls.append("collect") or None)
-
-    import src.analyze as analyze_module
-
     monkeypatch.setattr(analyze_module, "main", lambda argv: calls.append("analyze") or 0)
     monkeypatch.setattr(forecast_module, "main", lambda argv: calls.append("forecast") or 0)
     monkeypatch.setattr(report_module, "main", lambda argv: calls.append("report") or 0)
@@ -38,14 +47,11 @@ def _stub_real_agents(monkeypatch: pytest.MonkeyPatch) -> list[str]:
 
 
 def test_orchestrator_cli_dry_run_completes_without_error(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys, _stub_real_agents: list[str]
+    store: JsonlStore, capsys, _stub_real_agents: list[str]
 ) -> None:
     """`python -m src.orchestrator --once` end-to-end: a fresh KB's first tick runs collect +
     intel + contribution (all due/triggered on a never-run store), stubbed agents included,
     and exits 0 with a summary line -- no network/LLM call anywhere in this path."""
-    store = JsonlStore(tmp_path)
-    taxonomy.create_taxonomy(store, ["rocm-build"])
-    policy.create_policy(store, scoring_weights={}, prompt_templates={}, active_taxonomy_version=1)
     store.upsert_items(
         [
             {
@@ -60,7 +66,6 @@ def test_orchestrator_cli_dry_run_completes_without_error(
             }
         ]
     )
-    monkeypatch.setattr(orchestrator, "get_store", lambda: store)
 
     rc = orchestrator.main(["--once"])
 
@@ -71,25 +76,24 @@ def test_orchestrator_cli_dry_run_completes_without_error(
 
 
 def test_orchestrator_cli_dry_run_second_tick_skips_undue_cadence_stages(
-    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys, _stub_real_agents: list[str]
+    capsys, _stub_real_agents: list[str]
 ) -> None:
     """A second tick immediately after the first must not re-run collect/intel (not due
     yet) -- only re-runs contribution if it's still triggered."""
-    store = JsonlStore(tmp_path)
-    taxonomy.create_taxonomy(store, ["rocm-build"])
-    policy.create_policy(store, scoring_weights={}, prompt_templates={}, active_taxonomy_version=1)
-    monkeypatch.setattr(orchestrator, "get_store", lambda: store)
-
     orchestrator.main(["--once"])
+    capsys.readouterr()  # discard the first tick's output; only the second tick is asserted on
     _stub_real_agents.clear()
 
     rc = orchestrator.main(["--once"])
 
     out = capsys.readouterr().out
     assert rc == 0
-    assert "collect" not in _stub_real_agents
-    assert "analyze" not in _stub_real_agents
-    assert "skipped" in out
+    assert _stub_real_agents == []
+    # Check "collect"/"intel" specifically appear in the printed `skipped` dict, not just that
+    # the word "skipped" is present -- main()'s summary line always contains "skipped: " even
+    # when the dict is empty, so that substring alone wouldn't prove either stage was skipped.
+    assert "'collect':" in out
+    assert "'intel':" in out
 
 
 def test_orchestrator_cli_without_once_prints_usage_and_exits_nonzero(capsys) -> None:
