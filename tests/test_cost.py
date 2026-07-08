@@ -109,6 +109,16 @@ def test_record_cost_writes_a_well_formed_record(store: JsonlStore) -> None:
     assert record["recorded_at"]
 
 
+def test_record_cost_captures_cache_tokens_from_a_claude_api_meta(store: JsonlStore) -> None:
+    """T4.11: CallMeta.cache_creation_tokens/cache_read_tokens (claude_api only) sum into
+    tokens_cache instead of the previous hardcoded 0."""
+    meta = _meta(provider="claude_api", cache_creation_tokens=200, cache_read_tokens=800)
+
+    cost.record_cost(store, agent="analyst", run_id="r-1", loop="intel", meta=meta)
+
+    assert store.list_runs(stage="cost")[0]["tokens_cache"] == 1000
+
+
 def test_record_cost_survives_a_record_run_failure(
     store: JsonlStore, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

@@ -34,8 +34,10 @@ asks for):
   attempting to parse the reply — a malformed JSON reply (a realistic failure every real agent
   already handles per-item, e.g. ``src/agents/analyst.py``) still gets its already-spent cost
   recorded even though the call itself still raises ``LLMError`` to its caller.
-- ``CallMeta`` doesn't track prompt-cache token counts (T0.7 never asked a provider for them);
-  every record's ``tokens_cache`` is always ``0``, not an estimate.
+- ``CallMeta.cache_creation_tokens``/``cache_read_tokens`` (T4.11) are only ever non-zero for
+  ``claude_api`` — ``claude_cli``/``local`` always report ``0`` for these (see ``llm.py``'s own
+  docstring), so a ``record_cost`` row's ``tokens_cache`` is exact for ``claude_api`` calls but
+  always ``0`` for the other two providers, not an estimate.
 - Cache-token pricing aside, every non-``local`` model's cost is exactly ``meta.cost_usd`` —
   ``llm.py`` already prices ``claude_cli`` (provider-reported, exact) and ``claude_api``
   (estimated from its own maintained table); duplicating that table here would just be a
@@ -195,7 +197,8 @@ def record_cost(
             "model": meta.model,
             "tokens_in": meta.prompt_tokens,
             "tokens_out": meta.completion_tokens,
-            "tokens_cache": 0,  # see module docstring's Known limitations
+            # non-zero only for claude_api -- see module docstring's Known limitations.
+            "tokens_cache": meta.cache_creation_tokens + meta.cache_read_tokens,
             "cost_usd": _priced_cost_usd(meta),
             "recorded_at": datetime.now(timezone.utc).strftime(RECORDED_AT_FORMAT),
         }

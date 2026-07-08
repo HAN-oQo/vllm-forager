@@ -35,6 +35,7 @@ import contextvars
 import json
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Callable
 from contextlib import contextmanager
@@ -62,6 +63,12 @@ class CallMeta:
     ``cost_usd`` is provider-reported where available (claude_cli) and otherwise estimated
     from :data:`_PRICES_PER_MTOK`; it is ``0.0`` for a self-hosted ``local`` endpoint and for
     any model absent from the price table.
+
+    ``cache_creation_tokens``/``cache_read_tokens`` (T4.11) are only ever non-zero for
+    ``claude_api`` — the only provider this module reports prompt-cache usage for (see
+    ``complete``'s ``cache_system`` param); ``claude_cli``/``local`` always report ``0`` here,
+    closing T4.8's own disclosed "``CallMeta`` doesn't track prompt-cache tokens" gap for the
+    one provider where this wrapper can actually observe it.
     """
 
     provider: str
@@ -71,6 +78,8 @@ class CallMeta:
     total_tokens: int
     latency_s: float
     cost_usd: float
+    cache_creation_tokens: int = 0
+    cache_read_tokens: int = 0
 
 
 @dataclass
@@ -226,9 +235,14 @@ def _post(url: str, headers: dict, body: dict, timeout: float) -> dict:
 
 
 def _run_claude_cli(
-    prompt: str, system: str | None, model: str | None, timeout: float
+    prompt: str, system: str | None, model: str | None, timeout: float, *, cache_system: bool
 ) -> tuple[str, CallMeta]:
-    """Run ``claude -p --output-format json`` and extract text + usage/cost from its JSON."""
+    """Run ``claude -p --output-format json`` and extract text + usage/cost from its JSON.
+
+    ``cache_system`` is accepted (for a uniform :data:`_RUNNERS` signature) but has no effect
+    here — the CLI's ``--append-system-prompt`` flag has no cache-control equivalent this
+    wrapper can drive; see ``complete``'s own docstring.
+    """
     cmd = ["claude", "-p", "--output-format", "json"]
     if model:
         cmd += ["--model", model]
@@ -274,9 +288,19 @@ def _run_claude_cli(
 
 
 def _run_claude_api(
-    prompt: str, system: str | None, model: str | None, timeout: float
+    prompt: str, system: str | None, model: str | None, timeout: float, *, cache_system: bool
 ) -> tuple[str, CallMeta]:
-    """Call the Anthropic Messages API over HTTP (keeps deps to `requests`, no SDK)."""
+    """Call the Anthropic Messages API over HTTP (keeps deps to `requests`, no SDK).
+
+    ``cache_system=True`` sends `system` as a cache-control content block
+    (``[{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]``) instead of
+    a plain string — the only one of this module's three providers where an explicit prompt-
+    cache breakpoint is meaningful (``claude_cli`` has no such flag; a self-hosted ``local``
+    vLLM endpoint already does automatic prefix caching at the KV-cache level with no API call
+    needed). The API's own ``usage.cache_creation_input_tokens``/``cache_read_input_tokens``
+    (present whenever a cache breakpoint was actually hit, regardless of this flag) populate
+    :class:`CallMeta`'s matching fields.
+    """
     key = os.getenv("ANTHROPIC_API_KEY")
     if not key:
         raise LLMError("claude_api requires ANTHROPIC_API_KEY")
@@ -293,7 +317,11 @@ def _run_claude_api(
         "messages": [{"role": "user", "content": prompt}],
     }
     if system:
-        body["system"] = system
+        body["system"] = (
+            [{"type": "text", "text": system, "cache_control": {"type": "ephemeral"}}]
+            if cache_system
+            else system
+        )
 
     start = time.monotonic()
     data = _post(f"{base}/v1/messages", headers, body, timeout)
@@ -313,14 +341,21 @@ def _run_claude_api(
         total_tokens=prompt_tokens + completion_tokens,
         latency_s=latency,
         cost_usd=_estimate_cost(model_used, prompt_tokens, completion_tokens),
+        cache_creation_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
     )
     return text, meta
 
 
 def _run_local(
-    prompt: str, system: str | None, model: str | None, timeout: float
+    prompt: str, system: str | None, model: str | None, timeout: float, *, cache_system: bool
 ) -> tuple[str, CallMeta]:
-    """Call an OpenAI-compatible ``/chat/completions`` endpoint (a local vLLM server)."""
+    """Call an OpenAI-compatible ``/chat/completions`` endpoint (a local vLLM server).
+
+    ``cache_system`` is accepted (for a uniform :data:`_RUNNERS` signature) but has no effect
+    here — vLLM already does automatic prefix caching with no explicit API opt-in; see
+    ``complete``'s own docstring.
+    """
     base = os.getenv("LLM_BASE_URL")
     if not base:
         raise LLMError("local provider requires LLM_BASE_URL (OpenAI-compatible endpoint)")
@@ -366,8 +401,10 @@ def _run_local(
     return str(text), meta
 
 
-# Provider dispatch table — the single place that maps LLM_PROVIDER → implementation.
-_RUNNERS: dict[str, Callable[[str, str | None, str | None, float], tuple[str, CallMeta]]] = {
+# Provider dispatch table — the single place that maps LLM_PROVIDER → implementation. `...`
+# (not the previous precise positional signature) since every runner now also takes a
+# keyword-only `cache_system: bool` (T4.11) that only `_run_claude_api` actually uses.
+_RUNNERS: dict[str, Callable[..., tuple[str, CallMeta]]] = {
     "claude_cli": _run_claude_cli,
     "claude_api": _run_claude_api,
     "local": _run_local,
@@ -381,6 +418,7 @@ def complete_detailed(
     json_schema: dict | None = None,
     provider: str | None = None,
     timeout: float | None = None,
+    cache_system: bool = False,
 ) -> LLMResult:
     """Run a completion and return content + :class:`CallMeta`.
 
@@ -393,6 +431,12 @@ def complete_detailed(
         provider: Override ``LLM_PROVIDER`` for this call (mainly for tests).
         timeout: Per-call timeout in seconds; defaults to ``LLM_TIMEOUT`` or
             :data:`DEFAULT_TIMEOUT_S`.
+        cache_system: T4.11 — send `system` as an Anthropic prompt-cache breakpoint. Only
+            ``claude_api`` honors this (see :func:`_run_claude_api`); a no-op for
+            ``claude_cli``/``local``, which have no equivalent this wrapper can drive. Use for
+            a large, stable system prompt reused across many calls (e.g. a taxonomy preamble
+            classified once per batch) — a cache hit on a later call is billed at a fraction of
+            the input-token rate, visible via :class:`CallMeta`'s ``cache_read_tokens``.
 
     Returns:
         An :class:`LLMResult`; ``.content`` is a ``dict`` in JSON mode, otherwise ``str``.
@@ -416,7 +460,9 @@ def complete_detailed(
         directive = _json_directive(json_schema)
         system = f"{system}\n\n{directive}" if system else directive
 
-    text, meta = runner(prompt, system, _model_for(resolved_provider), resolved_timeout)
+    text, meta = runner(
+        prompt, system, _model_for(resolved_provider), resolved_timeout, cache_system=cache_system
+    )
 
     # `meta` reflects real, already-billed spend the instant the provider call returns — record
     # it here, before JSON-mode parsing, so a malformed reply (a realistic failure every real
@@ -437,6 +483,7 @@ def complete(
     json_schema: dict | None = None,
     provider: str | None = None,
     timeout: float | None = None,
+    cache_system: bool = False,
 ) -> str | dict:
     """Provider-agnostic completion. See :func:`complete_detailed` for JSON mode and args.
 
@@ -444,5 +491,157 @@ def complete(
     :func:`complete_detailed` when you also need the per-call metadata (e.g. the T2.6 bandit).
     """
     return complete_detailed(
-        prompt, system=system, json_schema=json_schema, provider=provider, timeout=timeout
+        prompt,
+        system=system,
+        json_schema=json_schema,
+        provider=provider,
+        timeout=timeout,
+        cache_system=cache_system,
     ).content
+
+
+# --------------------------------------------------------------------- Message Batches (T4.11)
+#
+# Anthropic's Batches API (https://docs.anthropic.com/en/api/creating-message-batches) has no
+# equivalent for claude_cli or a self-hosted `local` vLLM endpoint, so — unlike `complete`/
+# `complete_detailed` — the functions below always talk to the Anthropic API directly and
+# ignore `LLM_PROVIDER`. Only submission (`submit_message_batch`) and result-parsing
+# (`parse_message_batch_results`) are implemented: a submitted batch is processed
+# **asynchronously** (Anthropic's own docs describe results landing anywhere from minutes to
+# 24h later, at roughly half the synchronous per-token price — the ~50% saving T4.11's DEVPLAN
+# entry names), which is why it targets classification specifically (latency-insensitive at its
+# weekly orchestrator cadence). Polling for a batch's completion and downloading its results
+# file from the URL Anthropic returns once it's done are NOT implemented here — no caller in
+# this codebase submits a real batch yet, so there's nothing to poll for; a future integration
+# (wiring this into `analyze_store`/the orchestrator's intel tick, replacing `classify_batch`'s
+# synchronous calls) needs both before this path is usable for real, not just testable offline.
+
+_BATCH_DISCOUNT = 0.5  # Anthropic bills a completed batch request at half the synchronous rate.
+
+
+@dataclass
+class BatchRequest:
+    """One request within an Anthropic Message Batch (:func:`submit_message_batch`).
+
+    `custom_id` must be unique within the batch — it's what
+    :func:`parse_message_batch_results` correlates a result back to the request that produced
+    it (Anthropic doesn't guarantee results are returned in submission order).
+    """
+
+    custom_id: str
+    prompt: str
+    system: str | None = None
+    json_schema: dict | None = None
+
+
+def _batch_request_params(req: BatchRequest, model: str) -> dict[str, Any]:
+    system = req.system
+    if req.json_schema is not None:
+        directive = _json_directive(req.json_schema)
+        system = f"{system}\n\n{directive}" if system else directive
+    params: dict[str, Any] = {
+        "model": model,
+        "max_tokens": _env_int("LLM_MAX_TOKENS", DEFAULT_MAX_TOKENS),
+        "messages": [{"role": "user", "content": req.prompt}],
+    }
+    if system:
+        params["system"] = system
+    return params
+
+
+def submit_message_batch(
+    requests: list[BatchRequest], *, model: str | None = None, timeout: float | None = None
+) -> str:
+    """Submit `requests` as one Anthropic Message Batch (``POST /v1/messages/batches``) and
+    return the batch's id. See this section's own module-level comment for what's not yet
+    implemented (polling/fetching results).
+
+    Raises:
+        LLMError: missing ``ANTHROPIC_API_KEY`` or a transport/HTTP failure.
+    """
+    key = os.getenv("ANTHROPIC_API_KEY")
+    if not key:
+        raise LLMError("submit_message_batch requires ANTHROPIC_API_KEY (claude_api only)")
+    resolved_model = model or _model_for("claude_api") or "claude-sonnet-5"
+    base = os.getenv("ANTHROPIC_BASE_URL", "https://api.anthropic.com").rstrip("/")
+    headers = {
+        "x-api-key": key,
+        "anthropic-version": "2023-06-01",
+        "content-type": "application/json",
+    }
+    body = {
+        "requests": [
+            {"custom_id": req.custom_id, "params": _batch_request_params(req, resolved_model)}
+            for req in requests
+        ]
+    }
+    resolved_timeout = (
+        float(timeout) if timeout is not None else _env_float("LLM_TIMEOUT", DEFAULT_TIMEOUT_S)
+    )
+    data = _post(f"{base}/v1/messages/batches", headers, body, resolved_timeout)
+    return str(data["id"])
+
+
+def _llm_result_from_batch_message(message: dict) -> LLMResult:
+    """A completed batch entry's own ``message`` object, shaped like a normal (non-batch)
+    Messages API response — reuses the same content/usage extraction :func:`_run_claude_api`
+    already does for a synchronous call."""
+    blocks = message.get("content") or []
+    text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+    usage = message.get("usage") or {}
+    prompt_tokens = int(usage.get("input_tokens") or 0)
+    completion_tokens = int(usage.get("output_tokens") or 0)
+    model = str(message.get("model") or "")
+    meta = CallMeta(
+        provider="claude_api",
+        model=model,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        total_tokens=prompt_tokens + completion_tokens,
+        latency_s=0.0,  # a batch has no single-request latency to report
+        cost_usd=_estimate_cost(model, prompt_tokens, completion_tokens) * _BATCH_DISCOUNT,
+        cache_creation_tokens=int(usage.get("cache_creation_input_tokens") or 0),
+        cache_read_tokens=int(usage.get("cache_read_input_tokens") or 0),
+    )
+    return LLMResult(content=text, meta=meta)
+
+
+def parse_message_batch_results(results_jsonl: str) -> dict[str, LLMResult | LLMError]:
+    """Parse the ``.jsonl`` body of a completed Anthropic Message Batch's results file — one
+    JSON object per line, each shaped
+    ``{"custom_id": ..., "result": {"type": "succeeded"|"errored", "message": {...}}}`` — into
+    a ``custom_id -> LLMResult`` map. An errored entry maps to an :class:`LLMError` **value**
+    (not raised) so one bad request in a batch doesn't lose every other entry's result — the
+    same per-item degradation this codebase already applies elsewhere (e.g.
+    ``src.agents.analyst``'s per-item classification).
+
+    Pure parsing only — this module doesn't fetch the results file itself; a caller downloads
+    it from the batch's own ``results_url`` (once polling/fetching is implemented — see this
+    section's own module-level comment) and passes the raw text here. A line that isn't valid
+    JSON, or doesn't match the expected shape, is skipped with a message to stderr rather than
+    aborting every other line's result.
+
+    A succeeded entry's ``.content`` is always the raw reply text, never auto-parsed into a
+    dict — unlike ``complete``'s own JSON mode, this function has no per-entry record of
+    whether that request used ``json_schema`` (the results file doesn't echo the request), so a
+    caller that submitted JSON-mode requests must ``json.loads`` (or reuse
+    :func:`_parse_json_object`'s fence-tolerant parsing) the returned entries itself.
+    """
+    results: dict[str, LLMResult | LLMError] = {}
+    for line in results_jsonl.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+            custom_id = entry["custom_id"]
+            result = entry["result"]
+        except (json.JSONDecodeError, KeyError, TypeError) as exc:
+            print(f"llm: skipping a malformed batch-result line: {exc}", file=sys.stderr)
+            continue
+        if result.get("type") == "succeeded":
+            results[custom_id] = _llm_result_from_batch_message(result.get("message") or {})
+        else:
+            error = (result.get("error") or {}).get("message") or result.get("type")
+            results[custom_id] = LLMError(f"batch request {custom_id!r} failed: {error}")
+    return results
