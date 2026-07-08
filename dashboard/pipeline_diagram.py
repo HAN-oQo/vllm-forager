@@ -20,15 +20,24 @@ writes the same shared store independently, not hands off directly to the next o
 
 from __future__ import annotations
 
+from collections import defaultdict
 from datetime import datetime, timezone
 
+from src.liveness import latest_status
 from src.store.base import Store
-
-from . import api
 
 # One entry per real, liveness-tracked orchestrator stage (`src/orchestrator.py::_real_stages`)
 # -- labels/descriptions drawn from CLAUDE.md's own "Architecture (one paragraph)" section, so
 # this diagram can't independently drift from that prose description of the same three planes.
+#
+# These `id`s are a second, hand-maintained copy of `_real_stages()`'s own `Stage.name` values
+# rather than importing that function directly (a code-review finding) -- `_real_stages()`
+# locally imports and wires up `analyze`/`candidates`/`collector`/`forecast`/`report` (the real
+# CLIs each stage invokes), and pulling that whole production call graph into a read-only
+# dashboard module just to read three name strings is a worse cost than the drift risk it would
+# close. `test_pipeline_diagram_plane_ids_match_the_real_orchestrator_stages` (this todo's own
+# test file) guards against drift at test time instead, mirroring `tests/test_orchestrator.py`'s
+# own established `{stage.name: stage for stage in orchestrator._real_stages()}` pattern.
 _PLANES = (
     {
         "id": "collect",
@@ -53,22 +62,36 @@ _PLANES = (
 
 def pipeline_diagram(store: Store, *, now: datetime | None = None, stale_after_s: float) -> dict:
     """``{"nodes": [{"id", "label", "description", "status"}, ...], "edges": [(plane_id, "kb"),
-    ...]}`` -- one node per real orchestrator stage (live status via
-    :func:`~dashboard.api.stage_status`) plus one central ``"kb"`` node every plane connects
-    to, and nothing else.
+    ...]}`` -- one node per real orchestrator stage plus one central ``"kb"`` node every plane
+    connects to, and nothing else.
 
-    `stale_after_s` has no default here, deliberately: it's forwarded as-is to
-    :func:`~dashboard.api.stage_status`, which itself has none -- `src/orchestrator.py`'s own
-    docstring already flags that the real threshold is an open question ("`stale_after_s` for
-    the real pipeline should stay generous until [real per-substep heartbeats land]"), so
-    picking a number here would guess at a design question this todo doesn't own.
+    Fetches ``store.list_runs()`` exactly **once** (unfiltered) and groups the result by
+    ``stage`` locally, rather than calling :func:`~dashboard.api.stage_status` once per plane
+    (a code-review finding: that would issue 3 separate full-collection reads on
+    :class:`~src.store.firestore_store.FirestoreStore`, which has no server-side ``stage``
+    filter -- billed per document, and only getting worse once a live health panel starts
+    polling this repeatedly). Computes each plane's status directly via
+    :func:`~src.liveness.latest_status` over its own already-fetched run list instead.
+
+    `stale_after_s` has no default here, deliberately: `src/orchestrator.py`'s own docstring
+    already flags that the real threshold is an open question ("`stale_after_s` for the real
+    pipeline should stay generous until [real per-substep heartbeats land]"), so picking a
+    number here would guess at a design question this todo doesn't own.
     """
     when = now or datetime.now(timezone.utc)
+    runs_by_stage: dict[str, list[dict]] = defaultdict(list)
+    for run in store.list_runs():
+        stage = run.get("stage")
+        if isinstance(stage, str):
+            runs_by_stage[stage].append(run)
+
     nodes = [
         {"id": "kb", "label": "Knowledge Base", "description": "versioned KB state", "status": None}
     ]
+    edges = []
     for plane in _PLANES:
-        status = api.stage_status(store, plane["id"], now=when, stale_after_s=stale_after_s)
+        runs = runs_by_stage.get(plane["id"], [])
+        status = latest_status(runs, now=when, stale_after_s=stale_after_s)
         nodes.append({**plane, "status": status})
-    edges = [(plane["id"], "kb") for plane in _PLANES]
+        edges.append((plane["id"], "kb"))
     return {"nodes": nodes, "edges": edges}
