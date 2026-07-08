@@ -242,16 +242,19 @@ crontab -e
 by re-attaching to `tmux new -s forager`); the KB's `orchestrator:last_run:*` cursors are the only state, and a
 gap in ticks just means the next one finds more stages due/triggered, not corrupted state.
 
-**Overlap:** `scripts/orchestrator.sh` takes a non-blocking `flock` on `data/orchestrator.lock` before running a
-tick — a second invocation while one is already in flight (e.g. a slow-running intel stage still going when cron
-fires again, or a manual run colliding with cron) backs off immediately (exit 0, nothing run) instead of racing
-`JsonlStore`'s non-atomic state-file read/modify/write. This is a process-level guard only, not T4.3's KB-level
-idempotency — still avoid stacking a tight manual loop (e.g. `watch -n 60`) on top of the cron entry, since a
-constant stream of concurrent attempts is more backoff noise than the lock is meant to absorb.
+**Overlap (T4.3):** `python -m src.orchestrator --once` itself takes a non-blocking, host-local lock
+(`src.locking.run_lock`, at `data/orchestrator.lock`) around a tick — a second invocation while one is already in
+flight (e.g. a slow-running intel stage still going when cron fires again, a manual run colliding with cron, or a
+bare `python -m src.orchestrator --once` run outside `scripts/orchestrator.sh` entirely) backs off immediately
+(exit 0, no stage ever runs) instead of racing `JsonlStore`'s non-atomic state-file read/modify/write. Living in
+`main()` itself (not the shell script) means it covers every invocation path, not just this one. It's still a
+process-level guard only, not KB-level idempotency for a half-finished tick's own writes — avoid stacking a tight
+manual loop (e.g. `watch -n 60`) on top of the cron entry regardless, since a constant stream of concurrent
+attempts is more backoff noise than the lock is meant to absorb.
 
-**Known gaps, not yet built (later M4 todos):** no KB-level idempotency for overlapping/interrupted writes (T4.3
-— `scripts/orchestrator.sh`'s `flock` only prevents two *ticks* from running at once, it doesn't make a
-half-finished tick's writes safe to resume), no per-stage run events/heartbeats in the KB yet (T4.4/T4.5), and no
-local health-record file analogous to `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the collector
+**Known gaps, not yet built (later M4 todos):** no KB-level idempotency for a half-finished tick's own writes if
+it crashes mid-flight (T4.3's lock only stops two ticks from running *at once*, it doesn't make an interrupted
+tick's partial writes safe to resume), no per-stage run events/heartbeats in the KB yet (T4.4/T4.5), and no local
+health-record file analogous to `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the collector
 specifically) — so today "is it alive?" means checking whether cron/tmux is still
 running and reading the log, not a dashboard health panel.

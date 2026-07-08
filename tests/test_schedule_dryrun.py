@@ -14,8 +14,8 @@ import pytest
 from src import analyze as analyze_module
 from src import candidates as candidates_module
 from src import collector as collector_module
+from src import config, orchestrator, policy, taxonomy
 from src import forecast as forecast_module
-from src import orchestrator, policy, taxonomy
 from src import report as report_module
 from src.store.jsonl_store import JsonlStore
 
@@ -32,11 +32,13 @@ def store(tmp_path) -> JsonlStore:
 
 
 @pytest.fixture
-def _stub_real_agents(monkeypatch: pytest.MonkeyPatch, store: JsonlStore) -> list[str]:
+def _stub_real_agents(tmp_path, monkeypatch: pytest.MonkeyPatch, store: JsonlStore) -> list[str]:
     """Stub every real agent CLI `main()` `_real_stages()` wires up, recording call order, and
-    point `orchestrator.get_store()` at the fixture's scratch KB -- so a dry-run tick never
-    touches the network, an LLM, or the ambient (real) data dir."""
+    point `orchestrator.get_store()`/`config.DATA_DIR` at the fixture's scratch dir -- so a
+    dry-run tick never touches the network, an LLM, or the ambient (real) data dir, including
+    the `orchestrator.lock` file `main()` now takes via `src.locking.run_lock` (T4.3)."""
     calls: list[str] = []
+    monkeypatch.setattr(config, "DATA_DIR", tmp_path)
     monkeypatch.setattr(orchestrator, "get_store", lambda: store)
     monkeypatch.setattr(collector_module, "main", lambda argv: calls.append("collect") or None)
     monkeypatch.setattr(analyze_module, "main", lambda argv: calls.append("analyze") or 0)

@@ -6,11 +6,13 @@
 # record or triage.sh self-heal call -- known gaps, see docs/RUNBOOK.md.
 #
 # Meant to be run under cron (T4.2) or manually inside the `forager` tmux session
-# (docs/RUNBOOK.md). Guards against two ticks overlapping with a non-blocking flock: T4.3
-# (KB-level idempotency/locking) isn't built yet, and the contribution stage in particular has
-# no cadence cursor at all (it reruns every tick it's triggered on, cheap-check or not) -- so a
-# second tick starting before the first finishes is a real, not hypothetical, risk of
-# concurrent JsonlStore state-file writes, not just wasted work.
+# (docs/RUNBOOK.md). Overlap protection (two ticks never run concurrently) lives in
+# `src.orchestrator.main()` itself now (`src.locking.run_lock`, T4.3), not here -- T4.2
+# originally added a shell-level `flock` in this script, but that only covered invocations
+# that went through this wrapper; T4.3 moved it into Python so it covers *every* invocation
+# path (this script, a bare `python -m src.orchestrator --once`, a future caller) and is
+# exercised by an offline pytest test (`tests/test_locking.py`) instead of only a manual demo.
+# A backed-off tick still exits 0 -- see main()'s own `LockHeld` handling.
 #
 # Never uses `set -e` so a failure is still logged/notified before we exit.
 #
@@ -20,13 +22,6 @@ cd "$(dirname "$0")/.." || exit 1
 mkdir -p data/logs
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
 log="data/logs/orchestrator-$ts.log"
-lock="data/orchestrator.lock"
-
-exec 9>"$lock"
-if ! flock -n 9; then
-  echo "[orchestrator] another tick is already running (lock: $lock) -- skipping" | tee "$log"
-  exit 0
-fi
 
 [ -f .venv/bin/activate ] && source .venv/bin/activate
 

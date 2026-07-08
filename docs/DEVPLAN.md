@@ -525,34 +525,52 @@ every agent is provider-agnostic. Unit tests mock `llm.complete`; a live smoke t
   - **Note:** `scripts/orchestrator.sh` runs one `python -m src.orchestrator --once` tick, streaming progress to
     the terminal + `data/logs/orchestrator-<ts>.log` and pinging `scripts/notify.sh` on a non-zero exit (a generic
     message + log path, not raw log content, since that's forwarded to a third-party endpoint) — no `set -e`, so a
-    failure is logged/notified before the script exits. It also takes a non-blocking `flock` on
-    `data/orchestrator.lock` before running: `run_tick` has no per-stage exception isolation and the contribution
-    stage has no cadence cursor at all (T4.1's own disclosed limitations), so two overlapping ticks racing
-    `JsonlStore`'s non-atomic state-file read/modify/write was a real, not hypothetical, risk once a schedule
-    exists at all — a second invocation now backs off immediately (exit 0) instead of racing. `docs/RUNBOOK.md`'s
-    new "Running the M4 orchestrator" section documents both launch paths: a `tmux new -s forager` session
-    (matches the topology diagram's already-named `forager` session) for observing/attaching (a one-off tick, not
-    a tight `watch` loop — that would fight the flock guard for no benefit), and a **daily** cron entry — daily,
-    matching this todo's own worked example and `config.COLLECT_INTERVAL_HOURS`, not hourly: the contribution
-    stage's lack of a cadence cursor means a tighter interval reruns its LLM-scoring pass every tick it's
-    triggered on (close to always, for 16 actively-developed repos), multiplying real LLM/API cost rather than
-    producing "cheap no-op ticks." The runbook also flags that adopting the orchestrator's own `collect` stage
-    means dropping the standalone `scripts/collect.sh` cron entry, not running both (two independent, uncoordinated
-    collection cursors). `tests/test_schedule_dryrun.py` exercises `orchestrator.main(["--once"])` itself
-    end-to-end (not just `run_tick` in isolation, already covered by `tests/test_orchestrator.py`) — argument
-    parsing, `get_store()` resolution (monkeypatched to a scratch `JsonlStore`), and the printed summary — with
-    every real agent CLI (`collector.main`, `analyze.main`, `forecast.main`, `report.main`, `candidates.main`)
-    stubbed out, confirming a dry-run tick both runs all-due stages on a fresh KB and skips not-yet-due cadence
-    stages on an immediate second tick, with no network/LLM call anywhere in the test. Known gaps carried over
-    from T4.1 and called out in the runbook: the `flock` guard is process-level only, not T4.3's KB-level
-    idempotency for a half-finished tick's writes; no per-stage run events/heartbeats in the KB yet (T4.4/T4.5);
-    and no local health-record file analogous to `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the
-    collector specifically) — so "is it alive?" today means checking the tmux session/cron log, not a dashboard
-    health panel.
-- [ ] **T4.3 Locking / idempotency** — overlapping runs don't double-write.
+    failure is logged/notified before the script exits. `docs/RUNBOOK.md`'s new "Running the M4 orchestrator"
+    section documents both launch paths: a `tmux new -s forager` session (matches the topology diagram's
+    already-named `forager` session) for observing/attaching (a one-off tick, not a tight `watch` loop), and a
+    **daily** cron entry — daily, matching this todo's own worked example and `config.COLLECT_INTERVAL_HOURS`, not
+    hourly: the contribution stage's lack of a cadence cursor means a tighter interval reruns its LLM-scoring pass
+    every tick it's triggered on (close to always, for 16 actively-developed repos), multiplying real LLM/API cost
+    rather than producing "cheap no-op ticks." The runbook also flags that adopting the orchestrator's own
+    `collect` stage means dropping the standalone `scripts/collect.sh` cron entry, not running both (two
+    independent, uncoordinated collection cursors). `tests/test_schedule_dryrun.py` exercises
+    `orchestrator.main(["--once"])` itself end-to-end (not just `run_tick` in isolation, already covered by
+    `tests/test_orchestrator.py`) — argument parsing, `get_store()` resolution (monkeypatched to a scratch
+    `JsonlStore`), and the printed summary — with every real agent CLI (`collector.main`, `analyze.main`,
+    `forecast.main`, `report.main`, `candidates.main`) stubbed out, confirming a dry-run tick both runs all-due
+    stages on a fresh KB and skips not-yet-due cadence stages on an immediate second tick, with no network/LLM
+    call anywhere in the test. This PR originally added a shell-level `flock` guard against overlapping ticks;
+    **T4.3 (below) moved that into `src.locking`/`main()` itself instead** (covers every invocation path, not just
+    this script, and is pytest-exercised) — see T4.3's own Note for why keeping both would have actually broken
+    every tick launched through this script. Known gaps carried over from T4.1 and called out in the runbook: no
+    per-stage run events/heartbeats in the KB yet (T4.4/T4.5); and no local health-record file analogous to
+    `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the collector specifically) — so "is it alive?"
+    today means checking the tmux session/cron log, not a dashboard health panel.
+- [x] **T4.3 Locking / idempotency** — overlapping runs don't double-write.
   - **Why:** a scheduled run + a manual run (or a slow run overlapping the next tick) must not corrupt the KB with duplicates.
   - **e.g.:** a second run starts while the first is mid-flight → it backs off; no item written twice.
   - **Test:** `tests/test_locking.py` — second concurrent run backs off; no duplicate KB writes.
+  - **Note:** `src/locking.py`'s `run_lock(name)` (a context manager) takes an exclusive, **non-blocking**
+    `fcntl.flock` on `config.DATA_DIR / f"{name}.lock"` — a second attempt at the same name raises `LockHeld`
+    immediately rather than blocking or racing. `orchestrator.main()` wraps its `run_tick(...)` call in
+    `run_lock("orchestrator")`; a `LockHeld` there means another tick is already mid-flight, so `main()` prints a
+    clean message and returns `0` (a backed-off tick isn't a failure) — no stage ever runs, so there's nothing to
+    double-write, matching this todo's own `it backs off; no item written twice` example exactly. This supersedes
+    T4.2's shell-level `flock` in `scripts/orchestrator.sh` (removed in this PR): keeping both would have meant
+    two independent locks on the *same default path* (`config.DATA_DIR` == the repo's `data/` dir by default) —
+    the shell's `flock`, held via a file descriptor inherited by the Python child process for the whole script's
+    lifetime, would make this module's own lock attempt always fail, breaking every tick launched through the
+    wrapper script. Locking is host-local (a file, not a KB primitive) and process-level only — it stops two
+    *ticks* from running at once, it does not make a half-finished tick's own writes safe to resume after a
+    crash (KB-level idempotency for that remains a future refinement); see `src/locking.py`'s own docstring.
+    `tests/test_locking.py` verifies `run_lock` at two levels: the lock primitive itself (a held lock's `LockHeld`
+    on a second attempt from a fresh `open()` of the same path — verified to conflict even within one process,
+    since `flock` is scoped to the open file description, not the process; and that it releases cleanly after the
+    `with`-block exits), and `orchestrator.main()`'s integration (holding the lock externally, then confirming a
+    `main(["--once"])` call returns `0`, prints a "skipping" message on stderr, and — via a monkeypatched
+    `run_tick` — never invokes it at all, i.e. no stage runs and no write is even attempted, not just no write is
+    observed). `docs/RUNBOOK.md`'s "Overlap" section and `scripts/orchestrator.sh`'s header comment were updated
+    to describe the lock living in `main()` now, not the shell script.
 - [ ] **T4.4 Run events** — per-stage run records (stage, status, counts, duration) to KB for the dashboard.
   - **Why:** the audit trail — "what ran, when, how much, how long" — that the dashboard and any debugging read from.
   - **e.g.:** a tick writes `{stage: collect, status: ok, items: 42, dur_s: 31}` to the `runs` collection.

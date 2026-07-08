@@ -27,7 +27,10 @@ Known limitations, not fixed here (later M4 todos):
 - No run events (T4.4) or liveness heartbeats (T4.5) are written yet — :func:`run_tick` only
   returns an in-memory :class:`TickResult`; persisting a per-stage audit trail to the KB is
   T4.4/T4.5's job, layered onto this same routing skeleton.
-- No overlap locking (T4.3) — nothing here stops two ticks from running concurrently.
+- ``main()`` takes a host-local, non-blocking lock (:func:`~src.locking.run_lock`, T4.3) around
+  a tick, so two overlapping invocations never race — but it's process-level only, not KB-level
+  idempotency for a *half-finished* tick's own writes (a stage that partially wrote before a
+  crash isn't rolled back or resumed safely); see :mod:`src.locking`'s own docstring.
 - The CLI's real "contribution" trigger (:func:`_has_open_rocm_or_good_first_issue`) is a
   cheap, label/keyword-only proxy for "is there something worth Scout's full (LLM-scoring)
   pass" — not a call into :func:`~src.agents.scout.discover_from_store` itself, which would
@@ -61,6 +64,7 @@ from datetime import datetime, timezone
 
 from . import config
 from .agents.scout import _candidate_source
+from .locking import LockHeld, run_lock
 from .policy import PolicyError, get_active
 from .store import get_store
 from .store.base import Store
@@ -265,7 +269,14 @@ def main(argv: list[str] | None = None) -> int:
 
     store = get_store()
     try:
-        result = run_tick(store, _real_stages())
+        with run_lock("orchestrator"):
+            result = run_tick(store, _real_stages())
+    except LockHeld as e:
+        # Another tick is already mid-flight (a scheduled run overlapping a manual one, or a
+        # slow run still going when the next cron fire happens, T4.3) -- back off cleanly
+        # rather than racing it; no stage ever ran, so there's nothing to double-write.
+        print(f"orchestrator: {e} -- skipping this tick", file=sys.stderr)
+        return 0
     except PolicyError as e:
         # No policy has been bootstrapped yet (`policy.create_policy()` never called against
         # this KB) -- a clean, actionable CLI message instead of a raw traceback out of
