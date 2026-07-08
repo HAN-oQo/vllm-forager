@@ -106,3 +106,22 @@ def test_trends_from_store_reads_all_items(tmp_path) -> None:
     )
 
     assert trends.trends_from_store(store) == {"ROCm / AMD": {_W1: 1, _W2: 1}}
+
+
+# --------------------------------------------------------------------- last_n_weeks
+
+
+def test_last_n_weeks_is_oldest_first_and_includes_nows_own_week() -> None:
+    now = datetime(2026, 1, 19, tzinfo=timezone.utc)  # 2026-W04
+
+    assert trends.last_n_weeks(3, now=now) == ["2026-W02", "2026-W03", "2026-W04"]
+
+
+def test_last_n_weeks_single_week_is_just_nows_own_week() -> None:
+    now = datetime(2026, 1, 19, tzinfo=timezone.utc)  # 2026-W04
+
+    assert trends.last_n_weeks(1, now=now) == ["2026-W04"]
+
+
+def test_last_n_weeks_zero_weeks_returns_empty_list() -> None:
+    assert trends.last_n_weeks(0, now=datetime(2026, 1, 19, tzinfo=timezone.utc)) == []

@@ -14,18 +14,12 @@ example -- "a line chart of 'spec decoding' vs 'disaggregated prefill' activity 
 from __future__ import annotations
 
 from collections.abc import Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import datetime
 
 from src.store.base import Store
-from src.trends import week_stamp
+from src.trends import last_n_weeks
 
 from . import api
-
-
-def _last_n_weeks(weeks: int, *, now: datetime | None = None) -> list[str]:
-    """The `weeks` ISO week-stamps ending at (and including) `now`'s own week, oldest first."""
-    when = now or datetime.now(timezone.utc)
-    return [week_stamp(when - timedelta(weeks=i)) for i in range(weeks - 1, -1, -1)]
 
 
 def category_series(
@@ -50,8 +44,9 @@ def category_series(
     """
     series = api.trends(store)
     selected = categories if categories is not None else sorted(series)
-    window = _last_n_weeks(weeks, now=now)
-    return {
-        category: [{"week": w, "count": series.get(category, {}).get(w, 0)} for w in window]
-        for category in selected
-    }
+    window = last_n_weeks(weeks, now=now)
+    result = {}
+    for category in selected:
+        category_weeks = series.get(category, {})
+        result[category] = [{"week": w, "count": category_weeks.get(w, 0)} for w in window]
+    return result
