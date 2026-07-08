@@ -72,6 +72,11 @@ def _build_scratch_git_repo(tmp_path: Path, *, dirty: bool) -> Path:
         ["git", "config", "user.email", "test@example.com"], cwd=repo, check=True, timeout=30
     )
     subprocess.run(["git", "config", "user.name", "Test"], cwd=repo, check=True, timeout=30)
+    # This scratch repo is a throwaway test fixture, never pushed or reviewed -- disabling
+    # signing here isn't bypassing a safeguard for real project work (unlike CLAUDE.md's rule
+    # against `--no-gpg-sign` on real commits), it's preventing an unrelated global git config
+    # (`commit.gpgsign = true`) from hanging this test on a pinentry prompt with no TTY.
+    subprocess.run(["git", "config", "commit.gpgsign", "false"], cwd=repo, check=True, timeout=30)
     (repo / "README.md").write_text("scratch repo for triage.sh tests\n")
     subprocess.run(["git", "add", "-A"], cwd=repo, check=True, timeout=30)
     subprocess.run(["git", "commit", "-q", "-m", "initial"], cwd=repo, check=True, timeout=30)
