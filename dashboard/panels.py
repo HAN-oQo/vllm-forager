@@ -17,12 +17,13 @@ genuinely expensive domain.
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import asdict
 from datetime import datetime
 
-from src import config, taxonomy
+from src import stats, taxonomy
 from src.agents import curator
 from src.agents.forecaster import parse_ts
-from src.agents.grader import GradeMetrics, compute_metrics, list_grades
+from src.agents.grader import compute_metrics, list_grades
 from src.store.base import Store
 from src.trends import week_stamp
 
@@ -31,35 +32,26 @@ from . import api
 
 def collection_stats(store: Store) -> dict:
     """Per-repo item counts (``total``/``issue``/``pr``/``rocm``) plus a grand ``total`` --
-    mirrors :func:`src.stats.summarize`'s own shape, but built from ``store.query()`` rather
-    than a raw ``data/*.jsonl`` read, so it works against either backend
-    (:class:`~src.store.jsonl_store.JsonlStore` or a future Firestore store) the same way
-    every other panel in this module does, instead of assuming the on-disk default the way
-    :mod:`src.stats` does.
+    grouped from ``store.query()`` and counted via :func:`~src.stats.summarize_items`, the same
+    counting rule :func:`~src.stats.summarize` applies to a raw ``data/*.jsonl`` read -- the one
+    place both agree on what counts as ROCm-relevant (:data:`~src.config.ROCM_HINTS`) and how a
+    repo's items break down, so a dashboard panel and the ``python -m src.stats`` CLI can't
+    silently drift on the same KB (a code-review finding: an earlier version of this function
+    duplicated that counting loop instead of sharing it -- the exact anti-pattern T5.1's own
+    review already caught and fixed once, for ``trends``/``render_trends``).
 
-    ``rocm`` is the same case-insensitive label-substring heuristic
-    :func:`~src.stats.summarize` already uses (:data:`~src.config.ROCM_HINTS`) -- a heuristic,
-    not a real classification; see that module's own docstring for the same caveat. Unlike
-    :func:`~src.stats.summarize`'s ``Counter`` (whose keys vary with whatever ``type`` values
-    happen to be present), each repo here always has the same four fixed keys, so a caller
-    doesn't need to guard against a missing key for a repo that happens to have no PRs yet.
+    Built from ``store.query()`` rather than a raw ``data/*.jsonl`` read, so it works against
+    either backend (:class:`~src.store.jsonl_store.JsonlStore` or a future Firestore store) the
+    same way every other panel in this module does, instead of assuming the on-disk default the
+    way :func:`~src.stats.summarize` does.
     """
-    repos: dict[str, dict] = {}
-    total = 0
+    by_repo: dict[str, list[dict]] = defaultdict(list)
     for item in store.query():
         repo = item.get("repo")
-        if not repo:
-            continue
-        counts = repos.setdefault(repo, {"total": 0, "issue": 0, "pr": 0, "rocm": 0})
-        counts["total"] += 1
-        item_type = item.get("type")
-        if item_type in ("issue", "pr"):
-            counts[item_type] += 1
-        labels = " ".join(str(x).lower() for x in (item.get("labels") or []))
-        if any(hint in labels for hint in config.ROCM_HINTS):
-            counts["rocm"] += 1
-        total += 1
-    return {"repos": repos, "total": total}
+        if repo:
+            by_repo[repo].append(item)
+    repos = {repo: stats.summarize_items(items) for repo, items in by_repo.items()}
+    return {"repos": repos, "total": sum(r["total"] for r in repos.values())}
 
 
 def taxonomy_timeline(store: Store, *, now: datetime | None = None) -> list[dict]:
@@ -67,9 +59,14 @@ def taxonomy_timeline(store: Store, *, now: datetime | None = None) -> list[dict
     "added_in_version": N, "retirement": {"weeks_inactive": float | None, "evidence": str |
     None} | None}``.
 
-    Returns ``[]`` if no taxonomy has been created yet, rather than raising -- a fresh KB with
-    no taxonomy yet is a normal state for a read endpoint to degrade past, matching
-    :func:`~dashboard.api.parity`'s own established convention for a config/data gap.
+    Returns ``[]`` if no taxonomy has been created yet, or if any taxonomy version turns out
+    missing/corrupt, rather than raising -- a fresh or damaged KB is a normal state for a read
+    endpoint to degrade past, matching :func:`~dashboard.api.parity`'s own established
+    convention for a config/data gap. (A code-review finding on an earlier version of this
+    function: only the initial :func:`~src.taxonomy.get_active` call was guarded, while the
+    version-walk loop below it called :func:`~src.taxonomy.get_taxonomy` unguarded -- a corrupt
+    *older* version raised uncaught past a docstring that already promised to degrade past
+    exactly this. The whole computation is inside one `try` now.)
 
     Known limitations, not fixed here:
 
@@ -88,13 +85,17 @@ def taxonomy_timeline(store: Store, *, now: datetime | None = None) -> list[dict
     """
     try:
         active = taxonomy.get_active(store)
+        added_in_version: dict[str, int] = {}
+        for version in range(1, active.version):
+            for label in taxonomy.get_taxonomy(store, version).labels:
+                added_in_version.setdefault(label, version)
+        for label in active.labels:
+            added_in_version.setdefault(label, active.version)
+        retirements = {
+            p.category: p for p in curator.propose_retirements(store, now=now, active=active)
+        }
     except taxonomy.TaxonomyError:
         return []
-    added_in_version: dict[str, int] = {}
-    for version in range(1, active.version + 1):
-        for label in taxonomy.get_taxonomy(store, version).labels:
-            added_in_version.setdefault(label, version)
-    retirements = {p.category: p for p in curator.propose_retirements(store, now=now)}
     timeline = []
     for label in active.labels:
         proposal = retirements.get(label)
@@ -113,15 +114,6 @@ def taxonomy_timeline(store: Store, *, now: datetime | None = None) -> list[dict
             }
         )
     return timeline
-
-
-def _metrics_dict(metrics: GradeMetrics) -> dict:
-    return {
-        "precision": metrics.precision,
-        "recall": metrics.recall,
-        "brier": metrics.brier,
-        "n": metrics.n,
-    }
 
 
 def prediction_scoreboard(store: Store) -> dict:
@@ -143,7 +135,7 @@ def prediction_scoreboard(store: Store) -> dict:
     by_week: dict[str, list] = defaultdict(list)
     for grade in list_grades(store):
         by_week[week_stamp(parse_ts(grade.graded_at))].append(grade)
-    return {week: _metrics_dict(compute_metrics(grades)) for week, grades in by_week.items()}
+    return {week: asdict(compute_metrics(grades)) for week, grades in by_week.items()}
 
 
 def candidate_queue(

@@ -153,7 +153,11 @@ def _last_active_item(category: str, items: list[dict]) -> dict | None:
 
 
 def propose_retirements(
-    store: Store, *, inactive_weeks: int = _DEFAULT_INACTIVE_WEEKS, now: datetime | None = None
+    store: Store,
+    *,
+    inactive_weeks: int = _DEFAULT_INACTIVE_WEEKS,
+    now: datetime | None = None,
+    active: taxonomy_module.Taxonomy | None = None,
 ) -> list[RetireProposal]:
     """Every active-taxonomy category with no activity in the last `inactive_weeks` weeks.
 
@@ -162,15 +166,22 @@ def propose_retirements(
     roll a multi-level path up by prefix) — a category several levels deep is checked by its
     own full flattened label, not aggregated with its siblings/parent.
 
+    `active`, if given, is used as-is instead of calling :func:`~src.taxonomy.get_active`
+    again — for a caller (e.g. :func:`~dashboard.panels.taxonomy_timeline`, a code-review
+    finding on that function) that already fetched the active taxonomy itself and would
+    otherwise pay for the same state read twice in one request.
+
     Raises:
-        taxonomy.TaxonomyError: no taxonomy has ever been created — mirrors
-            :func:`~src.agents.analyst.analyze_store`'s own behavior when there's real work to
-            check and no taxonomy to check it against (that function only short-circuits when
-            there's *nothing pending*, not when a taxonomy is missing) — a bootstrapping gap
-            to notice and fix, not a "nothing to propose" state to silently return past.
+        taxonomy.TaxonomyError: no taxonomy has ever been created (only possible when `active`
+            isn't supplied) — mirrors :func:`~src.agents.analyst.analyze_store`'s own behavior
+            when there's real work to check and no taxonomy to check it against (that function
+            only short-circuits when there's *nothing pending*, not when a taxonomy is
+            missing) — a bootstrapping gap to notice and fix, not a "nothing to propose" state
+            to silently return past.
     """
     when = now or datetime.now(timezone.utc)
-    active = taxonomy_module.get_active(store)  # fail fast before the full-store scan below
+    if active is None:
+        active = taxonomy_module.get_active(store)  # fail fast before the full-store scan below
     items = store.query()
     series = category_trends(items)
     proposals = []

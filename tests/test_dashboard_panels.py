@@ -90,6 +90,18 @@ def test_taxonomy_timeline_reports_added_version(tmp_path: Path) -> None:
     assert by_category["quantization"]["added_in_version"] == 2
 
 
+def test_taxonomy_timeline_degrades_on_a_corrupt_older_version(tmp_path: Path) -> None:
+    """Regression: an earlier version of this function only guarded the initial get_active()
+    call -- a corrupt *older* taxonomy version raised uncaught from the version-walk loop even
+    though the docstring already promised to degrade to [] past exactly this kind of gap."""
+    store = JsonlStore(tmp_path)
+    taxonomy.create_taxonomy(store, ["build"])
+    taxonomy.add_category(store, "quantization")
+    store.set_state("taxonomy@1", "not valid json")
+
+    assert panels.taxonomy_timeline(store, now=_NOW) == []  # must not raise
+
+
 def test_taxonomy_timeline_flags_inactive_category_as_retirement_proposal(
     tmp_path: Path,
 ) -> None:
