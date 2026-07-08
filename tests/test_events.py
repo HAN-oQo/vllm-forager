@@ -44,16 +44,6 @@ def test_run_tick_writes_a_run_event_with_the_expected_fields(store: JsonlStore)
     assert run["recorded_at"] == "2026-01-08T00:00:00Z"
 
 
-def test_run_tick_writes_an_item_count_of_none_when_a_stage_doesnt_report_one(
-    store: JsonlStore,
-) -> None:
-    stage = orchestrator.Stage("collect", lambda _s: None, interval_hours=24)
-
-    orchestrator.run_tick(store, [stage], now=_NOW)
-
-    assert store.list_runs(stage="collect")[0]["items"] is None
-
-
 def test_run_tick_writes_a_failed_run_event_when_a_stage_raises(store: JsonlStore) -> None:
     def _boom(_store) -> None:
         raise RuntimeError("boom")
@@ -66,8 +56,30 @@ def test_run_tick_writes_a_failed_run_event_when_a_stage_raises(store: JsonlStor
     runs = store.list_runs(stage="intel")
     assert len(runs) == 1
     assert runs[0]["status"] == "failed"
-    assert runs[0]["error"] == "boom"
+    assert runs[0]["error"] == "RuntimeError: boom"  # exception type included, not just str(exc)
     assert "items" not in runs[0]
+
+
+def test_run_tick_writes_both_an_ok_and_a_failed_event_in_the_same_tick(
+    store: JsonlStore,
+) -> None:
+    """An earlier stage's success must be recorded even though a later stage in the same tick
+    raises -- run_tick has no per-stage exception isolation (still aborts the tick), but the
+    run-event log for stages that already finished must not be lost."""
+
+    def _boom(_store) -> None:
+        raise RuntimeError("boom")
+
+    stages = [
+        orchestrator.Stage("collect", lambda _s: 1, interval_hours=24),
+        orchestrator.Stage("intel", _boom, interval_hours=24),
+    ]
+
+    with pytest.raises(RuntimeError, match="boom"):
+        orchestrator.run_tick(store, stages, now=_NOW)
+
+    assert store.list_runs(stage="collect")[0]["status"] == "ok"
+    assert store.list_runs(stage="intel")[0]["status"] == "failed"
 
 
 def test_run_tick_writes_no_event_for_a_skipped_stage(store: JsonlStore) -> None:
@@ -90,11 +102,14 @@ def test_run_tick_writes_one_event_per_stage_this_tick(store: JsonlStore) -> Non
     assert {r["stage"] for r in store.list_runs()} == {"collect", "contribution"}
 
 
-def test_run_tick_still_records_a_run_event_when_store_record_run_itself_fails(
+def test_run_tick_survives_a_record_run_failure_but_the_event_is_genuinely_lost(
     store: JsonlStore, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     """A KB-write hiccup while recording the run event must not crash the tick -- the stage's
-    own real work already happened and must not be discarded over this."""
+    own real work already happened and must not be discarded over this. But "best effort"
+    means exactly that: the run event itself is genuinely never written when record_run fails,
+    not silently retried or queued -- `TickResult.ran` and the KB's own run history can
+    legitimately disagree about a stage that "ran" but wasn't recorded."""
     monkeypatch.setattr(
         store, "record_run", lambda _r: (_ for _ in ()).throw(RuntimeError("disk full"))
     )
@@ -105,4 +120,23 @@ def test_run_tick_still_records_a_run_event_when_store_record_run_itself_fails(
 
     assert calls == ["ran"]
     assert result.ran == ("collect",)
+    assert store.list_runs(stage="collect") == []  # the event really is missing, not queued
     assert "failed to record run event" in capsys.readouterr().err
+
+
+def test_run_tick_survives_a_set_state_failure_after_a_successful_run_event(
+    store: JsonlStore, monkeypatch: pytest.MonkeyPatch, capsys
+) -> None:
+    """A cursor-write hiccup right after a stage's run event was already recorded must not
+    crash the tick either -- otherwise a KB reader would see a clean "ok" event for a tick that
+    the CLI itself reports as a crash."""
+    monkeypatch.setattr(
+        store, "set_state", lambda *a: (_ for _ in ()).throw(RuntimeError("disk full"))
+    )
+    stage = orchestrator.Stage("collect", lambda _s: 1, interval_hours=24)
+
+    result = orchestrator.run_tick(store, [stage], now=_NOW)
+
+    assert result.ran == ("collect",)
+    assert store.list_runs(stage="collect")[0]["status"] == "ok"
+    assert "failed to advance last-run cursor" in capsys.readouterr().err

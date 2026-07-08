@@ -25,7 +25,7 @@ and fake agents, with no real network/LLM call anywhere in the offline test suit
 
 Known limitations, not fixed here (later M4 todos):
 - No liveness heartbeats yet (T4.5) — :func:`run_tick` (T4.4) records exactly one run event
-  per stage, after it finishes (:func:`_record_run_best_effort`, ``store.record_run``), not a
+  per stage, after it finishes (:func:`_best_effort`, ``store.record_run``), not a
   `started` → `heartbeat` → `finished` lifecycle: a stage that's genuinely still running looks
   identical, from the KB's own run history, to one that's silently hung, since neither has a
   recorded event yet. T4.5's staleness-checked heartbeat lifecycle is what tells those apart.
@@ -61,6 +61,12 @@ Known limitations, not fixed here (later M4 todos):
   54,841-item KB triggering a multi-hour, one-LLM-call-per-item classification pass). A fixed
   per-tick cap means a large backlog drains slowly across many ticks rather than all at once;
   a real backlog-draining strategy is a future refinement, not this todo's.
+- Run events carry no run/invocation-correlation id and no tick-level envelope tying a tick's
+  own events together — a hard-killed process (OOM, ``SIGKILL``) between two stages leaves the
+  KB with events for only the stages that finished, with no marker that a further stage was
+  queued and never even got a ``"failed"`` event. T4.5's ``started``/``heartbeat``/``finished``
+  lifecycle will need a correlating id to stitch multiple records for one stage-invocation back
+  together — not added here since nothing yet reads for it.
 """
 
 from __future__ import annotations
@@ -71,6 +77,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from functools import partial
 
 from . import config
 from .agents.scout import _candidate_source
@@ -155,20 +162,21 @@ def _parse_last_run(raw: str) -> datetime | None:
         return None
 
 
-def _record_run_best_effort(store: Store, record: dict) -> None:
-    """`store.record_run(record)`, logging (not raising) on failure -- a KB-write hiccup must
-    never crash a tick after a stage's real work already happened. Deliberately a small local
-    helper rather than reusing `src.stages.record_run_best_effort`: that one requires `repo`/
-    `number` (it's scoped to M3's per-item pipeline stages), which an orchestrator-level,
-    whole-stage run event has neither of.
+def _best_effort(write: Callable[[], None], *, what: str) -> None:
+    """Call `write()`, logging (not raising) on failure -- a KB-write hiccup must never crash a
+    tick after a stage's real work already happened. Used for both the run-event write and the
+    last-run cursor write in :func:`run_tick`: recording the event but then crashing on the
+    cursor write (or vice versa) would leave the KB's run history and its own cadence state
+    disagreeing about whether the stage "really" completed this tick.
+
+    Deliberately a small local helper rather than reusing `src.stages.record_run_best_effort`:
+    that one requires `repo`/`number` (it's scoped to M3's per-item pipeline stages), which an
+    orchestrator-level, whole-stage run event has neither of.
     """
     try:
-        store.record_run(record)
+        write()
     except Exception as exc:
-        print(
-            f"orchestrator: failed to record run event for {record.get('stage')!r}: {exc}",
-            file=sys.stderr,
-        )
+        print(f"orchestrator: failed to {what}: {exc}", file=sys.stderr)
 
 
 def _is_due(store: Store, stage: Stage, now: datetime) -> tuple[bool, str]:
@@ -220,35 +228,36 @@ def run_tick(store: Store, stages: list[Stage], *, now: datetime | None = None) 
             continue
 
         started = time.monotonic()
+        recorded_at = now.strftime(_TS_FORMAT)  # one timestamp string, reused below
+        record = {
+            "stage": stage.name,
+            "policy_version": policy.version,
+            "recorded_at": recorded_at,
+        }
         try:
             items = stage.run(store)
         except Exception as exc:
-            _record_run_best_effort(
-                store,
-                {
-                    "stage": stage.name,
-                    "status": "failed",
-                    "error": str(exc),
-                    "dur_s": round(time.monotonic() - started, 3),
-                    "policy_version": policy.version,
-                    "recorded_at": now.strftime(_TS_FORMAT),
-                },
+            record["status"] = "failed"
+            record["error"] = f"{type(exc).__name__}: {exc}"
+            record["dur_s"] = round(time.monotonic() - started, 3)
+            _best_effort(
+                partial(store.record_run, record),
+                what=f"record run event for {stage.name!r}",
             )
             raise
 
-        _record_run_best_effort(
-            store,
-            {
-                "stage": stage.name,
-                "status": "ok",
-                "items": items,
-                "dur_s": round(time.monotonic() - started, 3),
-                "policy_version": policy.version,
-                "recorded_at": now.strftime(_TS_FORMAT),
-            },
+        record["status"] = "ok"
+        record["items"] = items
+        record["dur_s"] = round(time.monotonic() - started, 3)
+        _best_effort(
+            partial(store.record_run, record),
+            what=f"record run event for {stage.name!r}",
         )
         if stage.interval_hours is not None:
-            store.set_state(_last_run_key(stage.name), now.strftime(_TS_FORMAT))
+            _best_effort(
+                partial(store.set_state, _last_run_key(stage.name), recorded_at),
+                what=f"advance last-run cursor for {stage.name!r}",
+            )
         ran.append(stage.name)
 
     return TickResult(policy_version=policy.version, ran=tuple(ran), skipped=skipped)
