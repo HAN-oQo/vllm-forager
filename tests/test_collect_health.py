@@ -94,11 +94,13 @@ def _build_gh_stub(tmp_path: Path) -> Path:
     """Defense in depth (see module docstring): even if a future `triage.sh` reordering ever
     reached `gh pr list` before its clean-tree guard, this stub -- placed ahead of the real
     `gh` on `PATH` -- reports an open triage PR so `triage.sh` skips rather than proceeding to
-    `claude -p`, without ever touching the real GitHub API."""
+    `claude -p`, without ever touching the real GitHub API. Prints the count `triage.sh`'s
+    real `--jq '[...] | length'` invocation would produce (not the raw, unfiltered PR list --
+    see `tests/test_triage_sh.py`'s own `_build_path` for the identical stub)."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     gh = bin_dir / "gh"
-    gh.write_text('#!/usr/bin/env bash\necho \'[{"headRefName": "triage/stub"}]\'\n')
+    gh.write_text("#!/usr/bin/env bash\necho '1'\n")
     gh.chmod(0o755)
     return bin_dir
 
