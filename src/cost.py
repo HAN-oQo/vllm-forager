@@ -19,11 +19,13 @@ wired this way.
 Known limitations (disclosed, not fixed here — matches this module's own size to what T4.8
 asks for):
 
-- A call that raises ``LLMError`` (bad JSON reply, transport failure, non-zero CLI exit, ...)
-  never reaches ``llm.py``'s sink hook, so a failed call's real (already-spent) tokens/cost go
-  unrecorded. ``CallMeta`` isn't available at the point ``llm.py`` raises, so there is nothing
-  to record from -- capturing partial cost on a failure path is a `` llm.py``/T0.7 change, not
-  a T4.8 one.
+- A call that raises ``LLMError`` *before* a provider ever replies (missing credential, bad
+  ``LLM_PROVIDER``, transport/CLI failure) never reaches ``llm.py``'s sink hook, so nothing was
+  billed and there is genuinely nothing to record. A JSON-mode reply that fails to *parse*,
+  though, is captured: ``llm.py`` fires the sink right after the provider call returns, before
+  attempting to parse the reply — a malformed JSON reply (a realistic failure every real agent
+  already handles per-item, e.g. ``src/agents/analyst.py``) still gets its already-spent cost
+  recorded even though the call itself still raises ``LLMError`` to its caller.
 - ``CallMeta`` doesn't track prompt-cache token counts (T0.7 never asked a provider for them);
   every record's ``tokens_cache`` is always ``0``, not an estimate.
 - Cache-token pricing aside, every non-``local`` model's cost is exactly ``meta.cost_usd`` —
@@ -32,8 +34,32 @@ asks for):
   second copy to keep in sync. The *only* thing this module's own pricing adds is
   :data:`LOCAL_MODEL_PRICES_PER_MTOK_ENV` for ``local`` calls, which ``llm.py`` always prices
   at ``$0.0`` (no metered per-token charge for a self-hosted endpoint).
+- Only ``llm.complete``/``complete_detailed`` calls made *inside* an active
+  ``llm.cost_context`` scope are recorded. Today that's exactly the calls
+  ``src/orchestrator.py``'s real ``_intel``/``_contribution`` stages make (analyst, forecaster,
+  reporter, scout) — modules invoked outside the orchestrator tick (e.g. ``agents/grader.py``,
+  ``agents/novelty.py``, ``agents/curator.py``, ``rag_eval.py``) make their own
+  ``llm.complete`` calls with no cost context installed, so those calls go completely
+  unrecorded, silently, until something wraps them too.
+- ``_cost_sink`` is a :class:`contextvars.ContextVar`, which propagates into ``asyncio`` tasks
+  but *not* into a manually spawned :class:`threading.Thread` (only into an explicit
+  ``contextvars.copy_context().run(...)``). No agent spawns threads today, so this is latent,
+  not live — but a future thread-parallelized agent would need to carry the context across
+  explicitly, or its calls would silently go unrecorded rather than raise.
+- A ``stage="cost"`` record has no ``status`` field, unlike every other record in this same
+  ``runs`` collection (``"started"``/``"heartbeat"``/``"ok"``/``"failed"`` from
+  :mod:`src.orchestrator`, or a repro/verify/self-review outcome from :mod:`src.stages`). A
+  future reader that enumerates *distinct* ``stage`` values from ``store.list_runs()`` (e.g. a
+  T5.8 health panel) rather than the fixed ``collect``/``intel``/``contribution`` set from
+  :func:`~src.orchestrator._real_stages` must skip or special-case ``"cost"`` — feeding it
+  through :func:`~src.liveness.latest_status` as if it were a fourth orchestrator stage would
+  read as permanently ``"stalled"`` (no ``status`` key to classify).
 - :func:`rollup` aggregates whatever is already in the KB when it's called — there is no cron
-  entry wiring it to run daily yet (T5.8's ops dashboard is the natural first real caller).
+  entry wiring it to run daily yet (T5.8's ops dashboard is the natural first real caller). Its
+  per-``(date, agent, model)`` bucket's ``provider`` is whichever record is encountered first
+  for that key; if the same model name were ever served through two different providers for the
+  same agent on the same day, the bucket's ``provider`` field wouldn't reflect that split (the
+  summed ``cost_usd``/token counts would still be correct either way).
 """
 
 from __future__ import annotations
@@ -97,24 +123,43 @@ def record_cost(
     meta: llm.CallMeta,
 ) -> None:
     """Persist one cost record for a completed ``llm`` call, best-effort — a KB write hiccup
-    must never turn into a crash for the agent that already got its (billed) LLM reply."""
-    record = {
-        "stage": "cost",
-        "agent": agent,
-        "run_id": run_id,
-        "loop": loop,
-        "provider": meta.provider,
-        "model": meta.model,
-        "tokens_in": meta.prompt_tokens,
-        "tokens_out": meta.completion_tokens,
-        "tokens_cache": 0,  # see module docstring's Known limitations
-        "cost_usd": _priced_cost_usd(meta),
-        "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-    }
+    must never turn into a crash for the agent that already got its (billed) LLM reply.
+
+    The whole body is guarded, not just the ``store.record_run`` call: ``llm.cost_context``'s
+    own contract is that ``sink`` (built from this function) must never raise — a bug in
+    ``_priced_cost_usd`` or the record's construction must degrade the same way a KB-write
+    failure does, not propagate back into ``llm.py`` and fail an otherwise-successful call.
+    """
     try:
+        record = {
+            "stage": "cost",
+            "agent": agent,
+            "run_id": run_id,
+            "loop": loop,
+            "provider": meta.provider,
+            "model": meta.model,
+            "tokens_in": meta.prompt_tokens,
+            "tokens_out": meta.completion_tokens,
+            "tokens_cache": 0,  # see module docstring's Known limitations
+            "cost_usd": _priced_cost_usd(meta),
+            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        }
         store.record_run(record)
     except Exception as exc:
         print(f"cost: failed to record cost for agent={agent!r}: {exc}", file=sys.stderr)
+
+
+def agent_context(store: Store, *, agent: str, loop: str, run_id: str):
+    """`llm.cost_context(sink)` pre-wired to :func:`record_cost` for one agent/loop/run_id —
+    every `llm.complete`/`complete_detailed` call made inside the returned ``with`` block gets
+    a cost record tagged accordingly, with no change needed at the call site itself. Pulled out
+    here (not left as a closure in the one caller that needs it today,
+    `src/orchestrator.py`'s `_intel`/`_contribution`) so a second caller — a later stage, or
+    T4.9's session ingest — doesn't have to re-derive the same one-line wrapper.
+    """
+    return llm.cost_context(
+        lambda meta: record_cost(store, agent=agent, run_id=run_id, loop=loop, meta=meta)
+    )
 
 
 def rollup(store: Store) -> list[dict]:

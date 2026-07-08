@@ -417,12 +417,16 @@ def complete_detailed(
         system = f"{system}\n\n{directive}" if system else directive
 
     text, meta = runner(prompt, system, _model_for(resolved_provider), resolved_timeout)
-    content: str | dict = _parse_json_object(text) if json_schema is not None else text
 
+    # `meta` reflects real, already-billed spend the instant the provider call returns — record
+    # it here, before JSON-mode parsing, so a malformed reply (a realistic failure every real
+    # agent already handles per-item, e.g. src/agents/analyst.py) still gets its cost captured.
+    # Parsing after this point can raise LLMError without losing that already-recorded spend.
     sink = _cost_sink.get()
     if sink is not None:
         sink(meta)
 
+    content: str | dict = _parse_json_object(text) if json_schema is not None else text
     return LLMResult(content=content, meta=meta)
 
 

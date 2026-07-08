@@ -104,7 +104,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from functools import partial
 
-from . import config, cost, llm
+from . import config, cost
 from .agents.scout import _candidate_source
 from .locking import LockHeld, run_lock
 from .policy import PolicyError, get_active
@@ -387,25 +387,18 @@ def _real_stages() -> list[Stage]:
     def _collect(_store: Store) -> None:
         collector.main([])
 
-    def _cost_context(store: Store, *, agent: str, loop: str, run_id: str):
-        """T4.8: every `llm.complete` call `agent`'s CLI makes while this ``with`` block is
-        open gets a cost record via `cost.record_cost`, tagged with this tick's `run_id` and
-        which plane (`loop`) it ran under — the mechanism (`llm.cost_context`) needs no change
-        to `analyze.main`/etc. themselves; see `src/cost.py`'s own module docstring."""
-        return llm.cost_context(
-            lambda meta: cost.record_cost(store, agent=agent, run_id=run_id, loop=loop, meta=meta)
-        )
-
     def _intel(store: Store) -> None:
         # Bounded (see module docstring's Known limitations) -- an unbounded analyze.main([])
         # is exactly the T3.19 multi-hour/54,841-item hazard, reproduced on every "never run
-        # yet" first tick against a KB with any sizeable pending backlog.
+        # yet" first tick against a KB with any sizeable pending backlog. T4.8: each sub-call
+        # is wrapped in cost.agent_context so its llm.complete calls get a cost record tagged
+        # by agent, sharing one run_id across all three (one "intel" tick invocation).
         run_id = uuid.uuid4().hex[:12]
-        with _cost_context(store, agent="analyst", loop="intel", run_id=run_id):
+        with cost.agent_context(store, agent="analyst", loop="intel", run_id=run_id):
             analyze.main(["--per-domain-limit", str(_INTEL_PER_DOMAIN_LIMIT)])
-        with _cost_context(store, agent="forecaster", loop="intel", run_id=run_id):
+        with cost.agent_context(store, agent="forecaster", loop="intel", run_id=run_id):
             forecast.main([])
-        with _cost_context(store, agent="reporter", loop="intel", run_id=run_id):
+        with cost.agent_context(store, agent="reporter", loop="intel", run_id=run_id):
             report.main([])
 
     def _contribution(store: Store) -> None:
@@ -413,7 +406,7 @@ def _real_stages() -> list[Stage]:
         # rest of the contribution plane (engineer -> gate) into an orchestrated tick is a
         # later M4 todo, not this one. Bounded for the same reason as `_intel` above.
         run_id = uuid.uuid4().hex[:12]
-        with _cost_context(store, agent="scout", loop="contribution", run_id=run_id):
+        with cost.agent_context(store, agent="scout", loop="contribution", run_id=run_id):
             candidates.main(["--per-domain-limit", str(_CONTRIBUTION_PER_DOMAIN_LIMIT)])
 
     # Each real CLI (collector.main, analyze.main, ...) takes its own `argv`, not a `Store` --
