@@ -21,10 +21,12 @@ writes the same shared store independently, not hands off directly to the next o
 from __future__ import annotations
 
 from collections import defaultdict
-from datetime import datetime, timezone
+from datetime import datetime
 
 from src.liveness import latest_status
 from src.store.base import Store
+
+from .api import normalize_now
 
 # One entry per real, liveness-tracked orchestrator stage (`src/orchestrator.py::_real_stages`)
 # -- labels/descriptions drawn from CLAUDE.md's own "Architecture (one paragraph)" section, so
@@ -38,7 +40,10 @@ from src.store.base import Store
 # close. `test_pipeline_diagram_plane_ids_match_the_real_orchestrator_stages` (this todo's own
 # test file) guards against drift at test time instead, mirroring `tests/test_orchestrator.py`'s
 # own established `{stage.name: stage for stage in orchestrator._real_stages()}` pattern.
-_PLANES = (
+#
+# Public (not `_PLANES`) since T5.8's `dashboard.health` also needs exactly this stage list
+# and imports it from here rather than defining a third independent copy.
+PLANES = (
     {
         "id": "collect",
         "label": "Data plane",
@@ -78,7 +83,7 @@ def pipeline_diagram(store: Store, *, now: datetime | None = None, stale_after_s
     pipeline should stay generous until [real per-substep heartbeats land]"), so picking a
     number here would guess at a design question this todo doesn't own.
     """
-    when = now or datetime.now(timezone.utc)
+    when = normalize_now(now)
     runs_by_stage: dict[str, list[dict]] = defaultdict(list)
     for run in store.list_runs():
         stage = run.get("stage")
@@ -89,7 +94,7 @@ def pipeline_diagram(store: Store, *, now: datetime | None = None, stale_after_s
         {"id": "kb", "label": "Knowledge Base", "description": "versioned KB state", "status": None}
     ]
     edges = []
-    for plane in _PLANES:
+    for plane in PLANES:
         runs = runs_by_stage.get(plane["id"], [])
         status = latest_status(runs, now=when, stale_after_s=stale_after_s)
         nodes.append({**plane, "status": status})

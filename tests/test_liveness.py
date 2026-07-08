@@ -198,6 +198,27 @@ def test_latest_status_a_terminal_event_wins_a_tie_at_the_same_recorded_at() -> 
     assert liveness.latest_status(ok_first, now=_NOW, stale_after_s=600) == "ok"
 
 
+def test_latest_status_and_record_returns_the_record_status_was_based_on() -> None:
+    """A caller needing fields off the exact record (T5.8's health panel) must get the same
+    one `latest_status` classified from, including on a same-second tie -- not re-derive
+    'latest' a second, tie-unaware way (a code-review finding on an earlier dashboard.health)."""
+    tied_at = "2026-01-08T11:00:00Z"
+    runs = [
+        {"status": "heartbeat", "recorded_at": tied_at, "step": "working"},
+        {"status": "failed", "recorded_at": tied_at, "error": "boom"},
+    ]
+
+    status, record = liveness.latest_status_and_record(runs, now=_NOW, stale_after_s=600)
+
+    assert status == "failed"
+    assert record is not None
+    assert record["error"] == "boom"
+
+
+def test_latest_status_and_record_no_runs_returns_none() -> None:
+    assert liveness.latest_status_and_record([], now=_NOW, stale_after_s=600) == ("never run", None)
+
+
 def test_run_tick_and_liveness_integration_classifies_a_completed_tick_as_ok(
     store: JsonlStore,
 ) -> None:

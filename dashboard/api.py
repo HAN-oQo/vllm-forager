@@ -64,7 +64,7 @@ deferring a third time with the same paragraph.
 from __future__ import annotations
 
 from dataclasses import asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from src import parity as parity_module
@@ -122,6 +122,20 @@ def predictions(store: Store, *, offset: int = 0, limit: int | None = None) -> l
     """
     page = paginate(list_predictions(store), offset=offset, limit=limit)
     return [asdict(p) for p in page]
+
+
+def normalize_now(now: datetime | None) -> datetime:
+    """Defaults to the real UTC clock; a naive (tzinfo-less) `now` is treated as UTC rather
+    than raising once compared against a stored (always UTC-aware) timestamp -- mirrors
+    :func:`~src.orchestrator.run_tick`'s own identical handling of the same common
+    ``datetime.utcnow()`` idiom. Shared here (:mod:`dashboard.pipeline_diagram`,
+    :mod:`dashboard.health`) after a code-review finding, empirically reproduced: an earlier
+    version of `dashboard.health` didn't normalize, so any caller passing a naive `now` crashed
+    with ``TypeError: can't subtract offset-naive and offset-aware datetimes`` -- and
+    `dashboard.pipeline_diagram` had the identical, un-normalized gap already.
+    """
+    when = now or datetime.now(timezone.utc)
+    return when.replace(tzinfo=timezone.utc) if when.tzinfo is None else when
 
 
 def asdict_with(obj: Any, **computed: object) -> dict:

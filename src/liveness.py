@@ -28,19 +28,28 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from .orchestrator import _parse_last_run
+from .orchestrator import parse_last_run
 from .stages import latest_run
 
 _LIFECYCLE_STATUSES = {"started", "heartbeat"}
 _TERMINAL_STATUSES = {"ok", "failed"}
 
-__all__ = ["latest_status"]
+__all__ = ["latest_status", "latest_status_and_record"]
 
 
-def latest_status(runs: list[dict], *, now: datetime, stale_after_s: float) -> str:
-    """Classify a stage's liveness from its own `runs` (already filtered to one stage, e.g. via
-    `store.list_runs(stage=...)` — this function doesn't filter by stage itself, so passing an
-    unfiltered list mixes stages' histories into one classification).
+def latest_status_and_record(
+    runs: list[dict], *, now: datetime, stale_after_s: float
+) -> tuple[str, dict | None]:
+    """:func:`latest_status`'s own classification, plus the exact run record it was based on --
+    for a caller (T5.8's health panel) that also needs fields off that same record (its
+    `step`/`output_tail`/`error`), not just the status string. Extracted here (a code-review
+    finding) after an earlier version of the dashboard health panel independently re-derived
+    "the latest run" a second way (`stages.latest_run` alone, with no tie-break) to read those
+    extra fields — a same-second tie between a terminal and a non-terminal record could then
+    make the reported status and the reported step/error come from two *different* records,
+    since `stages.latest_run`'s own tie-break (first-encountered wins) doesn't know this
+    module's own "ties break toward the terminal state" rule. Returning the record this
+    function actually picked closes that gap for any caller that needs more than the status.
 
     Reuses `stages.latest_run`'s own "find the most-recently-recorded run, by `recorded_at`"
     convention (already shared by `engineer.py`/`self_review.py`/`gate.py`/etc.) rather than
@@ -54,7 +63,7 @@ def latest_status(runs: list[dict], *, now: datetime, stale_after_s: float) -> s
     events can legitimately land in the same rendered second.
     """
     if not runs:
-        return "never run"
+        return "never run", None
 
     latest = latest_run(runs)
     assert latest is not None  # `runs` is non-empty, so `latest_run` can't return None here
@@ -65,12 +74,21 @@ def latest_status(runs: list[dict], *, now: datetime, stale_after_s: float) -> s
 
     status = latest.get("status")
     if status in _TERMINAL_STATUSES:
-        return status
+        return status, latest
     if status not in _LIFECYCLE_STATUSES:
-        return "stalled"  # an unrecognized status -- fail toward "needs attention", not "fine"
+        return "stalled", latest  # unrecognized status -- fail toward "needs attention"
 
-    recorded = _parse_last_run(latest.get("recorded_at") or "")
+    recorded = parse_last_run(latest.get("recorded_at") or "")
     if recorded is None:
-        return "stalled"  # unparseable timestamp -- can't confirm freshness, so don't assume it
+        return "stalled", latest  # unparseable timestamp -- can't confirm freshness
     age_s = (now - recorded).total_seconds()
-    return "stalled" if age_s > stale_after_s else "running"
+    return ("stalled" if age_s > stale_after_s else "running"), latest
+
+
+def latest_status(runs: list[dict], *, now: datetime, stale_after_s: float) -> str:
+    """Classify a stage's liveness from its own `runs` (already filtered to one stage, e.g. via
+    `store.list_runs(stage=...)` — this function doesn't filter by stage itself, so passing an
+    unfiltered list mixes stages' histories into one classification). Thin wrapper over
+    :func:`latest_status_and_record` for a caller that only wants the status string.
+    """
+    return latest_status_and_record(runs, now=now, stale_after_s=stale_after_s)[0]
