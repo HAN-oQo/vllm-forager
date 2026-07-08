@@ -30,7 +30,14 @@ python -u -m src.orchestrator --once 2>&1 | tee "$log"
 code=${PIPESTATUS[0]}
 
 if [ "$code" -eq 0 ]; then
-  echo "[orchestrator] tick ok — log: $log"
+  # A backed-off tick (another tick already holding the lock, T4.3) also exits 0 -- it isn't a
+  # failure, but it isn't "ran" either; distinguish the two so this line doesn't claim a tick
+  # completed when zero stages actually ran.
+  if grep -q -- "-- skipping this tick" "$log"; then
+    echo "[orchestrator] tick skipped (lock already held) — log: $log"
+  else
+    echo "[orchestrator] tick ok — log: $log"
+  fi
 else
   # Keep the outbound push generic (no raw log content) -- collect.sh's own failure ping is a
   # fixed string too; log details stay local (data/logs/), not forwarded to a third-party

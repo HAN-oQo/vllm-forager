@@ -194,9 +194,12 @@ class JsonlStore(Store):
 
         Not safe against **concurrent** writers, though: two processes appending large records
         (e.g. a big captured MI250 log) around the same time can have their underlying
-        multi-syscall writes interleave, corrupting more than just a trailing line — the same
-        overlapping-writers problem T4.3 ("Locking / idempotency") exists to solve project-wide,
-        not fixed here for just this one file.
+        multi-syscall writes interleave, corrupting more than just a trailing line. T4.3
+        ("Locking / idempotency", `src.locking.run_lock`) mitigates this for `orchestrator.main`
+        invocations racing each other, but not project-wide — a standalone `collector.main`/
+        `analyze.main`/etc. run (e.g. via `/collect-loop` or `scripts/collect.sh`'s own cron
+        entry) takes no lock of its own and can still race an orchestrator tick's internal call
+        to the same agent; see `src.locking`'s own docstring for that disclosed gap.
         """
         self.data_dir.mkdir(parents=True, exist_ok=True)
         with self.runs_path.open("a") as f:

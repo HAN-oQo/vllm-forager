@@ -246,15 +246,22 @@ gap in ticks just means the next one finds more stages due/triggered, not corrup
 (`src.locking.run_lock`, at `data/orchestrator.lock`) around a tick — a second invocation while one is already in
 flight (e.g. a slow-running intel stage still going when cron fires again, a manual run colliding with cron, or a
 bare `python -m src.orchestrator --once` run outside `scripts/orchestrator.sh` entirely) backs off immediately
-(exit 0, no stage ever runs) instead of racing `JsonlStore`'s non-atomic state-file read/modify/write. Living in
-`main()` itself (not the shell script) means it covers every invocation path, not just this one. It's still a
-process-level guard only, not KB-level idempotency for a half-finished tick's own writes — avoid stacking a tight
-manual loop (e.g. `watch -n 60`) on top of the cron entry regardless, since a constant stream of concurrent
-attempts is more backoff noise than the lock is meant to absorb.
+(exit 0, no stage ever runs — `scripts/orchestrator.sh` logs this as "tick skipped (lock already held)", distinct
+from a genuinely completed "tick ok") instead of racing `JsonlStore`'s non-atomic state-file read/modify/write.
+Living in `main()` itself (not the shell script) means it covers every invocation *of the orchestrator*, not just
+this wrapper script — but it does **not** protect a standalone `python -m src.collector` / `python -m src.analyze`
+/ `python -m src.candidates` run (e.g. via `/collect-loop`, or `scripts/collect.sh`'s own independent cron entry
+above) from racing an orchestrator tick that's internally calling that same agent under this lock; those CLIs take
+no lock of their own. It's also still a process-level guard only, not KB-level idempotency for a half-finished
+tick's own writes — avoid stacking a tight manual loop (e.g. `watch -n 60`) on top of the cron entry regardless,
+since a constant stream of concurrent attempts is more backoff noise than the lock is meant to absorb.
 
-**Known gaps, not yet built (later M4 todos):** no KB-level idempotency for a half-finished tick's own writes if
-it crashes mid-flight (T4.3's lock only stops two ticks from running *at once*, it doesn't make an interrupted
-tick's partial writes safe to resume), no per-stage run events/heartbeats in the KB yet (T4.4/T4.5), and no local
-health-record file analogous to `collect.sh`'s `data/last_run.json` (that's T4.6, scoped to the collector
+**Known gaps, not yet built (later M4 todos):** the lock only guards `orchestrator.main()`'s own invocations
+against each other, not every Store-writing CLI against every other one (see above); no KB-level idempotency for a
+half-finished tick's own writes if it crashes mid-flight (T4.3's lock only stops two ticks from running *at once*,
+it doesn't make an interrupted tick's partial writes safe to resume); no way to tell a genuinely stalled/hung tick
+(still holding the lock, never finishing) apart from healthy lock contention until T4.4/T4.5 land (no per-stage run
+events/heartbeats in the KB yet); and no local health-record file analogous to `collect.sh`'s `data/last_run.json`
+(that's T4.6, scoped to the collector
 specifically) — so today "is it alive?" means checking whether cron/tmux is still
 running and reading the log, not a dashboard health panel.

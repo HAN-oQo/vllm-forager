@@ -12,7 +12,7 @@ import fcntl
 
 import pytest
 
-from src import config, locking, orchestrator, policy, taxonomy
+from src import config, locking, orchestrator
 from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m4
@@ -66,20 +66,14 @@ def test_run_lock_conflicts_even_within_one_process(tmp_path) -> None:
         fh.close()
 
 
-@pytest.fixture
-def store(tmp_path) -> JsonlStore:
-    s = JsonlStore(tmp_path / "kb")
-    taxonomy.create_taxonomy(s, ["rocm-build"])
-    policy.create_policy(s, scoring_weights={}, prompt_templates={}, active_taxonomy_version=1)
-    return s
-
-
 def test_orchestrator_main_backs_off_when_a_tick_is_already_in_flight(
-    store: JsonlStore, monkeypatch: pytest.MonkeyPatch, capsys
+    tmp_path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:
     """DEVPLAN's own worked example: 'a second run starts while the first is mid-flight -> it
-    backs off; no item written twice.'"""
-    monkeypatch.setattr(orchestrator, "get_store", lambda: store)
+    backs off; no item written twice.' `run_tick` is stubbed here (already covered by
+    tests/test_orchestrator.py), so the store just needs an identity for `get_store()` to
+    return -- no taxonomy/policy bootstrap is needed since `run_tick` never actually runs."""
+    monkeypatch.setattr(orchestrator, "get_store", lambda: JsonlStore(tmp_path / "kb"))
     calls: list[str] = []
     monkeypatch.setattr(orchestrator, "run_tick", lambda *a, **k: calls.append("ran"))
 
