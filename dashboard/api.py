@@ -65,6 +65,7 @@ from __future__ import annotations
 
 from dataclasses import asdict
 from datetime import datetime
+from typing import Any
 
 from src import parity as parity_module
 from src.agents import scout
@@ -123,11 +124,24 @@ def predictions(store: Store, *, offset: int = 0, limit: int | None = None) -> l
     return [asdict(p) for p in page]
 
 
+def asdict_with(obj: Any, **computed: object) -> dict:
+    """`obj` (a dataclass instance) as a plain dict via ``dataclasses.asdict``, with `computed`
+    merged in afterward — the shared fix for a computed ``@property`` (which ``asdict`` alone
+    silently drops, since it isn't a real dataclass field) or a field ``asdict`` gets wrong
+    (e.g. a ``Path`` that needs to become a ``str`` for JSON). Extracted here after this exact
+    one-line pattern was independently re-derived three times across the dashboard package
+    (this module's own :func:`_candidate_dict`, :mod:`dashboard.review`'s
+    ``_gate_result_dict``, :mod:`dashboard.guardrails`'s ``rag_eval_series``) — a code-review
+    finding that the third occurrence crossed the point where a shared helper earns its keep.
+    """
+    return {**asdict(obj), **computed}
+
+
 def _candidate_dict(candidate: scout.Candidate) -> dict:
     """`candidate` as a plain dict, `priority` included — it's a computed ``@property``, not a
     dataclass field, so ``dataclasses.asdict`` alone would silently drop the one field a
     ranked-queue panel needs to sort/display by."""
-    return {**asdict(candidate), "priority": candidate.priority}
+    return asdict_with(candidate, priority=candidate.priority)
 
 
 def candidates(
