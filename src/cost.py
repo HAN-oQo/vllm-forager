@@ -16,6 +16,14 @@ anywhere in that dynamic scope — including deep inside a helper this module ne
 recorded automatically. ``src/orchestrator.py``'s real ``_intel``/``_contribution`` stages are
 wired this way.
 
+:func:`write_cost_record` is the one write primitive both paths above eventually funnel through
+— but it also has a second, direct caller: :mod:`src.cost_ccusage` (T4.9) writes ``stage="cost"``
+records straight from a parsed ``ccusage session --json`` payload, entirely outside
+``llm.cost_context``/:func:`record_cost` (a Claude Code CLI session bypasses ``llm.py``
+entirely — see that module's own docstring). So not every ``stage="cost"`` record traces back
+to an ``llm.complete`` call; some are ingested session summaries tagged
+``agent="claude_code_session"``.
+
 Known limitations (disclosed, not fixed here — matches this module's own size to what T4.8
 asks for):
 
@@ -34,8 +42,9 @@ asks for):
   second copy to keep in sync. The *only* thing this module's own pricing adds is
   :data:`LOCAL_MODEL_PRICES_PER_MTOK_ENV` for ``local`` calls, which ``llm.py`` always prices
   at ``$0.0`` (no metered per-token charge for a self-hosted endpoint).
-- Only ``llm.complete``/``complete_detailed`` calls made *inside* an active
-  ``llm.cost_context`` scope are recorded. Today that's exactly the calls
+- Of ``llm.complete``/``complete_detailed`` calls specifically (as opposed to
+  :mod:`src.cost_ccusage`'s separate ingest path — see above), only ones made *inside* an
+  active ``llm.cost_context`` scope are recorded. Today that's exactly the calls
   ``src/orchestrator.py``'s real ``_intel``/``_contribution`` stages make (analyst, forecaster,
   reporter, scout) — modules invoked outside the orchestrator tick (e.g. ``agents/grader.py``,
   ``agents/novelty.py``, ``agents/curator.py``, ``rag_eval.py``) make their own
@@ -68,9 +77,37 @@ import json
 import os
 import sys
 from datetime import datetime, timezone
+from typing import TypedDict
 
 from . import llm
 from .store.base import Store
+
+# This codebase's shared `recorded_at` convention for the run-event stream (matches
+# `src.orchestrator._TS_FORMAT`, which this module can't import directly -- orchestrator.py
+# imports `cost`, so importing back would cycle). `src.cost_ccusage` (no such cycle) imports
+# this constant instead of re-declaring its own copy of the literal.
+RECORDED_AT_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
+
+
+class CostRecord(TypedDict):
+    """The shape every ``stage="cost"`` record shares, whether built from an ``llm`` call's
+    :class:`~src.llm.CallMeta` (:func:`record_cost`) or an ingested ``ccusage`` session/model
+    row (:mod:`src.cost_ccusage`). Annotating both call sites' dict literals with this catches a
+    typo'd/missing/mistyped key at mypy time instead of only surfacing as a malformed record
+    silently accepted by :func:`write_cost_record`."""
+
+    stage: str
+    agent: str
+    run_id: str
+    loop: str | None
+    provider: str
+    model: str
+    tokens_in: int
+    tokens_out: int
+    tokens_cache: int
+    cost_usd: float
+    recorded_at: str
+
 
 # JSON object of {"served-model-name": [price_in_per_mtok, price_out_per_mtok], ...} in USD.
 # Self-hosted `local` calls have no metered per-token charge, so `llm.py` always reports
@@ -114,6 +151,23 @@ def _priced_cost_usd(meta: llm.CallMeta) -> float:
     return meta.prompt_tokens / 1e6 * price_in + meta.completion_tokens / 1e6 * price_out
 
 
+def write_cost_record(store: Store, record: CostRecord) -> None:
+    """Append `record` (already shaped for the cost run-event stream) via ``store.record_run``,
+    best-effort — a KB write hiccup must never crash a caller that already has its (billed)
+    cost data. Shared by :func:`record_cost` (T4.8, one ``llm`` call) and
+    :mod:`src.cost_ccusage` (T4.9, one ``ccusage`` session/model row) — both build their own
+    ``record`` dict from a different source, then hand it to this one write primitive.
+    """
+    try:
+        # `dict(record)`: `Store.record_run` takes a plain `dict` -- mypy treats a TypedDict as
+        # a distinct, non-`dict`-compatible type for assignment purposes even though it's a
+        # real dict at runtime, so this copy is purely to satisfy that, not a behavior change.
+        store.record_run(dict(record))
+    except Exception as exc:
+        agent = record.get("agent")
+        print(f"cost: failed to record cost for agent={agent!r}: {exc}", file=sys.stderr)
+
+
 def record_cost(
     store: Store,
     *,
@@ -125,13 +179,14 @@ def record_cost(
     """Persist one cost record for a completed ``llm`` call, best-effort — a KB write hiccup
     must never turn into a crash for the agent that already got its (billed) LLM reply.
 
-    The whole body is guarded, not just the ``store.record_run`` call: ``llm.cost_context``'s
-    own contract is that ``sink`` (built from this function) must never raise — a bug in
-    ``_priced_cost_usd`` or the record's construction must degrade the same way a KB-write
-    failure does, not propagate back into ``llm.py`` and fail an otherwise-successful call.
+    The whole body is guarded, not just :func:`write_cost_record`'s own ``store.record_run``
+    call: ``llm.cost_context``'s contract is that ``sink`` (built from this function) must
+    never raise — a bug in ``_priced_cost_usd`` or the record's construction must degrade the
+    same way a KB-write failure does, not propagate back into ``llm.py`` and fail an
+    otherwise-successful call.
     """
     try:
-        record = {
+        record: CostRecord = {
             "stage": "cost",
             "agent": agent,
             "run_id": run_id,
@@ -142,11 +197,12 @@ def record_cost(
             "tokens_out": meta.completion_tokens,
             "tokens_cache": 0,  # see module docstring's Known limitations
             "cost_usd": _priced_cost_usd(meta),
-            "recorded_at": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "recorded_at": datetime.now(timezone.utc).strftime(RECORDED_AT_FORMAT),
         }
-        store.record_run(record)
     except Exception as exc:
         print(f"cost: failed to record cost for agent={agent!r}: {exc}", file=sys.stderr)
+        return
+    write_cost_record(store, record)
 
 
 def agent_context(store: Store, *, agent: str, loop: str, run_id: str):
