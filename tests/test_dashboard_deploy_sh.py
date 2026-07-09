@@ -15,6 +15,7 @@ since it needs both actually installed and a real port bind.
 
 from __future__ import annotations
 
+import fcntl
 import os
 import shutil
 import subprocess
@@ -48,7 +49,8 @@ def _write_scripts(repo: Path, tmp_path: Path, *, restart_exit_code: int = 0) ->
     covered separately, against the real thing, by the integration tests below) and a no-op
     `notify.sh` stub (the real one is a silent no-op without `NOTIFY_URL` set anyway; stubbed
     here purely to avoid a noisy "file not found" on stderr for a script this test isn't
-    about)."""
+    about). Writes files only -- doesn't commit; callers use this on the seed repo, before
+    its own initial commit, so the scripts are part of `origin`'s history from the start."""
     scripts_dir = repo / "scripts"
     scripts_dir.mkdir(exist_ok=True)
     shutil.copy2(ROOT / "scripts" / "dashboard-deploy.sh", scripts_dir / "dashboard-deploy.sh")
@@ -81,13 +83,22 @@ def _restart_was_called(tmp_path: Path) -> bool:
     return (tmp_path / _RESTART_CALLED_MARKER).exists()
 
 
-def _build_origin_and_clone(tmp_path: Path) -> tuple[Path, Path]:
+def _build_origin_and_clone(tmp_path: Path, *, restart_exit_code: int = 0) -> tuple[Path, Path]:
     """A bare `origin` repo + a real clone of it on `main` -- `dashboard-deploy.sh` needs a
-    real remote to `git pull --ff-only` from, not just a standalone repo."""
+    real remote to `git pull --ff-only` from, not just a standalone repo. The scripts (real
+    dashboard-deploy.sh + stubs) are baked into the *seed's own initial commit*, not added to
+    `clone` afterward -- committing them onto `clone` post-clone would diverge its history
+    from `origin` (an extra commit `origin` never gets), breaking every later `--ff-only`
+    pull in these tests; a real deploy clone's scripts/ is simply already part of `main`."""
     origin = tmp_path / "origin.git"
     seed = tmp_path / "seed"
     _init_repo(seed)
     (seed / "README.md").write_text("seed\n")
+    # Mirrors the real repo's own `data/` gitignore entry -- dashboard-deploy.sh's lock file
+    # (and dashboard-restart.sh's logs) live under `data/`; without this, creating them would
+    # itself trip the dirty-tree guard these tests are exercising.
+    (seed / ".gitignore").write_text("data/\n")
+    _write_scripts(seed, tmp_path, restart_exit_code=restart_exit_code)
     _git("add", "-A", cwd=seed)
     _git("commit", "-q", "-m", "initial", cwd=seed)
     subprocess.run(["git", "clone", "-q", "--bare", str(seed), str(origin)], check=True, timeout=30)
@@ -119,8 +130,22 @@ def _push_a_new_commit(origin: Path, tmp_path: Path) -> None:
 
 def test_deploy_sh_refuses_a_dirty_working_tree(tmp_path: Path) -> None:
     _origin, clone = _build_origin_and_clone(tmp_path)
-    _write_scripts(clone, tmp_path)
     (clone / "README.md").write_text("uncommitted local change\n")
+
+    result = _run_deploy_sh(clone)
+
+    assert result.returncode == 1
+    assert "working tree dirty" in result.stderr
+    assert not _restart_was_called(tmp_path)
+
+
+def test_deploy_sh_refuses_a_dirty_working_tree_with_only_an_untracked_file(
+    tmp_path: Path,
+) -> None:
+    """A stray *untracked* file must count as dirty too, not just a tracked-file edit --
+    `git diff --quiet` alone (the original guard) is blind to untracked files."""
+    _origin, clone = _build_origin_and_clone(tmp_path)
+    (clone / "UNTRACKED.md").write_text("never committed\n")
 
     result = _run_deploy_sh(clone)
 
@@ -131,7 +156,6 @@ def test_deploy_sh_refuses_a_dirty_working_tree(tmp_path: Path) -> None:
 
 def test_deploy_sh_refuses_a_non_main_branch(tmp_path: Path) -> None:
     _origin, clone = _build_origin_and_clone(tmp_path)
-    _write_scripts(clone, tmp_path)
     _git("checkout", "-q", "-b", "some-feature-branch", cwd=clone)
 
     result = _run_deploy_sh(clone)
@@ -143,7 +167,6 @@ def test_deploy_sh_refuses_a_non_main_branch(tmp_path: Path) -> None:
 
 def test_deploy_sh_no_op_when_already_up_to_date(tmp_path: Path) -> None:
     _origin, clone = _build_origin_and_clone(tmp_path)
-    _write_scripts(clone, tmp_path)
 
     result = _run_deploy_sh(clone)
 
@@ -152,9 +175,28 @@ def test_deploy_sh_no_op_when_already_up_to_date(tmp_path: Path) -> None:
     assert not _restart_was_called(tmp_path)
 
 
+def test_deploy_sh_refuses_a_concurrent_run(tmp_path: Path) -> None:
+    """A second invocation must not race the first's pull/restart -- hold the same
+    `data/dashboard-deploy.lock` externally (as a concurrent deploy would) and confirm
+    dashboard-deploy.sh backs off instead of proceeding."""
+    origin, clone = _build_origin_and_clone(tmp_path)
+    _push_a_new_commit(origin, tmp_path)
+
+    (clone / "data").mkdir(exist_ok=True)
+    lock_fd = os.open(clone / "data" / "dashboard-deploy.lock", os.O_CREAT | os.O_RDWR)
+    fcntl.flock(lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    try:
+        result = _run_deploy_sh(clone)
+        assert result.returncode == 1
+        assert "already running" in result.stderr
+        assert not _restart_was_called(tmp_path)
+    finally:
+        fcntl.flock(lock_fd, fcntl.LOCK_UN)
+        os.close(lock_fd)
+
+
 def test_deploy_sh_pulls_and_restarts_when_a_new_commit_exists(tmp_path: Path) -> None:
     origin, clone = _build_origin_and_clone(tmp_path)
-    _write_scripts(clone, tmp_path)
     _push_a_new_commit(origin, tmp_path)
 
     result = _run_deploy_sh(clone)
@@ -167,8 +209,7 @@ def test_deploy_sh_pulls_and_restarts_when_a_new_commit_exists(tmp_path: Path) -
 def test_deploy_sh_does_not_restart_when_the_restart_script_itself_fails(
     tmp_path: Path,
 ) -> None:
-    origin, clone = _build_origin_and_clone(tmp_path)
-    _write_scripts(clone, tmp_path, restart_exit_code=1)
+    origin, clone = _build_origin_and_clone(tmp_path, restart_exit_code=1)
     _push_a_new_commit(origin, tmp_path)
 
     result = _run_deploy_sh(clone)
@@ -183,7 +224,6 @@ def test_deploy_sh_fails_when_pull_would_not_fast_forward(tmp_path: Path) -> Non
     """A diverged local commit (never pushed) makes `--ff-only` fail -- dashboard-deploy.sh
     must not force/rebase past it, just refuse and leave the local state untouched."""
     origin, clone = _build_origin_and_clone(tmp_path)
-    _write_scripts(clone, tmp_path)
     _push_a_new_commit(origin, tmp_path)
     (clone / "LOCAL.md").write_text("a local commit never pushed\n")
     _git("add", "-A", cwd=clone)
@@ -197,6 +237,22 @@ def test_deploy_sh_fails_when_pull_would_not_fast_forward(tmp_path: Path) -> Non
 
 # --------------------------------------------------------------------- dashboard-restart.sh
 # (offline guard; the real tmux-supervision behavior is integration-only, below)
+
+
+def test_restart_sh_exits_cleanly_when_a_flag_is_missing_its_value() -> None:
+    """`--port` with no following value must not blow up as a raw bash "unbound variable"
+    trace under `set -u` -- it should fail with a clear, intentional message instead."""
+    result = subprocess.run(
+        ["bash", str(ROOT / "scripts" / "dashboard-restart.sh"), "--port"],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode != 0
+    assert "unbound variable" not in result.stderr
+    assert "--port requires a value" in result.stderr
 
 
 def test_restart_sh_exits_when_tmux_not_on_path(tmp_path: Path) -> None:

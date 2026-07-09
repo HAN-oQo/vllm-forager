@@ -22,14 +22,25 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
+# POSIX single-quote escaping (portable across bash/dash/zsh) -- tmux runs the pane's
+# shell-command through whatever `default-shell`/$SHELL the pane inherits, which is not
+# guaranteed to be bash, so bash's own `printf %q` (which can emit bash-only $'...' ANSI-C
+# quoting that a non-bash shell won't parse the same way) isn't safe to embed there.
+_shq() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
 host="127.0.0.1"
 port="8765"
 data_dir_args=()
 while [ $# -gt 0 ]; do
   case "$1" in
-    --host) host="$2"; shift 2 ;;
-    --port) port="$2"; shift 2 ;;
-    --data-dir) data_dir_args=(--data-dir "$2"); shift 2 ;;
+    --host) host="${2:?dashboard-restart: --host requires a value}"; shift 2 ;;
+    --port) port="${2:?dashboard-restart: --port requires a value}"; shift 2 ;;
+    --data-dir)
+      data_dir_args=(--data-dir "${2:?dashboard-restart: --data-dir requires a value}")
+      shift 2
+      ;;
     *) echo "dashboard-restart: unknown argument: $1" >&2; exit 2 ;;
   esac
 done
@@ -41,9 +52,11 @@ if ! command -v tmux >/dev/null 2>&1; then
   exit 1
 fi
 
-mkdir -p data/logs
+mkdir -p data/logs || { echo "dashboard-restart: failed to create data/logs" >&2; exit 1; }
 ts="$(date -u +%Y%m%dT%H%M%SZ)"
-log="data/logs/dashboard-$ts.log"
+# `-$$` (this script's own PID) so two restarts landing in the same UTC second don't
+# collide on one log path and have the second `tee` truncate the first restart's log.
+log="data/logs/dashboard-$ts-$$.log"
 
 if tmux has-session -t "$session" 2>/dev/null; then
   echo "[dashboard-restart] killing existing session: $session"
@@ -53,17 +66,15 @@ fi
 venv_cmd=""
 [ -f .venv/bin/activate ] && venv_cmd="source .venv/bin/activate && "
 
-# `printf %q` so a --data-dir path with spaces/quotes survives being embedded in the
-# tmux pane's own shell command string intact.
-dashboard_cmd="python -m dashboard --host $(printf '%q' "$host") --port $(printf '%q' "$port")"
+dashboard_cmd="python -m dashboard --host $(_shq "$host") --port $(_shq "$port")"
 if [ "${#data_dir_args[@]}" -gt 0 ]; then
-  dashboard_cmd="$dashboard_cmd --data-dir $(printf '%q' "${data_dir_args[1]}")"
+  dashboard_cmd="$dashboard_cmd --data-dir $(_shq "${data_dir_args[1]}")"
 fi
 
 # `2>&1 | tee` inside the tmux pane itself (not this script's own stdout) -- the pane must
 # keep running (and logging) long after this script exits.
 tmux new-session -d -s "$session" \
-  "${venv_cmd}${dashboard_cmd} 2>&1 | tee '$log'"
+  "${venv_cmd}${dashboard_cmd} 2>&1 | tee $(_shq "$log")"
 
 # tmux new-session -d returns as soon as the session/pane is created, even if the command
 # inside it then immediately fails and the pane (and with it, the session) closes -- give it a

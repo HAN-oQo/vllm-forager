@@ -10,13 +10,22 @@
 # orchestrator.py itself, which has no deploy-time hook to attach to today).
 #
 # Refuses to deploy over a dirty working tree (mirrors scripts/triage.sh's own identical
-# guard) -- a stable serving clone should never carry uncommitted local changes, and pulling
-# over one could silently discard them or fail outright.
+# guard, via `git status --porcelain` so an untracked file -- not just a tracked-file
+# modification -- also counts as dirty; a stray untracked file left behind at a path the
+# incoming pull also adds would otherwise sail past a tracked-only check and only fail later,
+# mid-pull, with "untracked working tree file would be overwritten") -- a stable serving
+# clone should never carry uncommitted local changes, and pulling over one could silently
+# discard them or fail outright.
+#
+# Guards against two overlapping invocations (e.g. a retried manual run racing a cron tick)
+# with `flock` -- mirrors src/locking's own reason for existing (see docs/RUNBOOK.md's
+# "Overlap (T4.3)" section), applied at the shell level here since this script has no Python
+# process of its own to hold that lock.
 #
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
-if ! git diff --quiet || ! git diff --cached --quiet; then
+if [ -n "$(git status --porcelain)" ]; then
   echo "[dashboard-deploy] working tree dirty -- refusing to pull; resolve by hand first" >&2
   exit 1
 fi
@@ -24,6 +33,13 @@ fi
 branch="$(git rev-parse --abbrev-ref HEAD)"
 if [ "$branch" != "main" ]; then
   echo "[dashboard-deploy] on branch '$branch', not 'main' -- refusing to deploy a non-main checkout" >&2
+  exit 1
+fi
+
+mkdir -p data
+exec 9>data/dashboard-deploy.lock
+if ! flock -n 9; then
+  echo "[dashboard-deploy] another deploy is already running -- exiting" >&2
   exit 1
 fi
 
