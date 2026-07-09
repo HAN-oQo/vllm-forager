@@ -412,7 +412,7 @@ details[open]>summary>.chev{transform:rotate(90deg)}
 .pr{display:flex;align-items:baseline;gap:.6rem;padding:.32rem .5rem .32rem 1.8rem;
   border-radius:6px;font-size:.9rem}
 .pr:hover{background:var(--surface-2)}
-.pr .id{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--ink-3);
+.pr .id,.pr-comment .id{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--ink-3);
   flex-shrink:0;min-width:9.5rem}
 .pr .t{color:var(--ink);flex:1}
 .pr .t a{color:inherit}
@@ -534,7 +534,6 @@ _TAB_STYLE = """
 .pr-row{border:1px solid var(--border);border-radius:6px;padding:.5rem;margin-bottom:.6rem}
 .pr-meta{color:var(--ink-2);font-size:.82rem;margin:.3rem 0}
 .pr-comment{display:flex;align-items:baseline;gap:.5rem;font-size:.85rem;padding:.2rem 0}
-.pr-comment .id{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
 """
 
 
@@ -947,13 +946,24 @@ def _upstream_comment_html(comment: UpstreamComment) -> str:
     )
 
 
+def _mergeable_chip(mergeable: bool | None) -> tuple[str, str]:
+    """``(css-class, label)`` for the mergeable chip — a code-review finding: `mergeable=None`
+    (GitHub hasn't finished computing it yet — `pr_followup.PRState`'s own docstring: "`None`
+    when GitHub hasn't computed it yet, never treated the same as a confirmed conflict") was
+    previously rendered identically to `mergeable=True`, giving a false "all clear" green chip
+    during that window. Now a distinct, neutral "checking..." state."""
+    if mergeable is False:
+        return "gap", "conflict"
+    if mergeable is True:
+        return "open", "mergeable"
+    return "issue", "checking…"
+
+
 def _upstream_pr_row_html(pr: UpstreamPR) -> str:
     ci_chip_class = {"success": "open", "failure": "gap", "pending": "issue"}.get(
         pr.ci_status, "issue"
     )
-    mergeable_class, mergeable_label = (
-        ("gap", "conflict") if pr.mergeable is False else ("open", "mergeable")
-    )
+    mergeable_class, mergeable_label = _mergeable_chip(pr.mergeable)
     outstanding_class = "gap" if pr.outstanding_count else "open"
     reviewers = ", ".join(pr.requested_reviewers) or "none requested"
     url = escape(_safe_href(pr.url))

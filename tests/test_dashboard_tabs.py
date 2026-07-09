@@ -17,7 +17,7 @@ from pathlib import Path
 import pytest
 
 from dashboard import render, server
-from src import gate, report, upstream_prs
+from src import gate, pr_followup, report
 from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m5
@@ -350,7 +350,7 @@ def test_upstream_prs_tab_renders_an_open_pr_with_outstanding_comments(
             return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(comments))
         raise AssertionError(f"unexpected gh invocation: {cmd}")
 
-    monkeypatch.setattr(upstream_prs.subprocess, "run", _run)
+    monkeypatch.setattr(pr_followup.subprocess, "run", _run)
 
     page = render.render_tab_page(store, "prs")
 

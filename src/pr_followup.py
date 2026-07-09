@@ -277,29 +277,21 @@ def _ci_status_from_rollup(rollup: list) -> str:
     return "success" if saw_completed else "unknown"
 
 
-def fetch_pr_state(store: Store, repo: str, number: int) -> PRState | None:
-    """Poll GitHub for `repo`#`number`'s current lifecycle state, or `None` if any `gh` call
-    needed to answer it failed (logged, not raised -- the same fetch-failure tolerance every
-    sibling M3 stage applies, but fails **closed**: a comments-fetch or identity-resolution
-    failure must never be silently read as "no new comments," since that could hide reviewer
-    feedback in the same way `review_loop.run_review_loop` explicitly refuses to guess who
-    posted a comment when its own identity check fails).
+_PR_STATE_FIELDS = "url,state,mergeable,reviewDecision,updatedAt,statusCheckRollup"
 
-    `has_new_comments` reuses `review_loop`'s own already-answered bookkeeping (the same
-    `stage="review_response"` KB records `run_review_loop` itself checks) and the same
-    `get_item_or_skip`-style KB-item gate `run_review_loop` applies, so the steward's decision to
-    run a review-response pass always agrees with whether that pass would actually find
-    something new to compose."""
-    cmd = [
-        "gh",
-        "pr",
-        "view",
-        str(number),
-        "--repo",
-        repo,
-        "--json",
-        "url,state,mergeable,reviewDecision,updatedAt,statusCheckRollup",
-    ]
+
+def _gh_pr_view(repo: str, number: int, fields: str) -> dict | None:
+    """One ``gh pr view --json <fields>`` call, or `None` if it failed (logged, not raised).
+
+    Extracted (a code-review finding on T5.14) so the fetch+error-handling ladder itself --
+    the subprocess invocation, the three failure modes, the JSON-decode guard -- lives in
+    exactly one place. :func:`fetch_pr_state` (this module) and
+    :func:`~src.upstream_prs.fetch_upstream_pr` both need a live ``gh pr view`` for the same
+    PR but ask for different field sets (T5.14's own tracker also needs `reviewRequests`, for
+    "who's involved") -- before this extraction, `upstream_prs.py` had hand-copied this entire
+    block into its own sibling function just to vary the `--json` argument, so a future fix to
+    this contract (a new `gh` failure mode, a retry policy) had to be applied twice by hand."""
+    cmd = ["gh", "pr", "view", str(number), "--repo", repo, "--json", fields]
     try:
         result = subprocess.run(
             cmd, capture_output=True, text=True, check=True, timeout=gate._DEFAULT_GH_TIMEOUT_S
@@ -321,6 +313,25 @@ def fetch_pr_state(store: Store, repo: str, number: int) -> PRState | None:
         print(
             f"pr_followup: gh pr view returned unexpected JSON for {repo}#{number}", file=sys.stderr
         )
+        return None
+    return data
+
+
+def fetch_pr_state(store: Store, repo: str, number: int) -> PRState | None:
+    """Poll GitHub for `repo`#`number`'s current lifecycle state, or `None` if any `gh` call
+    needed to answer it failed (logged, not raised -- the same fetch-failure tolerance every
+    sibling M3 stage applies, but fails **closed**: a comments-fetch or identity-resolution
+    failure must never be silently read as "no new comments," since that could hide reviewer
+    feedback in the same way `review_loop.run_review_loop` explicitly refuses to guess who
+    posted a comment when its own identity check fails).
+
+    `has_new_comments` reuses `review_loop`'s own already-answered bookkeeping (the same
+    `stage="review_response"` KB records `run_review_loop` itself checks) and the same
+    `get_item_or_skip`-style KB-item gate `run_review_loop` applies, so the steward's decision to
+    run a review-response pass always agrees with whether that pass would actually find
+    something new to compose."""
+    data = _gh_pr_view(repo, number, _PR_STATE_FIELDS)
+    if data is None:
         return None
 
     state = str(data.get("state") or "").lower()
