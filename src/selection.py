@@ -145,7 +145,7 @@ def is_selected(store: Store, repo: str, number: int) -> bool:
     return latest_decision(store, repo, number) == "selected"
 
 
-def _decisions_by_key(store: Store) -> dict[tuple[str, int], str]:
+def decisions_by_key(store: Store) -> dict[tuple[str, int], str]:
     """Every (`repo`, `number`) with any recorded selection history, mapped to its most
     recent decision — built from **one** ``store.list_runs(stage="selection")`` fetch, so
     :func:`filter_selected` costs one store read total, not one per candidate (a code-review
@@ -153,6 +153,9 @@ def _decisions_by_key(store: Store) -> dict[tuple[str, int], str]:
     per candidate, each issuing its own full store query — the exact N-separate-reads
     anti-pattern already found and fixed twice in this milestone, for
     :mod:`dashboard.pipeline_diagram` and :mod:`dashboard.health`).
+
+    Public (T5.12): the dashboard's own Candidates tab needs this same one-fetch batching to
+    show each row's current decision without reintroducing the identical per-row anti-pattern.
     """
     by_key: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for run in store.list_runs(stage="selection"):
@@ -180,7 +183,7 @@ def filter_selected(store: Store, candidates: list[Candidate]) -> list[Candidate
     can never have been selected — there's no ``(repo, number)`` to have recorded a decision
     against — so it's excluded, not raised on.
     """
-    decisions = _decisions_by_key(store)
+    decisions = decisions_by_key(store)
     selected = []
     for candidate in candidates:
         parsed = parse_repo_number(candidate.evidence)
