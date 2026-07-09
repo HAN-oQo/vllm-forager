@@ -123,6 +123,23 @@ def test_list_attempts_empty_when_nothing_worked(tmp_path: Path) -> None:
     assert attempts.list_attempts(store) == []
 
 
+def test_list_attempts_never_calls_get_item_per_candidate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: titles must come from one batched `store.query(repo=...)` per distinct
+    repo, not one `store.get_item` per candidate (the N-separate-reads anti-pattern this
+    milestone's review already fixed twice elsewhere)."""
+    store = _store_with_verify(tmp_path, verified=True, recorded_at="2025-12-31T00:00:00Z")
+    monkeypatch.setattr(
+        JsonlStore, "get_item", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+
+    rows = attempts.list_attempts(store)
+
+    assert len(rows) == 1
+    assert rows[0]["title"] == "vLLM crashes on gfx90a with fp8"
+
+
 # --------------------------------------------------------------------- open_attempt
 
 
@@ -151,7 +168,23 @@ def test_open_attempt_still_reports_a_failed_candidate(tmp_path: Path) -> None:
     assert result is not None
     assert result["verified"] is False
     assert "FAILED" in result["outcome"]
-    assert result["review_bundle"] is None
+    assert "review_bundle" not in result
+
+
+def test_open_attempt_omits_review_bundle_by_default_even_when_gate_ready(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: `include_review_bundle` must default to `False` so plain browsing never
+    pays `review_bundle`'s LLM cost -- confirmed by making that cost raise if paid."""
+    store = _store_with_verify(tmp_path, verified=True, recorded_at="2025-12-31T00:00:00Z")
+    _make_gate_ready(store)
+    monkeypatch.setattr(gate, "_score", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+
+    result = attempts.open_attempt(store, "o/r", 1)
+
+    assert result is not None
+    assert result["rendered_html"] is not None
+    assert "review_bundle" not in result
 
 
 def test_open_attempt_review_bundle_is_none_when_verified_but_not_gate_ready(
@@ -159,7 +192,7 @@ def test_open_attempt_review_bundle_is_none_when_verified_but_not_gate_ready(
 ) -> None:
     store = _store_with_verify(tmp_path, verified=True, recorded_at="2025-12-31T00:00:00Z")
 
-    result = attempts.open_attempt(store, "o/r", 1)
+    result = attempts.open_attempt(store, "o/r", 1, include_review_bundle=True)
 
     assert result is not None
     assert result["rendered_html"] is None
@@ -172,7 +205,7 @@ def test_open_attempt_includes_review_bundle_for_a_gate_ready_candidate(
     store = _store_with_verify(tmp_path, verified=True, recorded_at="2025-12-31T00:00:00Z")
     _make_gate_ready(store)
 
-    result = attempts.open_attempt(store, "o/r", 1)
+    result = attempts.open_attempt(store, "o/r", 1, include_review_bundle=True)
 
     assert result is not None
     assert result["rendered_html"] is not None

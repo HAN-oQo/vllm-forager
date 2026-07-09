@@ -227,6 +227,14 @@ def list_worked(store: Store) -> list[dict]:
     A `stage="verify"` run missing `repo`/`number` (malformed) is skipped rather than raised
     on -- every other read endpoint in this codebase degrades past one bad record the same way
     instead of crashing a whole dashboard page over it.
+
+    Titles are batched **one `store.query(repo=...)` per distinct repo**, not one
+    `store.get_item` per candidate -- a code-review finding: `get_item` re-reads and
+    re-parses that repo's entire JSONL file on `JsonlStore`, so a naive per-candidate call
+    would re-read the same file once per worked candidate in it, the exact N-separate-reads
+    anti-pattern this milestone's own review already found and fixed twice
+    (`dashboard.pipeline_diagram`, `dashboard.health`) and once more in
+    `selection.filter_selected`'s `_decisions_by_key`.
     """
     runs_by_candidate: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for run in store.list_runs(stage="verify"):
@@ -236,11 +244,14 @@ def list_worked(store: Store) -> list[dict]:
             continue
         runs_by_candidate[(repo, number)].append(run)
 
+    items_by_repo: dict[str, dict[int, dict]] = {}
     summaries = []
     for (repo, number), runs in runs_by_candidate.items():
         latest = latest_run(runs)
         assert latest is not None  # `runs` is non-empty by construction
-        item = store.get_item(repo, number)
+        if repo not in items_by_repo:
+            items_by_repo[repo] = {i["number"]: i for i in store.query(repo=repo)}
+        item = items_by_repo[repo].get(number)
         summaries.append(
             {
                 "repo": repo,
