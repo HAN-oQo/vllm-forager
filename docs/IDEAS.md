@@ -187,8 +187,44 @@
   *is* that harness pointed at external claims; a vLLM ROCm build must exist on the node; the prose→repro step can
   misreproduce (false gaps) → run logs + human review contain it; a relevance filter is needed so it doesn't chase
   CUDA-only news that can't matter on ROCm.
+- **Aspiration (owner):** the north star is the agent doing this **fully end-to-end autonomously** — find the
+  announcement, **stand up the vLLM ROCm env on MI250 itself**, run it, diagnose the failure, and propose the fix,
+  with a human only at the final PR gate. Today it's blocked on the M3 build/repro harness *and* the fact that the
+  MI250 nodes carry no standing vLLM env (mi250-051 is gfx90a + ROCm but has no vLLM installed), so **env-standup
+  is part of the capability**, not a precondition to assume.
 - **Status:** shaping — graduate once the M3 reproduction harness exists (then this is mostly a new *source*
   feeding it) + the external-feed ingestion + relevance filter are designed.
+
+### Prompt/task-aware model router for cost (OpenRouter-style auto-routing)
+- **What:** route each `llm.complete` call to the **cheapest model that can handle it**, decided per request —
+  like **OpenRouter's Auto router** (a classifier picks the model for the prompt). Two signals: (a) a **static
+  per-task tier** (the task is known at the call site — classify / score / novelty-judge = trivial → cheap;
+  claim / node-summary / forecast = mid; patch-writing / adversarial-review / latent-synthesis = frontier), and
+  (b) a **prompt-difficulty estimate** where the task type alone isn't decisive. Plus **escalate-on-failure**: run
+  the cheap model first, and if its output fails validation / confidence, retry on a stronger one.
+- **Why / value:** most calls in this system are trivial/structured (enum classifications, boolean judgments) and
+  are wasteful on a frontier model; only a few (patching, review, synthesis) truly need one. A router captures the
+  bulk of the savings the cost work (T4.8–T4.11) only *measures / caps* — this is spend-shaping at the routing
+  layer, upstream of the meter.
+- **How (concrete):** implement the router **inside `src/llm.py`** (the existing provider seam), keyed by a
+  `task`/`tier` hint each agent passes (or inferred from the prompt). Backends: the existing `claude_cli` /
+  `claude_api` / **local vLLM** (cheap tier) providers; optionally **OpenRouter itself** as one backend
+  (`LLM_PROVIDER=openrouter`) to reuse its Auto routing + model catalog — with the caveat it's a third party that
+  sees prompt data. **LiteLLM (T4.10)** also does routing/fallbacks, so the router and the budget gateway can be
+  one layer.
+- **Relation to what exists:** complements **`llm_bandit.py` (T2.6)** — the bandit learns *which provider* is best
+  from **outcomes over time**; this router picks a *tier* per request from the **prompt/task** up front, and the
+  two compose (router picks the tier, bandit picks within it). It's also the general form of **T4.11 / the
+  classification cascade** (that cascade is this router applied to one task), and it needs **T4.8/T4.9 cost
+  capture** to prove the savings and tune the tiers.
+- **Scope / effort:** M — a routing layer in `llm.py` + per-task tier hints at the call sites + escalate-on-failure;
+  a prompt-difficulty classifier only where a static tier isn't enough.
+- **Depends on / risk:** a misroute (cheap model on a hard task) degrades quality → contained by output validation
+  + confidence + escalate-on-failure; the routing decision itself must be far cheaper than the savings (prefer
+  static task tiers; use a prompt classifier sparingly); an external router (OpenRouter) adds a third-party
+  data-sharing + availability dependency. Relates to `docs/research/cost-tracking.md`, `llm_bandit.py`, T4.8–T4.11.
+- **Status:** shaping — strong cost lever; sequence after T4.8/T4.9 cost capture exists (so the tier choices are
+  data-driven, not guessed), and it naturally subsumes the T4.11 cascade as its first instance.
 
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
