@@ -241,7 +241,7 @@ def list_worked(store: Store) -> list[dict]:
     would re-read the same file once per worked candidate in it, the exact N-separate-reads
     anti-pattern this milestone's own review already found and fixed twice
     (`dashboard.pipeline_diagram`, `dashboard.health`) and once more in
-    `selection.filter_selected`'s `_decisions_by_key`.
+    `selection.filter_selected`'s `decisions_by_key`.
     """
     runs_by_candidate: dict[tuple[str, int], list[dict]] = defaultdict(list)
     for run in store.list_runs(stage="verify"):

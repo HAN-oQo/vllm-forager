@@ -33,13 +33,17 @@ the snapshot already, with a "show N more" control per truncated node fetching t
 from __future__ import annotations
 
 from html import escape
+from urllib.parse import quote
 
 from src.agents.forecaster import Prediction, list_predictions
+from src.agents.grader import parse_repo_number
 from src.agents.reporter import is_merged, repo_number_label
+from src.selection import decisions_by_key
 from src.store.base import Store
 from src.taxonomy import LEVEL_SEPARATOR
 
-from . import api
+from . import api, archive, attempts, guardrails
+from .health import health_panel
 from .snapshot import build_snapshot
 
 # Only these schemes are ever rendered as a clickable href — GitHub-sourced items always carry
@@ -448,5 +452,406 @@ def render_page(store: Store) -> str:
     """The full dashboard page, built straight from `store` — one
     :func:`~dashboard.snapshot.build_snapshot` (still one full store scan; see that module's
     own docstring) then :func:`render_snapshot_page`. Unchanged signature/behavior for existing
-    callers; the *rendering* step itself is now bounded regardless of KB size (T5.16)."""
+    callers; the *rendering* step itself is now bounded regardless of KB size (T5.16).
+
+    Superseded as the server's own default view by the T5.12 tabbed shell below (see
+    :func:`render_tab_page`) — kept as-is, not deleted: it's still a complete, correct,
+    independently-tested (``tests/test_dashboard.py``) pure `Store` -> HTML pipeline a future
+    caller (e.g. a static-export CLI) could still reuse; rewriting those tests' own already-
+    passing assertions to match a page shape they were never about is a distinct cleanup this
+    integration todo doesn't need to also do.
+    """
     return render_snapshot_page(build_snapshot(store))
+
+
+# ============================================================================================
+# T5.12 — tabbed console shell
+#
+# Unifies the panels already built (data-layer only, until now) across T5.2-T5.11 into one
+# navigable, deep-linkable console: Issues (the tree section above, unchanged) · Reports/Trends
+# (the trends/forecasts sections above, plus the T5.9 archive) · Candidates (T5.10) · Attempts
+# (T5.11) · Agents/Ops (T5.8 live health + T5.7 guardrails). Each tab is its own full page
+# (``GET /tab/<name>``, see dashboard/server.py) rather than one client-side-routed app — no JS
+# framework, matching this whole dashboard's established "plain http.server, no build step"
+# convention (server.py's own module docstring).
+#
+# Deliberately excludes two nav items T5.12's own DEVPLAN line names but that have no backing
+# module yet: **Upstream PRs** (T5.14, not yet built at all) and the **cost** sub-panel of
+# Agents/Ops (T5.13, not yet built) — matching this codebase's own repeated "wire what's real,
+# disclose the rest as a known gap" convention (e.g. T5.1's own `candidates()` docstring on the
+# identical kind of forward reference). Both slot in as a straightforward addition once their
+# own todos land: a new tab_labels entry + render function for T5.14, an extra section inside
+# `render_ops_tab` for T5.13.
+#
+# T5.4 (parity heatmap), T5.5 (pipeline diagram), T5.2/T5.3 (richer monitoring/trend panels)
+# are NOT wired here either — T5.12's own checklist line cites only T5.9/T5.10/T5.11/T5.8/T5.7,
+# not those four; wiring them in is a further polish pass, not this todo's own scope (the same
+# "the DEVPLAN line is the contract, its 'e.g.' and the milestone header's broader wish-list
+# aren't" reading T5.5/T5.8's own already-merged notes established for their own per-agent
+# nodes).
+# ============================================================================================
+
+TAB_LABELS = (
+    ("issues", "Issues"),
+    ("reports", "Reports/Trends"),
+    ("candidates", "Candidates"),
+    ("attempts", "Attempts"),
+    ("ops", "Agents/Ops"),
+)
+
+_DEFAULT_TAB = "issues"
+
+# 10 minutes — matches the value every existing health/liveness test already treats as a
+# realistic default (no project-wide constant exists to import instead; see test_dashboard_
+# health.py/test_liveness.py's own `stale_after_s=600`).
+_STALE_AFTER_S = 600.0
+
+_TAB_STYLE = """
+.tabs{display:flex;gap:.3rem;flex-wrap:wrap;margin-bottom:1.5rem;
+  border-bottom:1px solid var(--border)}
+.tabs a{padding:.5rem .9rem;color:var(--ink-2);text-decoration:none;font-size:.88rem;
+  border-bottom:2px solid transparent}
+.tabs a:hover{color:var(--accent)}
+.tabs a.active{color:var(--ink);border-bottom-color:var(--accent);font-weight:600}
+.inline-form{display:inline-flex;gap:.4rem;margin:.3rem 0}
+.chip.risk-low,.chip.decision-selected{color:var(--open);background:var(--open-soft)}
+.chip.risk-medium{color:var(--issue);background:var(--issue-soft)}
+.chip.risk-high,.chip.decision-skip{color:var(--gap);background:var(--gap-soft)}
+.candidate,.attempt-row,.health-row{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;
+  padding:.45rem .5rem;border-radius:6px}
+.candidate:hover,.attempt-row:hover,.health-row:hover{background:var(--surface-2)}
+.candidate{flex-direction:column;align-items:flex-start;border:1px solid var(--border);
+  margin-bottom:.5rem}
+.candidate .badges{display:flex;gap:.4rem;flex-wrap:wrap}
+.attempt-detail{border:1px solid var(--border);border-radius:8px;padding:1rem;margin-top:1rem}
+.archive-list{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem}
+"""
+
+
+def _nav_html(active: str) -> str:
+    """The top nav bar shared by every tab page — plain links, each ``GET /tab/<name>``, so
+    every tab is a real, deep-linkable URL (this todo's own "e.g."), not a client-side route."""
+    links = "".join(
+        f'<a href="/tab/{slug}" class="{"active" if slug == active else ""}">{escape(label)}</a>'
+        for slug, label in TAB_LABELS
+    )
+    return f'<nav class="tabs">{links}</nav>'
+
+
+def _page_shell(active_tab: str, body_html: str) -> str:
+    """The full HTML document for one tab — nav + `body_html`, sharing the same style/tree
+    script as the legacy single page (:data:`_STYLE`/:data:`_TREE_SCRIPT`) plus this shell's own
+    :data:`_TAB_STYLE`. :data:`_TREE_SCRIPT` is embedded on every tab (not just Issues/Reports)
+    -- its selectors (``#tree``, ``.btn[data-all]``, ``#q``) simply match nothing on a tab that
+    has none of those elements, the same "harmless no-op elsewhere" property a page-wide
+    ``<script>`` already has today.
+    """
+    return (
+        "<!doctype html><html><head><meta charset='utf-8'>"
+        "<title>vllm-forager dashboard</title>"
+        f"<style>{_STYLE}{_TAB_STYLE}</style></head><body>"
+        "<h1>vllm-forager dashboard</h1>"
+        + _nav_html(active_tab)
+        + body_html
+        + f"<script>{_TREE_SCRIPT}</script>"
+        "</body></html>"
+    )
+
+
+def render_issues_tab(store: Store) -> str:
+    """The Issues tab: the collapsible report tree alone (unchanged from the legacy single
+    page's own tree section) — Trends/Forecasts move to the Reports/Trends tab below."""
+    return _tree_section_html(build_snapshot(store)["tree"])
+
+
+def _archive_tree_node_html(node: dict, depth: int) -> str:
+    """One archived report's own tree node — like :func:`_tree_node_html`, but an archived
+    node (:meth:`~src.agents.reporter_v1.TreeNode.to_dict`'s own ``{name, summary, count, gaps,
+    children, prs}`` shape) carries no ``prs_truncated``/``prs_total`` fields: those are a
+    live-snapshot-only concept :func:`~dashboard.snapshot.build_snapshot` adds for its own
+    "show N more" pagination, which has no ``/api/node-prs`` counterpart for an old, static
+    snapshot to page through. Every PR row renders directly here, uncapped."""
+    summary_html = (
+        f'<div class="summary-line">{escape(node["summary"])}</div>' if node["summary"] else ""
+    )
+    prs_html = "".join(_pr_row_html(pr) for pr in node["prs"])
+    kids_html = "".join(_archive_tree_node_html(child, depth + 1) for child in node["children"])
+    body = prs_html + kids_html
+    kids_wrapped = f'<div class="kids">{body}</div>' if body else ""
+    open_attr = " open" if depth == 0 else ""
+    return (
+        f'<details class="{_node_class(depth)}"{open_attr}>'
+        '<summary><span class="chev">▶</span>'
+        f'<span class="name">{escape(node["name"])}</span>'
+        f'<span class="count">{node["count"]}</span>{_gap_chip_html(node["gaps"])}</summary>'
+        f"{summary_html}{kids_wrapped}"
+        "</details>"
+    )
+
+
+def _archive_section_html(store: Store, *, report_stamp: str | None) -> str:
+    """The T5.9 reports archive: a row of links to every archived weekly report, plus (when
+    `report_stamp` names one) that report's own tree, rendered via :func:`_archive_tree_node_html`
+    (not :func:`_tree_node_html` — see that function's own docstring for why the two node
+    shapes aren't interchangeable)."""
+    reports = archive.list_archived_reports(store)
+    if not reports:
+        return _section(
+            "Reports archive",
+            "<p>No archived weekly reports yet — run <code>python -m src.report --tree</code>.</p>",
+        )
+    links = "".join(
+        f'<a class="btn" href="/tab/reports?report={quote(r["stamp"])}">{escape(r["stamp"])}</a>'
+        for r in reports
+    )
+    viewer_html = ""
+    if report_stamp:
+        tree = archive.open_archived_report(store, report_stamp)
+        viewer_html = (
+            f'<div class="archive-viewer">'
+            f'{"".join(_archive_tree_node_html(n, 0) for n in tree)}</div>'
+            if tree is not None
+            else "<p>Unknown report.</p>"
+        )
+    return _section("Reports archive", f'<div class="archive-list">{links}</div>{viewer_html}')
+
+
+def render_reports_tab(store: Store, *, report_stamp: str | None = None) -> str:
+    """The Reports/Trends tab: the legacy Trends + Forecast-log sections (unchanged), plus the
+    T5.9 archive (list + an optional opened report, via `report_stamp`)."""
+    snapshot = build_snapshot(store)
+    return (
+        _trends_section_html(snapshot["trends"])
+        + _forecasts_section_html(snapshot["forecasts"])
+        + _archive_section_html(store, report_stamp=report_stamp)
+    )
+
+
+def _candidate_row_html(candidate: dict, decision: str | None) -> str:
+    """One Candidates-tab row: title/evidence link, risk/effort/impact badges, the current
+    decision (if any), and -- only when `candidate`'s own evidence resolves to a real
+    ``(repo, number)`` -- the "Work this"/"Skip" form (T5.10). A candidate whose evidence
+    doesn't parse can't be selected (mirrors :func:`~src.selection.filter_selected`'s own
+    "no (repo, number), no decision" contract) -- it still lists, just without the actions.
+    """
+    parsed = parse_repo_number(candidate.get("evidence") or "")
+    url = escape(_safe_href(candidate.get("evidence") or ""))
+    title = escape(candidate.get("title") or "")
+    risk = escape(candidate["risk"])
+    badges = (
+        f'<span class="chip risk-{risk}">{risk} risk</span>'
+        f'<span class="chip">{escape(candidate["effort"])} effort</span>'
+        f'<span class="chip">{escape(candidate["impact"])} impact</span>'
+    )
+    if decision:
+        badges += f'<span class="chip decision-{escape(decision)}">{escape(decision)}</span>'
+    actions_html = ""
+    if parsed is not None:
+        repo, number = parsed
+        actions_html = (
+            '<form method="post" action="/tab/candidates/decide" class="inline-form">'
+            f'<input type="hidden" name="repo" value="{escape(repo)}">'
+            f'<input type="hidden" name="number" value="{number}">'
+            '<button name="decision" value="selected" class="btn">Work this</button>'
+            '<button name="decision" value="skip" class="btn">Skip</button>'
+            "</form>"
+        )
+    return (
+        '<div class="candidate">'
+        f'<div><a href="{url}">{title}</a></div>'
+        f'<div class="badges">{badges}</div>'
+        f"{actions_html}"
+        "</div>"
+    )
+
+
+def render_candidates_tab(store: Store) -> str:
+    """The Candidates tab (T5.10): the risk-ranked queue with why-selected (score breakdown +
+    evidence) and a "Work this"/"Skip" control per row.
+
+    Calls :func:`~dashboard.api.candidates` with ``compute=True`` -- unlike a read endpoint a
+    page-view hazard would silently re-score on every load, a human *navigating to this tab* is
+    exactly the explicit, bounded action T5.1's own ``compute=False`` default was written to
+    require (the same "explicitly opened, right now" cost justification
+    :mod:`dashboard.review`'s own docstring already established for an identical one-call-per-
+    explicit-view shape).
+    """
+    candidates = api.candidates(store, compute=True)
+    if not candidates:
+        return _section("Candidates", "<p>No candidates discovered.</p>")
+    decisions = decisions_by_key(store)
+    rows = "".join(_candidate_row_html(c, _decision_for(c, decisions)) for c in candidates)
+    return _section("Candidates", rows)
+
+
+def _decision_for(candidate: dict, decisions: dict[tuple[str, int], str]) -> str | None:
+    parsed = parse_repo_number(candidate.get("evidence") or "")
+    return decisions.get(parsed) if parsed is not None else None
+
+
+def _attempt_row_html(row: dict) -> str:
+    badge_class, badge_label = ("open", "🟢 verified") if row["verified"] else ("gap", "🔴 failed")
+    label = escape(row.get("title") or f'{row["repo"]}#{row["number"]}')
+    link = f'/tab/attempts?repo={quote(row["repo"])}&number={row["number"]}'
+    return (
+        '<div class="attempt-row">'
+        f'<span class="chip {badge_class}">{badge_label}</span>'
+        f'<a href="{escape(link)}">{escape(row["repo"])}#{row["number"]} — {label}</a>'
+        "</div>"
+    )
+
+
+def _approve_hold_form_html(repo: str, number: int) -> str:
+    return (
+        '<form method="post" action="/tab/attempts/decide" class="inline-form">'
+        f'<input type="hidden" name="repo" value="{escape(repo)}">'
+        f'<input type="hidden" name="number" value="{number}">'
+        '<button name="approve" value="true" class="btn">Approve</button>'
+        '<button name="approve" value="false" class="btn">Hold</button>'
+        "</form>"
+    )
+
+
+def _attempt_detail_html(repo: str, number: int, detail: dict) -> str:
+    """One opened attempt's full report (T3.12's 3 sections + outcome), plus -- only when
+    `detail["review_bundle"]` is present (a verified, gate-ready candidate) -- the T5.6
+    approve/hold form, satisfying T5.11's own DEVPLAN note ("go straight from browsing to
+    approving without leaving the console")."""
+    sections = (
+        f"<h3>{escape(repo)}#{number}</h3>"
+        f"<h4>Issue overview</h4><pre>{escape(detail['issue_overview'])}</pre>"
+        f"<h4>Approach</h4><pre>{escape(detail['approach'])}</pre>"
+        f"<h4>Reproduce</h4><pre>{escape(detail['reproduce'])}</pre>"
+        f"<h4>Outcome</h4><pre>{escape(detail['outcome'])}</pre>"
+    )
+    if detail.get("review_bundle") is not None:
+        sections += _approve_hold_form_html(repo, number)
+    return f'<div class="attempt-detail">{sections}</div>'
+
+
+def render_attempts_tab(store: Store, *, open_candidate: tuple[str, int] | None = None) -> str:
+    """The Attempts tab (T5.11): every worked candidate's outcome badge, newest first; opening
+    one (`open_candidate`) renders its full report, with the T5.6 approve/hold form folded in
+    for a verified, gate-ready candidate -- `include_review_bundle=True` is safe to pay here
+    unconditionally (unlike :func:`~dashboard.attempts.open_attempt`'s own opt-in default),
+    since opening one specific attempt from this list *is* the explicit, bounded action that
+    default exists to gate -- the same distinction :func:`render_candidates_tab` draws for
+    `api.candidates`'s own `compute` flag.
+    """
+    rows = attempts.list_attempts(store)
+    list_html = (
+        "".join(_attempt_row_html(r) for r in rows) if rows else "<p>No worked candidates yet.</p>"
+    )
+    detail_html = ""
+    if open_candidate is not None:
+        repo, number = open_candidate
+        detail = attempts.open_attempt(store, repo, number, include_review_bundle=True)
+        detail_html = (
+            _attempt_detail_html(repo, number, detail)
+            if detail is not None
+            else "<p>Unknown attempt.</p>"
+        )
+    return _section("Attempts", f'<div class="attempt-list">{list_html}</div>{detail_html}')
+
+
+def _health_row_html(stage: dict) -> str:
+    chip_class = {"ok": "open", "running": "open", "stalled": "gap", "failed": "gap"}.get(
+        stage["status"], "issue"
+    )
+    elapsed = stage.get("elapsed_s")
+    elapsed_label = f"{elapsed:.0f}s ago" if elapsed is not None else "—"
+    return (
+        '<div class="health-row">'
+        f'<span class="id">{escape(stage["stage"])}</span>'
+        f'<span class="chip {chip_class}">{escape(stage["status"])}</span>'
+        f'<span>{escape(stage.get("step") or "")}</span>'
+        f"<span>{escape(elapsed_label)}</span>"
+        "</div>"
+    )
+
+
+def _health_section_html(panel: dict) -> str:
+    badge_class = "open" if panel["overall"] == "green" else "gap"
+    rows = "".join(_health_row_html(s) for s in panel["stages"])
+    return _section(
+        "Live health",
+        f'<span class="chip {badge_class}">{escape(panel["overall"])}</span>'
+        f'<div class="health-rows">{rows}</div>',
+    )
+
+
+def _data_quality_section_html(records: list[dict]) -> str:
+    if not records:
+        return _section("Guardrails — data quality", "<p>No checks recorded yet.</p>")
+    rows = "".join(
+        "<tr>"
+        f"<td>{escape(r.get('checked_at') or '')}</td>"
+        f"<td>{escape(r.get('repo') or '')}</td>"
+        f"<td>{escape(r.get('reason') or '')}</td>"
+        f"<td>{r.get('count_delta', '')}</td>"
+        f"<td>{'⚠️ flagged' if r.get('flagged') else 'ok'}</td>"
+        "</tr>"
+        for r in records
+    )
+    table = (
+        "<table><thead><tr><th>Checked</th><th>Repo</th><th>Reason</th>"
+        "<th>Δcount</th><th>Status</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+    return _section("Guardrails — data quality", table)
+
+
+def _rag_eval_section_html(scores: list[dict]) -> str:
+    if not scores:
+        return _section("Guardrails — RAG eval", "<p>No RAG-eval runs recorded yet.</p>")
+    rows = "".join(
+        "<tr>"
+        f"<td>{escape(s.get('created_at') or '')}</td>"
+        f"<td>{s.get('recall_at_k', 0):.2f}</td>"
+        f"<td>{s.get('mrr', 0):.2f}</td>"
+        f"<td>{s.get('faithfulness', 0):.2f}</td>"
+        f"<td>{'✅ pass' if s.get('passed') else '❌ fail'}</td>"
+        "</tr>"
+        for s in scores
+    )
+    table = (
+        "<table><thead><tr><th>Run</th><th>Recall@k</th><th>MRR</th>"
+        "<th>Faithfulness</th><th>Status</th></tr></thead>"
+        f"<tbody>{rows}</tbody></table>"
+    )
+    return _section("Guardrails — RAG eval", table)
+
+
+def render_ops_tab(store: Store) -> str:
+    """The Agents/Ops tab: T5.8's live health panel + T5.7's guardrail panels (data quality,
+    RAG eval). T5.13's own cost sub-panel isn't built yet -- see this section's own module-
+    level note above; not rendered here rather than stubbed with fake data."""
+    panel = health_panel(store, stale_after_s=_STALE_AFTER_S)
+    return (
+        _health_section_html(panel)
+        + _data_quality_section_html(guardrails.data_quality_series(store))
+        + _rag_eval_section_html(guardrails.rag_eval_series(store))
+    )
+
+
+def render_tab_page(
+    store: Store,
+    tab: str,
+    *,
+    report_stamp: str | None = None,
+    open_candidate: tuple[str, int] | None = None,
+) -> str:
+    """The full page (nav + body) for `tab` — falls back to the Issues tab for an unrecognized
+    name (a stale bookmark/typo'd URL degrades to the default view, not a 404 or a crash)."""
+    if tab == "reports":
+        body = render_reports_tab(store, report_stamp=report_stamp)
+    elif tab == "candidates":
+        body = render_candidates_tab(store)
+    elif tab == "attempts":
+        body = render_attempts_tab(store, open_candidate=open_candidate)
+    elif tab == "ops":
+        body = render_ops_tab(store)
+    else:
+        tab = _DEFAULT_TAB
+        body = render_issues_tab(store)
+    return _page_shell(tab, body)
