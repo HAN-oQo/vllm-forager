@@ -42,6 +42,7 @@ from src.agents.reporter import is_merged, repo_number_label
 from src.selection import decisions_by_key
 from src.store.base import Store
 from src.taxonomy import LEVEL_SEPARATOR
+from src.upstream_prs import UpstreamComment, UpstreamPR, list_upstream_prs
 
 from . import api, archive, attempts, cost, guardrails
 from .health import health_panel
@@ -471,18 +472,14 @@ def render_page(store: Store) -> str:
 # Unifies the panels already built (data-layer only, until now) across T5.2-T5.11 into one
 # navigable, deep-linkable console: Issues (the tree section above, unchanged) · Reports/Trends
 # (the trends/forecasts sections above, plus the T5.9 archive) · Candidates (T5.10) · Attempts
-# (T5.11) · Agents/Ops (T5.8 live health + T5.13 cost + T5.7 guardrails). Each tab is its own
-# full page (``GET /tab/<name>``, see dashboard/server.py) rather than one client-side-routed
-# app — no JS framework, matching this whole dashboard's established "plain http.server, no
-# build step" convention (server.py's own module docstring).
+# (T5.11) · Upstream PRs (T5.14) · Agents/Ops (T5.8 live health + T5.13 cost + T5.7 guardrails).
+# Each tab is its own full page (``GET /tab/<name>``, see dashboard/server.py) rather than one
+# client-side-routed app — no JS framework, matching this whole dashboard's established "plain
+# http.server, no build step" convention (server.py's own module docstring).
 #
-# Deliberately excludes one nav item T5.12's own DEVPLAN line names but that has no backing
-# module yet: **Upstream PRs** (T5.14, not yet built at all) — matching this codebase's own
-# repeated "wire what's real, disclose the rest as a known gap" convention (e.g. T5.1's own
-# `candidates()` docstring on the identical kind of forward reference). Slots in as a
-# straightforward addition once its own todo lands: a new tab_labels entry + render function.
-# (T5.13's own cost sub-panel, also named on this same line, landed in a follow-up PR — see
-# `render_ops_tab`/`dashboard.cost`.)
+# T5.13's cost sub-panel and T5.14's Upstream PRs tab, both named on T5.12's own DEVPLAN line
+# but not yet built when T5.12 itself landed, arrived in their own follow-up PRs — see
+# `render_ops_tab`/`dashboard.cost` and `render_upstream_prs_tab`/`src.upstream_prs` below.
 #
 # T5.4 (parity heatmap), T5.5 (pipeline diagram), T5.2/T5.3 (richer monitoring/trend panels)
 # are NOT wired here either — T5.12's own checklist line cites only T5.9/T5.10/T5.11/T5.8/T5.7,
@@ -497,6 +494,7 @@ TAB_LABELS = (
     ("reports", "Reports/Trends"),
     ("candidates", "Candidates"),
     ("attempts", "Attempts"),
+    ("prs", "Upstream PRs"),
     ("ops", "Agents/Ops"),
 )
 
@@ -533,6 +531,10 @@ _TAB_STYLE = """
 .cost-row{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;padding:.45rem .5rem;
   border-radius:6px;border:1px solid var(--border);margin-bottom:.5rem}
 .cost-models{color:var(--ink-2);font-size:.82rem}
+.pr-row{border:1px solid var(--border);border-radius:6px;padding:.5rem;margin-bottom:.6rem}
+.pr-meta{color:var(--ink-2);font-size:.82rem;margin:.3rem 0}
+.pr-comment{display:flex;align-items:baseline;gap:.5rem;font-size:.85rem;padding:.2rem 0}
+.pr-comment .id{font-family:ui-monospace,monospace;font-size:.78rem;color:var(--ink-3)}
 """
 
 
@@ -932,6 +934,53 @@ def _cost_section_html(panel: dict) -> str:
     )
 
 
+def _upstream_comment_html(comment: UpstreamComment) -> str:
+    badge_class, badge_label = (
+        ("gap", "outstanding") if comment.outstanding else ("open", "answered")
+    )
+    return (
+        '<div class="pr-comment">'
+        f'<span class="id">{escape(comment.author)}</span>'
+        f'<span class="chip {badge_class}">{badge_label}</span>'
+        f"<span>{escape(comment.body[:200])}</span>"
+        "</div>"
+    )
+
+
+def _upstream_pr_row_html(pr: UpstreamPR) -> str:
+    ci_chip_class = {"success": "open", "failure": "gap", "pending": "issue"}.get(
+        pr.ci_status, "issue"
+    )
+    mergeable_class, mergeable_label = (
+        ("gap", "conflict") if pr.mergeable is False else ("open", "mergeable")
+    )
+    outstanding_class = "gap" if pr.outstanding_count else "open"
+    reviewers = ", ".join(pr.requested_reviewers) or "none requested"
+    url = escape(_safe_href(pr.url))
+    comments_html = "".join(_upstream_comment_html(c) for c in pr.comments)
+    return (
+        '<div class="pr-row">'
+        f'<div><a href="{url}">{escape(pr.repo)}#{pr.number}</a> '
+        f'<span class="chip {ci_chip_class}">CI: {escape(pr.ci_status)}</span> '
+        f'<span class="chip {mergeable_class}">{mergeable_label}</span> '
+        f'<span class="chip {outstanding_class}">{pr.outstanding_count} outstanding</span></div>'
+        f'<div class="pr-meta">review: {escape(pr.review_decision or "none")} · '
+        f"reviewers: {escape(reviewers)} · last activity: {escape(pr.last_activity_at)}</div>"
+        f'<div class="pr-comments">{comments_html}</div>'
+        "</div>"
+    )
+
+
+def render_upstream_prs_tab(store: Store) -> str:
+    """The Upstream PRs tab (T5.14): live review-state visibility over every candidate with a
+    real, currently **open** upstream PR — read-only, re-fetches GitHub state on every view
+    (see :mod:`src.upstream_prs`'s own module docstring for why this isn't a KB-only report)."""
+    prs = list_upstream_prs(store)
+    if not prs:
+        return _section("Upstream PRs", "<p>No open upstream PRs right now.</p>")
+    return _section("Upstream PRs", "".join(_upstream_pr_row_html(pr) for pr in prs))
+
+
 def render_ops_tab(store: Store) -> str:
     """The Agents/Ops tab: T5.8's live health panel, T5.13's cost panel (placed right after
     health -- this todo's own "cost belongs with health, not with the reports" framing), and
@@ -978,6 +1027,8 @@ def render_tab_page(
         body = render_attempts_tab(
             store, open_candidate=open_candidate, just_decided=after_decision
         )
+    elif tab == "prs":
+        body = render_upstream_prs_tab(store)
     elif tab == "ops":
         body = render_ops_tab(store)
     else:

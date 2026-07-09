@@ -9,13 +9,15 @@ POST write actions.
 
 from __future__ import annotations
 
+import json
+import subprocess
 from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from dashboard import render, server
-from src import gate, report
+from src import gate, report, upstream_prs
 from src.store.jsonl_store import JsonlStore
 
 pytestmark = pytest.mark.m5
@@ -300,6 +302,63 @@ def test_attempts_tab_after_decision_skips_the_review_bundle_recompute(
     assert "Issue overview" in page
     assert "Decision recorded." in page
     assert 'name="approve"' not in page
+
+
+# --------------------------------------------------------------------- render_tab_page: prs
+
+
+def test_upstream_prs_tab_empty_when_nothing_submitted(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+
+    page = render.render_tab_page(store, "prs")
+
+    assert "No open upstream PRs right now." in page
+
+
+def test_upstream_prs_tab_renders_an_open_pr_with_outstanding_comments(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_store(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "gate",
+            "approved": True,
+            "submitted": True,
+            "pr_url": "https://github.com/o/r/pull/1",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+    pr_json = {
+        "url": "https://github.com/o/r/pull/1",
+        "state": "OPEN",
+        "mergeable": "MERGEABLE",
+        "reviewDecision": "REVIEW_REQUIRED",
+        "updatedAt": "2026-01-05T00:00:00Z",
+        "statusCheckRollup": [{"conclusion": "FAILURE", "status": "COMPLETED"}],
+        "reviewRequests": [{"login": "octocat"}],
+    }
+    comments = [{"id": 101, "user": {"login": "maintainer"}, "body": "please fix the docs"}]
+
+    def _run(cmd, **kwargs):
+        if cmd[:3] == ["gh", "pr", "view"]:
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(pr_json))
+        if cmd[:2] == ["gh", "api"] and cmd[2] == "user":
+            return subprocess.CompletedProcess(cmd, 0, stdout="forager-bot\n")
+        if cmd[:2] == ["gh", "api"] and cmd[2].endswith("/comments"):
+            return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps(comments))
+        raise AssertionError(f"unexpected gh invocation: {cmd}")
+
+    monkeypatch.setattr(upstream_prs.subprocess, "run", _run)
+
+    page = render.render_tab_page(store, "prs")
+
+    assert "o/r#1" in page
+    assert "CI: failure" in page
+    assert "1 outstanding" in page
+    assert "octocat" in page
+    assert "please fix the docs" in page
 
 
 # --------------------------------------------------------------------- render_tab_page: ops
