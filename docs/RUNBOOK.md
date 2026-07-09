@@ -265,3 +265,49 @@ events/heartbeats in the KB yet); and no local health-record file analogous to `
 (that's T4.6, scoped to the collector
 specifically) — so today "is it alive?" means checking whether cron/tmux is still
 running and reading the log, not a dashboard health panel.
+
+## Running the dashboard as a managed service (T5.15)
+
+A long-running dashboard process holds the `dashboard/render.py` it imported **at startup** — Python never
+hot-reloads it, so a merge that changes the dashboard's own code doesn't reach the live page until the process
+restarts (observed 2026-07: a process served the pre-tree flat renderer for two days after the tree-view design
+landed, until someone noticed and manually restarted it — see `src/version.py`'s own module docstring). Every
+page now carries a build-stamp footer (`build <short SHA>`) so staleness is visible on the page itself; the
+scripts below are what actually fixes it.
+
+**One-time setup — give the dashboard its own stable clone**, mirroring the collector's own "give it its own
+clone, point every clone at one shared data dir" convention above (both a dev-loop session and a long-running
+server checking out `main` at different times can't safely share one working tree):
+
+```bash
+# on ce-master
+gh repo clone HAN-oQo/vllm-forager ~/vllm-forager-dashboard
+cd ~/vllm-forager-dashboard
+python -m venv .venv && source .venv/bin/activate && pip install -r requirements-dev.txt
+cp ~/vllm-forager/.env .env
+echo "FORAGER_DATA_DIR=$HOME/forager-data" >> .env   # the same shared data dir collect/orchestrator use
+scripts/dashboard-restart.sh                          # first launch: supervised tmux session `forager-dashboard`
+```
+
+**After a merge — pull + restart in one step:**
+
+```bash
+cd ~/vllm-forager-dashboard && scripts/dashboard-deploy.sh
+```
+
+`scripts/dashboard-deploy.sh` refuses over a dirty working tree or a non-`main` checkout (the stable serving
+clone should never carry local changes), `git pull --ff-only`s, and — only if that actually advanced `HEAD` —
+restarts via `scripts/dashboard-restart.sh`, which kills any existing `forager-dashboard` tmux session and
+relaunches `python -m dashboard` fresh, verifying the new session is still alive a moment later (not just that
+`tmux new-session` itself didn't error, which it won't even if the command inside the pane immediately crashes).
+Both scripts send a `scripts/notify.sh` phone push on failure (and `dashboard-deploy.sh` on a successful restart
+too), matching every other loop's own notification convention.
+
+**Wiring it to actually run after every merge** (a real deploy hook, or the M4 orchestrator growing one) is not
+built yet — today this is a manual step (or your own cron entry calling `scripts/dashboard-deploy.sh`), the same
+"infrastructure built, automatic triggering deferred" shape T5.10's own selection-decision wiring and T4.4's
+heartbeats both already have elsewhere in this project.
+
+**Restart after a crash/reboot:** re-run `scripts/dashboard-restart.sh` (idempotent — killing a session that
+doesn't exist, or is already dead, is not an error). No state to restore: the dashboard is read-mostly against
+the shared KB.
