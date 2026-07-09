@@ -109,6 +109,41 @@
   · [Appsmith vs ToolJet vs Budibase](https://blog.tooljet.com/appsmith-vs-budibase-vs-tooljet/)
   · [Streamlit/Dash/Reflex/NiceGUI at scale](https://reflex.dev/blog/streamlit-vs-dash-python-dashboards/).
 
+### Internal-demand-driven contributions: mine first-party roadmaps (Confluence/Jira) for upstream needs
+- **What:** a new candidate source that reads **our own org's** design docs / roadmaps (Confluence, Jira, internal
+  repos — via the **Atlassian MCP** already wired into this session) and infers the **upstream** vLLM / llm-d /
+  SGLang feature that would unblock what we're actually building. e.g. an internal design doc for an
+  agentic-workflow gateway that needs **session affinity / prefix-cache keeping** → infer "vLLM needs a
+  first-class **session-id tag / session-aware routing** feature" as a contribution candidate.
+- **Why / value:** the **highest-alignment** source there is — you contribute what your org will actually *use and
+  maintain* (dogfooding), so the work is high-priority, well-motivated, and sustained. Shifts the agent from
+  "track the public ecosystem" to "advance upstream in the direction of **first-party demand**": contributions
+  land where they pay us back.
+- **How (concrete):**
+  - **Ingest:** Atlassian MCP (Confluence pages + Jira issues under a designated space/label set) + internal
+    repos; a periodic pull, same cadence shape as collection.
+  - **Infer (LLM step):** "given this internal need, which upstream feature in {vLLM, llm-d, SGLang, …} would
+    enable/simplify it, and is it missing today?" → a candidate `{internal-need, implied-upstream-feature, target
+    repo, evidence}`.
+  - **Rank + feasibility-gate** like every candidate (MI250-verifiable? effort? merge-likelihood?), with a
+    **first-party-demand boost**. Same machinery as `candidates.md` §2 "roadmap-derived", a different corpus.
+- **Privacy / security (non-negotiable — this source touches confidential material):** internal docs are a
+  **discovery/prioritization signal only**. The eventual **public PR must be justified on public technical merits
+  and must never quote or leak internal strategy / product names** (scrub the output). LLM processing of internal
+  docs stays under our own account; the mandatory human gate is the backstop. This extends the existing "never
+  spray public without human confirmation" rule to "never leak internal context into a public artifact." (Also:
+  keep internal specifics out of committed repo docs — this entry uses a deliberately generic example.)
+- **Scope / effort:** M–L — Atlassian ingestion + the internal→upstream inference step + privacy scrub +
+  integration as a scout source.
+- **Depends on / risk:** the scout/candidate plumbing (M2, built) + ideally the `candidates.md` §2 roadmap-derived
+  source landing first (shared machinery); **Atlassian MCP availability in the unattended runtime** (an
+  interactively-authed MCP can be absent in headless/cron — a real gap for a scheduled loop); **privacy is the top
+  risk**; the internal→upstream inference can hallucinate a "need" — the feasibility + evidence + human gates
+  contain it.
+- **Status:** shaping — graduate to a **DEVPLAN scout-source todo** (M2/M3 area) once §2 roadmap-derived lands and
+  the Atlassian ingestion + privacy scrub are settled. Not milestone-ready until the ingestion path, the inference
+  prompt/validation, and the privacy scrub are pinned.
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.
