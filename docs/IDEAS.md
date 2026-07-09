@@ -267,6 +267,42 @@
   re-landing)** — no idea-generation needed, directly evidenced by #47187; full inventive idea-generation waits on
   the benchmark harness + hallucination controls.
 
+### Chase real user-facing bugs: mine user-pain PRs + dogfood realistic (agentic) usage
+- **What:** watch the class of PRs that fix **problems real users actually hit in production** — e.g.
+  [vLLM #45915](https://github.com/vllm-project/vllm/pull/45915), which rewrote the GLM streaming tool-call /
+  reasoning parser to fix tool tokens being *swallowed*, tool names *truncated* in streaming (`run_in_terminal →
+  run_in`), zero-arg tool calls *silently dropped*, streaming JSON corruption, and a Responses-API
+  `AttributeError` — all surfaced through real user issue reports, several from **agentic tooling (Claude Code)**.
+  Then **find the same *class* of breakage unfixed on our targets** (other models/backends, vllm-omni/vime,
+  especially ROCm) and fix it. "모방" = pattern-match the **failure class**, not copy the patch.
+- **Why / value:** user-facing correctness bugs (streaming, tool-calls, error messages, API edge cases) are
+  high-impact and maintainer-welcomed — they're what make vLLM actually *usable*, and they're plentiful because
+  they only surface under real, messy usage. A robustness/usability lane distinct from perf/feature/parity.
+- **Two mechanisms:**
+  - **Pattern-mine (learn the failure classes):** cluster high-signal user-pain PRs/issues (many linked reports,
+    point-fix churn superseded by a rewrite, agentic/streaming/tool-call keywords) into recurring **failure
+    patterns** (streaming truncation, parser-state bugs, silent drops, API attribute mismatches) → "does this class
+    exist unfixed elsewhere / on ROCm?"
+  - **Dogfood to surface (the strongest — use it like a user):** actually run vLLM the way real users do —
+    **agentic tool-calling, streaming, edge configs** (an agent / Claude Code driving it) — on our stack **on
+    MI250/ROCm**, and catch what breaks, with a ready-made repro. The sibling of "Reproduce-the-news": reproduce a
+    *realistic user workflow* instead of an *announcement*. Ties to the agentic/session-id thread — agentic usage
+    is exactly where these break.
+- **ROCm angle:** many are platform-general, but (a) some break *only* on ROCm (different attention/streaming
+  paths), and (b) even a general one is a contribution if unfixed on a target we care about — and #45915 being
+  **cherry-picked by an AMD contributor** signals AMD cares about this lane.
+- **Relation:** the deeper form of the observed "rocm-reproducible" source (which only scans ROCm-labeled *open
+  issues*); this mines *user-pain PRs* for failure *patterns* and *dogfoods* to surface new ones. Uses
+  `novelty.py` (don't dup), the analyst (cluster patterns), the M3 Engineer (repro on MI250).
+- **Scope / effort:** M–L — a pattern-mining pass over user-pain PRs/issues + a **dogfooding harness** (agentic /
+  streaming workloads) on MI250 + repro capture.
+- **Depends on / risk:** the M3 repro harness + a realistic-usage harness; these bugs are **subtle/hard to
+  reproduce deterministically** (streaming, timing) → need a solid repro before claiming; a general-not-ROCm bug
+  still needs the "is it worth it for our targets" filter.
+- **Status:** shaping — high-value usability lane; the **dogfooding** half piggybacks on the agentic-usage work
+  (session-id thread) and reproduce-the-news's MI250 harness. Graduate as a scout source + a usage harness once M3
+  exists.
+
 ### Human-seeded candidates rank first (the operator's directed ideas beat auto-discovery)
 - **Scope note:** this is about the **vLLM-PR contribution agent** (the Engineer working the candidate queue), *not*
   the project dev-loop.

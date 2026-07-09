@@ -95,4 +95,7 @@ new since the last run.
    blog feature) on gfx90a — an error/slowdown/unsupported-path *is* the contribution. Uses MI250 as a prober, so
    it depends on the M3 repro harness. And **re-landing merged-then-reverted PRs** — a wanted feature that broke
    (e.g. #47187 reverted with LoRA follow-ups → fix the compat + re-land): high merge-probability, no
-   idea-generation needed (see `docs/IDEAS.md` → "Generate novel optimization / mechanism ideas").
+   idea-generation needed (see `docs/IDEAS.md` → "Generate novel optimization / mechanism ideas"). And
+   **user-facing bug patterns** — mine user-pain PRs (e.g. #45915's GLM streaming tool-call fixes) for failure
+   *classes* and dogfood agentic/streaming usage on MI250 to surface the same class unfixed (IDEAS → "Chase real
+   user-facing bugs").
