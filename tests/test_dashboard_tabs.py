@@ -339,6 +339,32 @@ def test_ops_tab_shows_output_tail_and_error_for_a_failed_stage(tmp_path: Path) 
     assert "Traceback (most recent call last):" in page
 
 
+def test_ops_tab_renders_cost_panel_next_to_health(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    store.record_run(
+        {
+            "stage": "cost",
+            "agent": "analyst",
+            "run_id": "r1",
+            "loop": "intel",
+            "provider": "claude_api",
+            "model": "claude-sonnet-5",
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "tokens_cache": 0,
+            "cost_usd": 3.5,
+            "recorded_at": "2026-01-08T00:00:00Z",
+        }
+    )
+
+    page = render.render_tab_page(store, "ops")
+
+    assert "Live health" in page
+    assert page.index("Live health") < page.index("Cost")  # cost sits next to health
+    assert "analyst" in page
+    assert "$3.50" in page
+
+
 # --------------------------------------------------------------------- server: GET routing
 
 

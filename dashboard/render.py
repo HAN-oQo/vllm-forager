@@ -43,7 +43,7 @@ from src.selection import decisions_by_key
 from src.store.base import Store
 from src.taxonomy import LEVEL_SEPARATOR
 
-from . import api, archive, attempts, guardrails
+from . import api, archive, attempts, cost, guardrails
 from .health import health_panel
 from .snapshot import build_snapshot
 
@@ -471,18 +471,18 @@ def render_page(store: Store) -> str:
 # Unifies the panels already built (data-layer only, until now) across T5.2-T5.11 into one
 # navigable, deep-linkable console: Issues (the tree section above, unchanged) · Reports/Trends
 # (the trends/forecasts sections above, plus the T5.9 archive) · Candidates (T5.10) · Attempts
-# (T5.11) · Agents/Ops (T5.8 live health + T5.7 guardrails). Each tab is its own full page
-# (``GET /tab/<name>``, see dashboard/server.py) rather than one client-side-routed app — no JS
-# framework, matching this whole dashboard's established "plain http.server, no build step"
-# convention (server.py's own module docstring).
+# (T5.11) · Agents/Ops (T5.8 live health + T5.13 cost + T5.7 guardrails). Each tab is its own
+# full page (``GET /tab/<name>``, see dashboard/server.py) rather than one client-side-routed
+# app — no JS framework, matching this whole dashboard's established "plain http.server, no
+# build step" convention (server.py's own module docstring).
 #
-# Deliberately excludes two nav items T5.12's own DEVPLAN line names but that have no backing
-# module yet: **Upstream PRs** (T5.14, not yet built at all) and the **cost** sub-panel of
-# Agents/Ops (T5.13, not yet built) — matching this codebase's own repeated "wire what's real,
-# disclose the rest as a known gap" convention (e.g. T5.1's own `candidates()` docstring on the
-# identical kind of forward reference). Both slot in as a straightforward addition once their
-# own todos land: a new tab_labels entry + render function for T5.14, an extra section inside
-# `render_ops_tab` for T5.13.
+# Deliberately excludes one nav item T5.12's own DEVPLAN line names but that has no backing
+# module yet: **Upstream PRs** (T5.14, not yet built at all) — matching this codebase's own
+# repeated "wire what's real, disclose the rest as a known gap" convention (e.g. T5.1's own
+# `candidates()` docstring on the identical kind of forward reference). Slots in as a
+# straightforward addition once its own todo lands: a new tab_labels entry + render function.
+# (T5.13's own cost sub-panel, also named on this same line, landed in a follow-up PR — see
+# `render_ops_tab`/`dashboard.cost`.)
 #
 # T5.4 (parity heatmap), T5.5 (pipeline diagram), T5.2/T5.3 (richer monitoring/trend panels)
 # are NOT wired here either — T5.12's own checklist line cites only T5.9/T5.10/T5.11/T5.8/T5.7,
@@ -530,6 +530,9 @@ _TAB_STYLE = """
   margin-bottom:.5rem}
 .health-row pre{width:100%;box-sizing:border-box;font-size:.78rem;margin:.3rem 0 0}
 .health-error{color:var(--gap);background:var(--gap-soft)}
+.cost-row{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;padding:.45rem .5rem;
+  border-radius:6px;border:1px solid var(--border);margin-bottom:.5rem}
+.cost-models{color:var(--ink-2);font-size:.82rem}
 """
 
 
@@ -889,13 +892,50 @@ def _rag_eval_section_html(scores: list[dict]) -> str:
     return _section("Guardrails — RAG eval", table)
 
 
+def _cost_agent_row_html(agent: dict) -> str:
+    models_label = ", ".join(
+        f"{escape(m['model'])} ({escape(m['provider'])}): ${m['cost_usd']:.2f}"
+        for m in agent["by_model"]
+    )
+    return (
+        '<div class="cost-row">'
+        f'<span class="id">{escape(agent["agent"])}</span>'
+        f'<span>today ${agent["today_usd"]:.2f}</span>'
+        f'<span>7d ${agent["week_usd"]:.2f}</span>'
+        f'<span>total ${agent["total_usd"]:.2f}</span>'
+        f'<span class="cost-models">{models_label}</span>'
+        "</div>"
+    )
+
+
+def _cost_section_html(panel: dict) -> str:
+    """T5.13's own "e.g.": a bar per agent (today/7d/total, broken down by model & provider —
+    :func:`~dashboard.cost.cost_panel`'s own `by_model`) plus a total-vs-budget badge that
+    turns red once `panel["budget_exceeded"]` (today's spend crossed :data:`~src.config.
+    DAILY_COST_BUDGET_USD`)."""
+    badge_class = "gap" if panel["budget_exceeded"] else "open"
+    budget_label = f'${panel["today_total_usd"]:.2f} / ${panel["budget_usd"]:.2f} today'
+    rows = (
+        "".join(_cost_agent_row_html(a) for a in panel["agents"])
+        if panel["agents"]
+        else "<p>No cost recorded yet.</p>"
+    )
+    return _section(
+        "Cost",
+        f'<span class="chip {badge_class}">{escape(budget_label)}</span> '
+        f'<span>burn rate: ${panel["burn_rate_usd_per_day"]:.2f}/day</span>'
+        f'<div class="cost-rows">{rows}</div>',
+    )
+
+
 def render_ops_tab(store: Store) -> str:
-    """The Agents/Ops tab: T5.8's live health panel + T5.7's guardrail panels (data quality,
-    RAG eval). T5.13's own cost sub-panel isn't built yet -- see this section's own module-
-    level note above; not rendered here rather than stubbed with fake data."""
+    """The Agents/Ops tab: T5.8's live health panel, T5.13's cost panel (placed right after
+    health -- this todo's own "cost belongs with health, not with the reports" framing), and
+    T5.7's guardrail panels (data quality, RAG eval)."""
     panel = health_panel(store, stale_after_s=_STALE_AFTER_S)
     return (
         _health_section_html(panel)
+        + _cost_section_html(cost.cost_panel(store))
         + _data_quality_section_html(guardrails.data_quality_series(store))
         + _rag_eval_section_html(guardrails.rag_eval_series(store))
     )
