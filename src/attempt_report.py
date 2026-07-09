@@ -228,6 +228,13 @@ def list_worked(store: Store) -> list[dict]:
     on -- every other read endpoint in this codebase degrades past one bad record the same way
     instead of crashing a whole dashboard page over it.
 
+    A candidate whose KB item record no longer exists (deleted/pruned after being verified) is
+    also skipped -- a code-review finding: an earlier version listed it anyway (title falling
+    back to `""`), but `render_attempt_report` requires a live item via `get_item_or_skip`, so
+    that row would list here and then open to `None` when clicked, silently breaking this
+    tab's own "click -> the full report renders" contract. Skipping keeps `list_worked`'s
+    notion of "worked" exactly as strict as `render_attempt_report`'s.
+
     Titles are batched **one `store.query(repo=...)` per distinct repo**, not one
     `store.get_item` per candidate -- a code-review finding: `get_item` re-reads and
     re-parses that repo's entire JSONL file on `JsonlStore`, so a naive per-candidate call
@@ -252,12 +259,14 @@ def list_worked(store: Store) -> list[dict]:
         if repo not in items_by_repo:
             items_by_repo[repo] = {i["number"]: i for i in store.query(repo=repo)}
         item = items_by_repo[repo].get(number)
+        if item is None:
+            continue
         summaries.append(
             {
                 "repo": repo,
                 "number": number,
                 "verified": bool(latest.get("verified")),
-                "title": (item or {}).get("title") or "",
+                "title": item.get("title") or "",
                 "recorded_at": latest.get("recorded_at"),
             }
         )

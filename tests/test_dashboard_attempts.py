@@ -140,6 +140,28 @@ def test_list_attempts_never_calls_get_item_per_candidate(
     assert rows[0]["title"] == "vLLM crashes on gfx90a with fp8"
 
 
+def test_list_attempts_skips_a_verify_run_whose_item_no_longer_exists(tmp_path: Path) -> None:
+    """Regression: a `stage="verify"` run with no matching KB item (deleted/pruned) must not
+    be listed -- an earlier version listed it anyway (title `""`), so it opened to `None`
+    when clicked, breaking the tab's own "click -> the full report renders" contract."""
+    store = JsonlStore(tmp_path)
+    store.record_run(
+        {
+            "repo": "o/r",
+            "number": 1,
+            "stage": "verify",
+            "branch": "forager/o-r-1",
+            "patch": "",
+            "command": "pytest",
+            "log": "1 passed\n",
+            "verified": True,
+            "recorded_at": "2025-12-31T00:00:00Z",
+        }
+    )
+
+    assert attempts.list_attempts(store) == []
+
+
 # --------------------------------------------------------------------- open_attempt
 
 
