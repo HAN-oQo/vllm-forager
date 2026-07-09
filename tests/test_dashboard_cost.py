@@ -96,14 +96,19 @@ def test_cost_panel_includes_the_claude_code_session_cost(tmp_path: Path) -> Non
     assert panel["today_total_usd"] == 7.5
 
 
-def test_cost_panel_agents_sorted_by_total_spend_descending(tmp_path: Path) -> None:
+def test_cost_panel_agents_sorted_by_todays_spend_not_lifetime_total(tmp_path: Path) -> None:
+    """Regression: the DEVPLAN's own "e.g." is specifically "a bar per agent ($ today)" -- an
+    agent with a large historical total but nothing spent today must not rank ahead of today's
+    real top spender."""
     store = JsonlStore(tmp_path)
-    _record(store, agent="cheap_agent", cost_usd=1.0)
-    _record(store, agent="expensive_agent", cost_usd=10.0)
+    _record(
+        store, agent="big_historical_spender", cost_usd=100.0, recorded_at="2025-01-01T00:00:00Z"
+    )
+    _record(store, agent="todays_top_spender", cost_usd=5.0, recorded_at="2026-01-08T00:00:00Z")
 
     panel = cost_panel(store, now=_NOW)
 
-    assert [a["agent"] for a in panel["agents"]] == ["expensive_agent", "cheap_agent"]
+    assert [a["agent"] for a in panel["agents"]] == ["todays_top_spender", "big_historical_spender"]
 
 
 def test_cost_panel_budget_exceeded_flag(tmp_path: Path) -> None:

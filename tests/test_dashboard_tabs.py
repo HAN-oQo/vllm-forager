@@ -365,6 +365,41 @@ def test_ops_tab_renders_cost_panel_next_to_health(tmp_path: Path) -> None:
     assert "$3.50" in page
 
 
+def test_ops_tab_fetches_list_runs_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: render_ops_tab must share one store.list_runs() fetch between the T5.8
+    health panel and the T5.13 cost panel, not let each call fetch independently -- the exact
+    "N separate reads" anti-pattern this milestone's own review has already caught and fixed
+    for a single panel (dashboard.health's own docstring); this locks it in across panels."""
+    store = _seeded_store(tmp_path)
+    call_count = 0
+    real_list_runs = store.list_runs
+
+    def _counting_list_runs(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_list_runs(*args, **kwargs)
+
+    monkeypatch.setattr(store, "list_runs", _counting_list_runs)
+
+    render.render_tab_page(store, "ops")
+
+    assert call_count == 1
+
+
+def test_budget_exceeded_chip_has_a_real_css_rule(tmp_path: Path) -> None:
+    """Regression: the "gap" chip class used for a stalled/failed health row and an exceeded
+    budget must actually be styled -- an earlier version used class="chip gap" with no
+    matching CSS rule anywhere, so the "turns red" behavior this todo's whole point silently
+    never rendered."""
+    store = _seeded_store(tmp_path)
+
+    page = render.render_tab_page(store, "ops")
+
+    assert ".chip.gap" in page or ".chip.risk-high,.chip.decision-skip,.chip.gap" in page
+
+
 # --------------------------------------------------------------------- server: GET routing
 
 

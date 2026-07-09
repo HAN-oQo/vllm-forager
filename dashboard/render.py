@@ -517,7 +517,7 @@ _TAB_STYLE = """
 .inline-form{display:inline-flex;gap:.4rem;margin:.3rem 0}
 .chip.risk-low,.chip.decision-selected{color:var(--open);background:var(--open-soft)}
 .chip.risk-medium{color:var(--issue);background:var(--issue-soft)}
-.chip.risk-high,.chip.decision-skip{color:var(--gap);background:var(--gap-soft)}
+.chip.risk-high,.chip.decision-skip,.chip.gap{color:var(--gap);background:var(--gap-soft)}
 .candidate,.attempt-row,.health-row{display:flex;align-items:baseline;gap:.6rem;flex-wrap:wrap;
   padding:.45rem .5rem;border-radius:6px}
 .candidate:hover,.attempt-row:hover,.health-row:hover{background:var(--surface-2)}
@@ -912,9 +912,13 @@ def _cost_section_html(panel: dict) -> str:
     """T5.13's own "e.g.": a bar per agent (today/7d/total, broken down by model & provider —
     :func:`~dashboard.cost.cost_panel`'s own `by_model`) plus a total-vs-budget badge that
     turns red once `panel["budget_exceeded"]` (today's spend crossed :data:`~src.config.
-    DAILY_COST_BUDGET_USD`)."""
+    DAILY_COST_BUDGET_USD`) — labeled "default budget" (a code-review finding) since that
+    constant is an unreviewed placeholder, not a real, human-set limit; the badge flipping red
+    is a "you may want to look at this" nudge, not a claim that a real budget was crossed."""
     badge_class = "gap" if panel["budget_exceeded"] else "open"
-    budget_label = f'${panel["today_total_usd"]:.2f} / ${panel["budget_usd"]:.2f} today'
+    budget_label = (
+        f'${panel["today_total_usd"]:.2f} / ${panel["budget_usd"]:.2f} today (default budget)'
+    )
     rows = (
         "".join(_cost_agent_row_html(a) for a in panel["agents"])
         if panel["agents"]
@@ -931,11 +935,19 @@ def _cost_section_html(panel: dict) -> str:
 def render_ops_tab(store: Store) -> str:
     """The Agents/Ops tab: T5.8's live health panel, T5.13's cost panel (placed right after
     health -- this todo's own "cost belongs with health, not with the reports" framing), and
-    T5.7's guardrail panels (data quality, RAG eval)."""
-    panel = health_panel(store, stale_after_s=_STALE_AFTER_S)
+    T5.7's guardrail panels (data quality, RAG eval).
+
+    Fetches ``store.list_runs()`` exactly **once** (unfiltered) and shares it between
+    `health_panel` and `cost.cost_panel` — a code-review finding: an earlier version let each
+    call fetch independently, reintroducing the identical "N separate reads" cost concern
+    `health_panel`'s own docstring already fixed once for itself, just one level up (across
+    this tab's two panels rather than within one of them).
+    """
+    all_runs = store.list_runs()
+    panel = health_panel(store, stale_after_s=_STALE_AFTER_S, runs=all_runs)
     return (
         _health_section_html(panel)
-        + _cost_section_html(cost.cost_panel(store))
+        + _cost_section_html(cost.cost_panel(store, runs=all_runs))
         + _data_quality_section_html(guardrails.data_quality_series(store))
         + _rag_eval_section_html(guardrails.rag_eval_series(store))
     )

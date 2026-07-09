@@ -221,17 +221,28 @@ def agent_context(store: Store, *, agent: str, loop: str, run_id: str):
     )
 
 
-def rollup(store: Store) -> list[dict]:
-    """Aggregate every recorded cost by (day, agent, model): one dict per bucket with
-    ``date``/``agent``/``model``/``provider``/``calls``/``tokens_in``/``tokens_out``/
-    ``cost_usd``, sorted by ``date`` then ``agent`` then ``model``.
+def rollup_records(runs: list[dict]) -> list[dict]:
+    """The actual (day, agent, model) aggregation over already-fetched `runs` — one dict per
+    bucket with ``date``/``agent``/``model``/``provider``/``calls``/``tokens_in``/
+    ``tokens_out``/``cost_usd``, sorted by ``date`` then ``agent`` then ``model``.
+
+    Non-``stage="cost"`` records in `runs` are skipped — extracted here (a code-review finding
+    on T5.13) so a caller that's already fetched an *unfiltered* ``store.list_runs()`` for
+    another purpose (e.g. the dashboard's Ops tab, which also needs every stage for T5.8's
+    health panel) can reuse that one fetch instead of :func:`rollup` triggering its own,
+    redundant full scan just to re-read the same underlying collection filtered to
+    ``stage="cost"`` — the identical "N separate reads" cost concern
+    :func:`~dashboard.health.health_panel`'s own docstring already fixed once for this exact
+    shape (fetch unfiltered, filter in memory).
 
     A record with a missing/unparseable ``recorded_at`` buckets under the literal date
     ``"unknown"`` rather than being dropped — a KB write from a corrupted or partial line
     should still show up *somewhere* in a spend report, not vanish silently.
     """
     buckets: dict[tuple[str, str, str], dict] = {}
-    for run in store.list_runs(stage="cost"):
+    for run in runs:
+        if run.get("stage") != "cost":
+            continue
         recorded_at = run.get("recorded_at") or ""
         date = recorded_at[:10] if len(recorded_at) >= 10 else "unknown"
         agent = run.get("agent") or "unknown"
@@ -256,3 +267,10 @@ def rollup(store: Store) -> list[dict]:
         bucket["cost_usd"] += float(run.get("cost_usd") or 0.0)
 
     return sorted(buckets.values(), key=lambda b: (b["date"], b["agent"], b["model"]))
+
+
+def rollup(store: Store) -> list[dict]:
+    """:func:`rollup_records` over one fresh ``store.list_runs(stage="cost")`` fetch — the
+    convenience form for a caller that doesn't already have `runs` fetched for something else
+    (see :func:`rollup_records`'s own docstring for why that distinction exists)."""
+    return rollup_records(store.list_runs(stage="cost"))

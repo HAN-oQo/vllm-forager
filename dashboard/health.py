@@ -77,7 +77,13 @@ def stage_health(
     return _health_from_runs(runs, stage, now=when, stale_after_s=stale_after_s)
 
 
-def health_panel(store: Store, *, now: datetime | None = None, stale_after_s: float) -> dict:
+def health_panel(
+    store: Store,
+    *,
+    now: datetime | None = None,
+    stale_after_s: float,
+    runs: list[dict] | None = None,
+) -> dict:
     """``{"stages": [_health_from_runs(...) per real orchestrator stage], "overall": "green" |
     "red"}`` -- the top-level badge this todo's own "Why" names ("a stall must show red,
     never a frozen 'running'"): ``"red"`` if any stage is ``stalled``/``failed``, ``"green"``
@@ -87,10 +93,16 @@ def health_panel(store: Store, *, now: datetime | None = None, stale_after_s: fl
     ``stage`` locally, mirroring :func:`~dashboard.pipeline_diagram.pipeline_diagram`'s own
     identical fix for the identical cost concern (see :func:`_health_from_runs`'s own
     docstring).
+
+    `runs` -- a code-review finding on T5.13 -- lets a caller that's already fetched
+    ``store.list_runs()`` for another purpose (the Ops tab also builds T5.13's cost panel from
+    the identical unfiltered fetch) pass that same list in, rather than this function
+    triggering a second, redundant full scan of the same underlying collection. `None` (the
+    default) fetches fresh, unchanged behavior for every existing caller.
     """
     when = normalize_now(now)
     runs_by_stage: dict[str, list[dict]] = defaultdict(list)
-    for run in store.list_runs():
+    for run in runs if runs is not None else store.list_runs():
         stage = run.get("stage")
         if isinstance(stage, str):
             runs_by_stage[stage].append(run)
