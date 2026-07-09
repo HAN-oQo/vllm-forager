@@ -30,6 +30,13 @@ not `gate.assemble_bundle` -- the latter's risk-badge LLM call is pure overhead 
 module never displays risk/effort/impact), the same "don't pay for `assemble_bundle` when
 `verified_diff` already has what you need" rule `pr_quality.py` already follows.
 
+**Listing worked candidates:** `list_worked` scans `store.list_runs(stage="verify")` and groups
+by `(repo, number)` -- the KB is the source of truth for "who's been worked," not a scan of
+already-written `.md`/`.html` files under `_ATTEMPTS_DIR`, so the M5 Attempts tab (T5.11) shows
+a candidate as soon as it's verified, without requiring `python -m src.attempt_report` to have
+already run for it. Mirrors `dashboard.review.review_bundle`'s own "compute live from the KB,
+don't require a pre-written file" precedent.
+
 Known limitations, not fixed here:
 - Like every sibling M3 stage, this recomputes and rewrites the report from scratch on every
   call, with no idempotency check against an already-written, unchanged report for the same
@@ -45,6 +52,7 @@ import argparse
 import dataclasses
 import html as html_module
 import sys
+from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -207,6 +215,43 @@ def render_attempt_report(
         rendered_html=rendered_html,
         recorded_at=when.strftime(TS_FORMAT),
     )
+
+
+def list_worked(store: Store) -> list[dict]:
+    """Every worked candidate -- one with at least one recorded `stage="verify"` run -- as
+    ``{"repo", "number", "verified", "title", "recorded_at"}`` (the *latest* verify run's own
+    outcome + timestamp), newest first. Backs the M5 "Attempts" tab (T5.11); the scan/group-by
+    logic lives here rather than in `dashboard/attempts.py`, matching T5.9's own review-driven
+    "scanning belongs in `src`, the dashboard module is thin glue" correction.
+
+    A `stage="verify"` run missing `repo`/`number` (malformed) is skipped rather than raised
+    on -- every other read endpoint in this codebase degrades past one bad record the same way
+    instead of crashing a whole dashboard page over it.
+    """
+    runs_by_candidate: dict[tuple[str, int], list[dict]] = defaultdict(list)
+    for run in store.list_runs(stage="verify"):
+        repo = run.get("repo")
+        number = run.get("number")
+        if repo is None or number is None:
+            continue
+        runs_by_candidate[(repo, number)].append(run)
+
+    summaries = []
+    for (repo, number), runs in runs_by_candidate.items():
+        latest = latest_run(runs)
+        assert latest is not None  # `runs` is non-empty by construction
+        item = store.get_item(repo, number)
+        summaries.append(
+            {
+                "repo": repo,
+                "number": number,
+                "verified": bool(latest.get("verified")),
+                "title": (item or {}).get("title") or "",
+                "recorded_at": latest.get("recorded_at"),
+            }
+        )
+    summaries.sort(key=lambda s: s["recorded_at"] or "", reverse=True)
+    return summaries
 
 
 def _format_markdown(report: AttemptReport) -> str:
