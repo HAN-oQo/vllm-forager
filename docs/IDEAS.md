@@ -152,6 +152,44 @@
   hallucination controls (the latent-validation especially) are designed. Not milestone-ready until the synthesis
   method + latent-validation + evidence shape are pinned.
 
+### Reproduce-the-news: turn external announcements into ROCm contributions on MI250
+- **What:** watch **external signals beyond GitHub** — HF blog posts, vendor/release announcements, changelogs,
+  papers — pick the ROCm-relevant ones, and **actually run them on MI250 to see if they hold on ROCm**. When a
+  CUDA-benchmarked feature breaks (or silently underperforms) on gfx90a, *that failure is the contribution point*.
+  Uses MI250 as an active **prober**, not just a verification gate.
+- **Worked example (this exact blog — [native-speed vLLM transformers backend](https://huggingface.co/blog/native-speed-vllm-transformers-backend)):**
+  vLLM's transformers backend (`--model-impl transformers`) claims native speed — but it's benchmarked **only on
+  8×H100 (CUDA)**, uses **CUDA Graphs** + `torch.compile` + fused vLLM kernels, plugs vLLM's attention at runtime,
+  and one benchmark is **FP8 MoE**. None of that is validated on ROCm. ROCm risk hypotheses the agent would test on
+  MI250: (a) the runtime-plugged **attention backend** differs on ROCm (triton/rocm-flash) → may fail or fall
+  back; (b) **CUDA Graphs → HIP Graphs** may not be wired for this codepath; (c) **FP8 is effectively an MI300
+  feature** — the FP8-MoE path likely won't run on **gfx90a (MI250)** at all; (d) the fused kernels
+  (`MergedColumnParallelLinear`/`QKVParallelLinear`) need ROCm builds. → run `vllm serve Qwen/Qwen3-4B
+  --model-impl transformers` on MI250 and compare to `--model-impl vllm`: **errors**, **slower on ROCm**, or
+  **FP8 unsupported on gfx90a** are each a real, reproducible, well-evidenced contribution.
+- **Why / value:** the **purest expression of the hardware edge** — the whole reason to hold MI250 is that nobody
+  else checks whether the CUDA world's latest thing works on ROCm. Empirical, high-signal, and every failure ships
+  with a ready-made repro (exact command + traceback). A concrete instance of the "active bug-finding"
+  post-pipeline vision, sourced from news and driven by reproduction.
+- **How (concrete):**
+  - **Ingest:** a curated external feed set (HF blog, vLLM/ROCm release notes, vendor blogs, arXiv) polled via
+    RSS/WebFetch/WebSearch, then an LLM "ROCm-relevant + reproducible on an inference box?" filter (ROCM_HINTS-aware).
+  - **Repro = the M3 Engineer pointed at a *claim*, not a filed issue:** turn the announcement into a runnable
+    MI250 smoke test (`repro.py`/`runner.py`), run it, capture pass/fail + logs + a perf delta vs the baseline.
+  - **Outcome → candidate + attempt report (T3.12):** fail → a bug/perf contribution with the repro attached;
+    pass-but-slow → a perf-parity candidate; pass → a positive "works on ROCm" data point (still worth publishing).
+- **Relation:** the **empirical** sibling of "Latent-need synthesis" (that one *reasons* from trends with no
+  execution; this one *runs* an external claim on real hardware). Together with roadmap-derived + the observed
+  GitHub sources, these form a **pluggable discovery-source catalog** the scout should grow.
+- **Scope / effort:** L — external-feed ingestion + a prose→repro harness (the hard part) + the M3 Engineer/MI250
+  runner + attempt-report output.
+- **Depends on / risk:** the **M3 Engineer / repro / MI250 harness (not built yet)** is the real dependency — this
+  *is* that harness pointed at external claims; a vLLM ROCm build must exist on the node; the prose→repro step can
+  misreproduce (false gaps) → run logs + human review contain it; a relevance filter is needed so it doesn't chase
+  CUDA-only news that can't matter on ROCm.
+- **Status:** shaping — graduate once the M3 reproduction harness exists (then this is mostly a new *source*
+  feeding it) + the external-feed ingestion + relevance filter are designed.
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.

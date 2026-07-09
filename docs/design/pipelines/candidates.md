@@ -90,4 +90,7 @@ new since the last run.
    part of the issue implies high effort) and abstain when unsure — feeds the attempt report
    (`T3.12`). Deterministically pre-screen (boosts + rules), then spend the LLM only on the top-K.
 7. **Richer sources** — perf-regression (a trend reversal in `trends.py`), high-engagement-but-stale
-   issues, CI-failure clusters; and reconcile the two "ROCm-relevant" definitions.
+   issues, CI-failure clusters; and reconcile the two "ROCm-relevant" definitions. Plus **external news
+   reproduced on MI250** (`docs/IDEAS.md` → "Reproduce-the-news"): run a CUDA-benchmarked announcement (e.g. a HF
+   blog feature) on gfx90a — an error/slowdown/unsupported-path *is* the contribution. Uses MI250 as a prober, so
+   it depends on the M3 repro harness.
