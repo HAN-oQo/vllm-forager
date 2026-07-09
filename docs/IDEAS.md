@@ -226,6 +226,47 @@
 - **Status:** shaping — strong cost lever; sequence after T4.8/T4.9 cost capture exists (so the tier choices are
   data-driven, not guessed), and it naturally subsumes the T4.11 cascade as its first instance.
 
+### Generate novel optimization / mechanism ideas (not just track / port / reproduce)
+- **What:** the highest rung — the agent should *invent* improvements, like
+  [vLLM #47187](https://github.com/vllm-project/vllm/pull/47187) "Make the Transformers backend as fast as native
+  vLLM", whose core idea was using **`torch.fx` graph analysis to auto-detect layer patterns and rewrite them in
+  place (via `ast`) to swap in fused kernels** — a reusable "Fuser" abstraction (a reviewer: *"Great idea about
+  layer fusion through fx graph!"*). A genuinely novel optimization, not a routine fix. The agent should be able to
+  *propose* that **class** of idea.
+- **Why / value:** the top of the contribution value chain — inventive, high-impact PRs, not just reactive fixes;
+  it's what turns the project from a *maintainer* into a *contributor of ideas*.
+- **Tractable sub-sources (making "be inventive" concrete, not hand-wavy):**
+  - **Technique transfer (analogical):** keep a catalog of proven techniques (papers, other repos, past merged PRs
+    — "fx graph-rewrite to fuse", a kernel trick, a scheduling idea) and match each against target hotspots where
+    it's absent → "apply technique T to target X." #47187 is exactly this shape.
+  - **Paper / technique mining:** read arXiv / research describing an optimization → propose implementing it in
+    vLLM (ROCm). The *generative* sibling of "Reproduce-the-news".
+  - **Hotspot → optimization synthesis:** find the target's perf/maintenance pain (profiles, "slow path" issues,
+    maintenance-burden complaints — #47187's own motivation) → propose a mechanism for it.
+  - **Revert / regression re-landing (most tractable — evidenced by #47187 itself):** #47187 was **reverted** with
+    LoRA-compat follow-ups (#47798 / #47804 / #47832) within a day. A merged-then-reverted PR is a *wanted* feature
+    that broke → **re-land it correctly** (fix the compat) = well-scoped, high-merge-probability, and needs **no
+    idea generation** (the idea already merged once). Watch merged→reverted PRs + their follow-up "fix X compat"
+    issues.
+- **The gate that makes invented ideas safe — MI250 as the empirical judge:** unlike a bug fix (verifiably
+  right/wrong), an optimization's value must be **measured**. So the verification oracle becomes "does this
+  actually make it faster / lighter on ROCm, without regressions?" — a **benchmark** gate. An invented idea that
+  doesn't win on hardware is dropped, never PR'd. This is what separates a real contribution from a
+  plausible-sounding one, and it's the strongest use of the hardware edge.
+- **Relation:** the **generative / inventive** end of the discovery-source catalog — beyond observed
+  (parity/good-first/rocm), synthesized (latent-need), and reproduced (news). Needs `novelty.py` (don't re-propose
+  a tried idea), the analyst/trends/forecaster (find hotspots + techniques), and the M3 Engineer with a
+  **benchmark** harness (measure the win, not just verify a fix).
+- **Scope / effort:** L–XL — a technique catalog + an idea-synthesis step + benchmark-based verification (harder
+  than pass/fail repro) + heavy hallucination control.
+- **Depends on / risk:** M3 Engineer + a **benchmark/perf-regression harness** (not just build/repro);
+  **hallucination is the dominant risk** (LLMs emit plausible-but-worthless "optimizations") — contained ONLY by
+  the empirical MI250 benchmark gate + human review, which is why this is last, not first; `novelty.py` to avoid
+  re-inventing.
+- **Status:** shaping — the most ambitious source. Start with the **tractable slice (revert/regression
+  re-landing)** — no idea-generation needed, directly evidenced by #47187; full inventive idea-generation waits on
+  the benchmark harness + hallucination controls.
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.

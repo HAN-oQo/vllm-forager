@@ -93,4 +93,6 @@ new since the last run.
    issues, CI-failure clusters; and reconcile the two "ROCm-relevant" definitions. Plus **external news
    reproduced on MI250** (`docs/IDEAS.md` → "Reproduce-the-news"): run a CUDA-benchmarked announcement (e.g. a HF
    blog feature) on gfx90a — an error/slowdown/unsupported-path *is* the contribution. Uses MI250 as a prober, so
-   it depends on the M3 repro harness.
+   it depends on the M3 repro harness. And **re-landing merged-then-reverted PRs** — a wanted feature that broke
+   (e.g. #47187 reverted with LoRA follow-ups → fix the compat + re-land): high merge-probability, no
+   idea-generation needed (see `docs/IDEAS.md` → "Generate novel optimization / mechanism ideas").
