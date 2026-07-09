@@ -68,10 +68,11 @@ new since the last run.
    detect roadmap/RFC/milestone items (label or pinned-issue or a `ROADMAP.md` parse) among already
    collected items, and surface each unstarted line that matches our domain — especially
    **ROCm∩speech** — as a candidate. An officially-wanted item has a **high merge probability**, so
-   give it a roadmap boost (+1/+2) alongside the existing ones. **Sibling corpus:** our *own* org's
-   Confluence/Jira roadmaps (first-party demand) — same machinery, different source — are captured in
-   `docs/IDEAS.md` → "Internal-demand-driven contributions" (e.g. an internal agentic-gateway need for session
-   affinity → infer a vLLM session-id/routing feature); privacy-gated, so deferred to IDEAS until settled.
+   give it a roadmap boost (+1/+2) alongside the existing ones. **Stronger sibling (see `docs/IDEAS.md` →
+   "Latent-need synthesis"):** don't only surface *observed* signals — **synthesize a not-yet-filed upstream
+   feature from cross-repo trends** (e.g. llm-d's PRs trending agentic → infer vLLM needs a session-id
+   tag/routing, before anyone files it). Public evidence; the crux is validating the need is genuinely *latent*
+   (not already shipped/filed) to avoid hallucinating one — deferred to IDEAS until that control is designed.
 3. **Feasibility gate — only surface what we can actually build + verify** *(the "그거 구현이 가능하다면"
    part).* A roadmap item is only a candidate if it's implementable on **our** oracle: cross-check
    against MI250 capability (gfx90a), a bounded effort estimate, and dependency availability

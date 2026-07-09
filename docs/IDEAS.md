@@ -109,40 +109,48 @@
   · [Appsmith vs ToolJet vs Budibase](https://blog.tooljet.com/appsmith-vs-budibase-vs-tooljet/)
   · [Streamlit/Dash/Reflex/NiceGUI at scale](https://reflex.dev/blog/streamlit-vs-dash-python-dashboards/).
 
-### Internal-demand-driven contributions: mine first-party roadmaps (Confluence/Jira) for upstream needs
-- **What:** a new candidate source that reads **our own org's** design docs / roadmaps (Confluence, Jira, internal
-  repos — via the **Atlassian MCP** already wired into this session) and infers the **upstream** vLLM / llm-d /
-  SGLang feature that would unblock what we're actually building. e.g. an internal design doc for an
-  agentic-workflow gateway that needs **session affinity / prefix-cache keeping** → infer "vLLM needs a
-  first-class **session-id tag / session-aware routing** feature" as a contribution candidate.
-- **Why / value:** the **highest-alignment** source there is — you contribute what your org will actually *use and
-  maintain* (dogfooding), so the work is high-priority, well-motivated, and sustained. Shifts the agent from
-  "track the public ecosystem" to "advance upstream in the direction of **first-party demand**": contributions
-  land where they pay us back.
+### Latent-need synthesis: derive not-yet-filed upstream features from cross-repo ecosystem trends
+- **What:** the discovery agent shouldn't only find *observed* signals (a capability that exists elsewhere, a
+  filed issue, a published roadmap line) — it should **synthesize a latent upstream feature that nobody has built
+  or filed yet**, by connecting **public** cross-repo trends. Worked example: watch **llm-d**'s recent PRs/issues →
+  infer it's moving toward **agentic workflows** → reason "integrating that with vLLM needs stable **session
+  identity**" → conclude "**vLLM needs a session-id tag / session-aware routing**" and surface *that* as a
+  contribution candidate — *before anyone opens the issue*.
+- **Why / value:** the top of the value chain — proactive, anticipatory contributions that put vLLM **ahead of**
+  where the ecosystem is heading, not reactive bug/gap chasing. It's the agent reasoning like a systems architect
+  reading the whole field — the project's real thesis ("read the ecosystem → find where to contribute") in its
+  strongest form. Evidence is **public** (the motivating llm-d PRs + vLLM's current absence), so no privacy issue.
 - **How (concrete):**
-  - **Ingest:** Atlassian MCP (Confluence pages + Jira issues under a designated space/label set) + internal
-    repos; a periodic pull, same cadence shape as collection.
-  - **Infer (LLM step):** "given this internal need, which upstream feature in {vLLM, llm-d, SGLang, …} would
-    enable/simplify it, and is it missing today?" → a candidate `{internal-need, implied-upstream-feature, target
-    repo, evidence}`.
-  - **Rank + feasibility-gate** like every candidate (MI250-verifiable? effort? merge-likelihood?), with a
-    **first-party-demand boost**. Same machinery as `candidates.md` §2 "roadmap-derived", a different corpus.
-- **Privacy / security (non-negotiable — this source touches confidential material):** internal docs are a
-  **discovery/prioritization signal only**. The eventual **public PR must be justified on public technical merits
-  and must never quote or leak internal strategy / product names** (scrub the output). LLM processing of internal
-  docs stays under our own account; the mandatory human gate is the backstop. This extends the existing "never
-  spray public without human confirmation" rule to "never leak internal context into a public artifact." (Also:
-  keep internal specifics out of committed repo docs — this entry uses a deliberately generic example.)
-- **Scope / effort:** M–L — Atlassian ingestion + the internal→upstream inference step + privacy scrub +
-  integration as a scout source.
-- **Depends on / risk:** the scout/candidate plumbing (M2, built) + ideally the `candidates.md` §2 roadmap-derived
-  source landing first (shared machinery); **Atlassian MCP availability in the unattended runtime** (an
-  interactively-authed MCP can be absent in headless/cron — a real gap for a scheduled loop); **privacy is the top
-  risk**; the internal→upstream inference can hallucinate a "need" — the feasibility + evidence + human gates
-  contain it.
-- **Status:** shaping — graduate to a **DEVPLAN scout-source todo** (M2/M3 area) once §2 roadmap-derived lands and
-  the Atlassian ingestion + privacy scrub are settled. Not milestone-ready until the ingestion path, the inference
-  prompt/validation, and the privacy scrub are pinned.
+  - **Read direction, not just items:** feed the synthesis the ecosystem signals the intelligence plane already
+    computes — `trends.py` category momentum, the analyst's classifications, the forecaster's "what's becoming
+    important" — across llm-d / SGLang / Dynamo / vllm-omni, plus each repo's recent PR/issue themes.
+  - **Synthesize (LLM step):** "given where {llm-d, SGLang, …} are heading, what primitive/feature will {vLLM,
+    vllm-omni} need to integrate with or keep pace, that doesn't exist there yet?" → a candidate `{trend evidence,
+    implied upstream feature, target repo, integration rationale}`.
+  - **Validate it's actually latent (the crux):** confirm the feature isn't already shipped or already filed on the
+    target (search the target repo / the parity matrix) — otherwise it collapses into an ordinary parity-gap or an
+    existing issue. The whole value is finding the *unfiled* need **without hallucinating one**.
+  - **Rank + feasibility-gate + human gate** like every candidate.
+- **Relation to existing sources:** today's scout sources are all **observed** (parity-gap = exists elsewhere;
+  good-first / rocm = filed; roadmap-derived = published). This is the **synthesized / foresight** source, sitting
+  at the **forecaster ↔ scout** seam (the forecaster already predicts "what will matter"; this turns that into
+  "what feature to build"). Hardest source → highest hallucination risk → the latent-check + feasibility + human
+  review are load-bearing, not optional.
+- **Variant — first-party demand (privacy-gated):** the same synthesis run over our *own* Confluence/Jira roadmaps
+  (via the Atlassian MCP) instead of public trends — highest alignment (dogfooding), but internal docs are a
+  **prioritization signal only**: the public PR must be justified on public technical merits and **never quote or
+  leak internal strategy / product names** (scrub the output; keep internal specifics out of committed docs too).
+  Extends "never spray public without human confirmation" to "never leak internal context into a public artifact."
+  Caveat: an interactively-authed MCP can be absent in the unattended/cron runtime.
+- **Scope / effort:** L — a synthesis step over the intelligence plane's trend outputs + a "does it already exist"
+  latent-validation + integration as a scout source.
+- **Depends on / risk:** the intelligence plane (analyst / trends / forecaster, M1) + scout (M2, built);
+  **hallucinated needs are the top risk** (a derived feature that's unwanted or already exists) — contained by the
+  latent-check, feasibility gate, and mandatory human review; the private variant adds the privacy gate.
+- **Status:** shaping — the most ambitious candidate source. Graduate to a **DEVPLAN scout-source todo** (M2/M3
+  area) after the simpler observed sources (`candidates.md` §2 roadmap-derived) land and the synthesis's
+  hallucination controls (the latent-validation especially) are designed. Not milestone-ready until the synthesis
+  method + latent-validation + evidence shape are pinned.
 
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
