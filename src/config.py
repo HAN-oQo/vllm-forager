@@ -164,6 +164,13 @@ MAX_RATE_LIMIT_RETRIES = 10
 # gaps normal, so this is a ratio (5%), not a zero-tolerance check.
 DATA_QUALITY_GAP_RATIO_THRESHOLD = 0.05
 
+# Cost guardrail (T5.13): the T4.8/T4.9 cost panel's own "budget line" -- flags red when a
+# single day's total spend (across every agent + the Claude Code session cost) crosses this.
+# No real budget has been set for this project yet (T4.10's own LiteLLM gateway -- a *hard*
+# cap, not just a dashboard flag -- is still "adopt when going always-on"); $20/day is a
+# placeholder default, not a researched number. Override via env once a real one exists.
+DAILY_COST_BUDGET_USD = float(os.getenv("FORAGER_DAILY_COST_BUDGET_USD") or 20.0)
+
 # Storage backend (T0.6.2): src.store.get_store() reads this to select jsonl vs. firestore —
 # named here like every other tunable env var in this file, rather than a bare os.getenv()
 # inside store/__init__.py, so `monkeypatch.setattr(config, "STORE_BACKEND", ...)` works the

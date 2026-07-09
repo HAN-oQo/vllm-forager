@@ -339,6 +339,67 @@ def test_ops_tab_shows_output_tail_and_error_for_a_failed_stage(tmp_path: Path) 
     assert "Traceback (most recent call last):" in page
 
 
+def test_ops_tab_renders_cost_panel_next_to_health(tmp_path: Path) -> None:
+    store = _seeded_store(tmp_path)
+    store.record_run(
+        {
+            "stage": "cost",
+            "agent": "analyst",
+            "run_id": "r1",
+            "loop": "intel",
+            "provider": "claude_api",
+            "model": "claude-sonnet-5",
+            "tokens_in": 100,
+            "tokens_out": 50,
+            "tokens_cache": 0,
+            "cost_usd": 3.5,
+            "recorded_at": "2026-01-08T00:00:00Z",
+        }
+    )
+
+    page = render.render_tab_page(store, "ops")
+
+    assert "Live health" in page
+    assert page.index("Live health") < page.index("Cost")  # cost sits next to health
+    assert "analyst" in page
+    assert "$3.50" in page
+
+
+def test_ops_tab_fetches_list_runs_exactly_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: render_ops_tab must share one store.list_runs() fetch between the T5.8
+    health panel and the T5.13 cost panel, not let each call fetch independently -- the exact
+    "N separate reads" anti-pattern this milestone's own review has already caught and fixed
+    for a single panel (dashboard.health's own docstring); this locks it in across panels."""
+    store = _seeded_store(tmp_path)
+    call_count = 0
+    real_list_runs = store.list_runs
+
+    def _counting_list_runs(*args, **kwargs):
+        nonlocal call_count
+        call_count += 1
+        return real_list_runs(*args, **kwargs)
+
+    monkeypatch.setattr(store, "list_runs", _counting_list_runs)
+
+    render.render_tab_page(store, "ops")
+
+    assert call_count == 1
+
+
+def test_budget_exceeded_chip_has_a_real_css_rule(tmp_path: Path) -> None:
+    """Regression: the "gap" chip class used for a stalled/failed health row and an exceeded
+    budget must actually be styled -- an earlier version used class="chip gap" with no
+    matching CSS rule anywhere, so the "turns red" behavior this todo's whole point silently
+    never rendered."""
+    store = _seeded_store(tmp_path)
+
+    page = render.render_tab_page(store, "ops")
+
+    assert ".chip.gap" in page or ".chip.risk-high,.chip.decision-skip,.chip.gap" in page
+
+
 # --------------------------------------------------------------------- server: GET routing
 
 
