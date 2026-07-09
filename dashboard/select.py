@@ -21,15 +21,17 @@ from src.store.base import Store
 
 def select_candidate(
     store: Store, repo: str, number: int, *, by: str | None = None, now: datetime | None = None
-) -> dict:
-    """ "Work this" -- records a ``"selected"`` decision for candidate (`repo`, `number`)."""
+) -> dict | None:
+    """ "Work this" -- records a ``"selected"`` decision for candidate (`repo`, `number`), or
+    `None` if it isn't a real KB item (see :func:`~src.selection.record_decision`)."""
     return record_decision(store, repo, number, decision="selected", by=by, now=now)
 
 
 def skip_candidate(
     store: Store, repo: str, number: int, *, by: str | None = None, now: datetime | None = None
-) -> dict:
-    """ "Skip" -- records a ``"skip"`` decision for candidate (`repo`, `number`)."""
+) -> dict | None:
+    """ "Skip" -- records a ``"skip"`` decision for candidate (`repo`, `number`), or `None`
+    if it isn't a real KB item (see :func:`~src.selection.record_decision`)."""
     return record_decision(store, repo, number, decision="skip", by=by, now=now)
 
 
