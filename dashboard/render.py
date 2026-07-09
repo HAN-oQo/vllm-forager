@@ -32,6 +32,7 @@ the snapshot already, with a "show N more" control per truncated node fetching t
 
 from __future__ import annotations
 
+from dataclasses import asdict
 from html import escape
 from urllib.parse import quote
 
@@ -525,6 +526,10 @@ _TAB_STYLE = """
 .candidate .badges{display:flex;gap:.4rem;flex-wrap:wrap}
 .attempt-detail{border:1px solid var(--border);border-radius:8px;padding:1rem;margin-top:1rem}
 .archive-list{display:flex;gap:.4rem;flex-wrap:wrap;margin-bottom:1rem}
+.health-row{flex-direction:column;align-items:flex-start;border:1px solid var(--border);
+  margin-bottom:.5rem}
+.health-row pre{width:100%;box-sizing:border-box;font-size:.78rem;margin:.3rem 0 0}
+.health-error{color:var(--gap);background:var(--gap-soft)}
 """
 
 
@@ -560,8 +565,14 @@ def _page_shell(active_tab: str, body_html: str) -> str:
 
 def render_issues_tab(store: Store) -> str:
     """The Issues tab: the collapsible report tree alone (unchanged from the legacy single
-    page's own tree section) — Trends/Forecasts move to the Reports/Trends tab below."""
-    return _tree_section_html(build_snapshot(store)["tree"])
+    page's own tree section) — Trends/Forecasts move to the Reports/Trends tab below.
+
+    Uses :func:`~dashboard.api.tree`, not ``build_snapshot(store)["tree"]`` — a code-review
+    finding: `build_snapshot` unconditionally also computes trends (a second full store scan)
+    and forecasts (a full prediction-log read) only to have both discarded here, the exact
+    "wasted work, and a tree-only read could crash on an unrelated corrupt prediction record"
+    problem `api.tree`'s own docstring already fixed this identical shape for once before."""
+    return _tree_section_html(api.tree(store))
 
 
 def _archive_tree_node_html(node: dict, depth: int) -> str:
@@ -618,11 +629,15 @@ def _archive_section_html(store: Store, *, report_stamp: str | None) -> str:
 
 def render_reports_tab(store: Store, *, report_stamp: str | None = None) -> str:
     """The Reports/Trends tab: the legacy Trends + Forecast-log sections (unchanged), plus the
-    T5.9 archive (list + an optional opened report, via `report_stamp`)."""
-    snapshot = build_snapshot(store)
+    T5.9 archive (list + an optional opened report, via `report_stamp`).
+
+    Uses :func:`render_trends`/:func:`render_forecasts` directly, not `build_snapshot` — a
+    code-review finding: this tab never needs the classified tree (the most expensive part of
+    a snapshot: a full scan plus one summary read per node), but `build_snapshot` computed and
+    discarded it anyway on every load."""
     return (
-        _trends_section_html(snapshot["trends"])
-        + _forecasts_section_html(snapshot["forecasts"])
+        _trends_section_html(render_trends(store))
+        + _forecasts_section_html([asdict(p) for p in render_forecasts(store)])
         + _archive_section_html(store, report_stamp=report_stamp)
     )
 
@@ -665,17 +680,36 @@ def _candidate_row_html(candidate: dict, decision: str | None) -> str:
     )
 
 
-def render_candidates_tab(store: Store) -> str:
+def render_candidates_tab(store: Store, *, compute: bool = True) -> str:
     """The Candidates tab (T5.10): the risk-ranked queue with why-selected (score breakdown +
     evidence) and a "Work this"/"Skip" control per row.
 
-    Calls :func:`~dashboard.api.candidates` with ``compute=True`` -- unlike a read endpoint a
-    page-view hazard would silently re-score on every load, a human *navigating to this tab* is
-    exactly the explicit, bounded action T5.1's own ``compute=False`` default was written to
-    require (the same "explicitly opened, right now" cost justification
+    Calls :func:`~dashboard.api.candidates` with ``compute=True`` by default -- unlike a read
+    endpoint a page-view hazard would silently re-score on every load, a human *navigating to
+    this tab* is exactly the explicit, bounded action T5.1's own ``compute=False`` default was
+    written to require (the same "explicitly opened, right now" cost justification
     :mod:`dashboard.review`'s own docstring already established for an identical one-call-per-
     explicit-view shape).
+
+    `compute=False` -- a code-review finding: `_serve_candidate_decision`'s own 303 redirect
+    back to this same tab is *not* that explicit navigation, it's an automatic consequence of
+    clicking "Work this"/"Skip" -- so the original always-`compute=True` version re-paid the
+    full N-candidate LLM-scoring pass after every single decision (O(N) work per click, O(N^2)
+    to clear a queue of N). The server now redirects with `?after_decision=1`
+    (`dashboard.server._serve_candidate_decision`), which this function's caller
+    (:func:`render_tab_page`) turns into `compute=False`: skip the recompute, show a
+    confirmation instead, and let a human who actually wants the refreshed queue pay for it via
+    one more explicit click -- mirroring `dashboard.attempts.open_attempt`'s own
+    `include_review_bundle` opt-in shape for the identical "browsing != an explicit costly
+    action" distinction.
     """
+    if not compute:
+        return _section(
+            "Candidates",
+            '<p>Decision recorded. <a class="btn" href="/tab/candidates">Refresh the queue</a> '
+            "to re-score and see the current list (this re-runs LLM scoring for every "
+            "candidate).</p>",
+        )
     candidates = api.candidates(store, compute=True)
     if not candidates:
         return _section("Candidates", "<p>No candidates discovered.</p>")
@@ -712,11 +746,18 @@ def _approve_hold_form_html(repo: str, number: int) -> str:
     )
 
 
-def _attempt_detail_html(repo: str, number: int, detail: dict) -> str:
+def _attempt_detail_html(
+    repo: str, number: int, detail: dict, *, just_decided: bool = False
+) -> str:
     """One opened attempt's full report (T3.12's 3 sections + outcome), plus -- only when
     `detail["review_bundle"]` is present (a verified, gate-ready candidate) -- the T5.6
     approve/hold form, satisfying T5.11's own DEVPLAN note ("go straight from browsing to
-    approving without leaving the console")."""
+    approving without leaving the console").
+
+    `just_decided=True` (a code-review finding) shows a confirmation banner instead -- the
+    caller (:func:`render_attempts_tab`) only passes this right after the T5.6 POST redirect,
+    when `detail` was built with `include_review_bundle=False` specifically to avoid re-paying
+    `review_bundle`'s real LLM cost purely to redisplay a decision the human just made."""
     sections = (
         f"<h3>{escape(repo)}#{number}</h3>"
         f"<h4>Issue overview</h4><pre>{escape(detail['issue_overview'])}</pre>"
@@ -724,12 +765,19 @@ def _attempt_detail_html(repo: str, number: int, detail: dict) -> str:
         f"<h4>Reproduce</h4><pre>{escape(detail['reproduce'])}</pre>"
         f"<h4>Outcome</h4><pre>{escape(detail['outcome'])}</pre>"
     )
-    if detail.get("review_bundle") is not None:
+    if just_decided:
+        sections += "<p>Decision recorded.</p>"
+    elif detail.get("review_bundle") is not None:
         sections += _approve_hold_form_html(repo, number)
     return f'<div class="attempt-detail">{sections}</div>'
 
 
-def render_attempts_tab(store: Store, *, open_candidate: tuple[str, int] | None = None) -> str:
+def render_attempts_tab(
+    store: Store,
+    *,
+    open_candidate: tuple[str, int] | None = None,
+    just_decided: bool = False,
+) -> str:
     """The Attempts tab (T5.11): every worked candidate's outcome badge, newest first; opening
     one (`open_candidate`) renders its full report, with the T5.6 approve/hold form folded in
     for a verified, gate-ready candidate -- `include_review_bundle=True` is safe to pay here
@@ -737,6 +785,12 @@ def render_attempts_tab(store: Store, *, open_candidate: tuple[str, int] | None 
     since opening one specific attempt from this list *is* the explicit, bounded action that
     default exists to gate -- the same distinction :func:`render_candidates_tab` draws for
     `api.candidates`'s own `compute` flag.
+
+    `just_decided=True` (a code-review finding) skips `include_review_bundle` -- the server's
+    own 303 redirect after recording a T5.6 approve/hold decision (`dashboard.server.
+    _serve_attempt_decision`) landed back on this exact detail view and would otherwise
+    re-trigger `review_bundle`'s real LLM call purely to redisplay content the human already
+    saw right before deciding.
     """
     rows = attempts.list_attempts(store)
     list_html = (
@@ -745,9 +799,9 @@ def render_attempts_tab(store: Store, *, open_candidate: tuple[str, int] | None 
     detail_html = ""
     if open_candidate is not None:
         repo, number = open_candidate
-        detail = attempts.open_attempt(store, repo, number, include_review_bundle=True)
+        detail = attempts.open_attempt(store, repo, number, include_review_bundle=not just_decided)
         detail_html = (
-            _attempt_detail_html(repo, number, detail)
+            _attempt_detail_html(repo, number, detail, just_decided=just_decided)
             if detail is not None
             else "<p>Unknown attempt.</p>"
         )
@@ -755,17 +809,30 @@ def render_attempts_tab(store: Store, *, open_candidate: tuple[str, int] | None 
 
 
 def _health_row_html(stage: dict) -> str:
+    """One stage's row: status chip, current step, elapsed time, and — a code-review finding —
+    its intermediate ``output_tail``/``error``, both of which `_health_from_runs`
+    (:mod:`dashboard.health`) computes specifically so a stall/failure is never just a bare
+    status word (CLAUDE.md's own T5.8 guardrail: "the dashboard always shows what is running
+    now... and its partial output. A crash must never leave a stage silently 'running'.")."""
     chip_class = {"ok": "open", "running": "open", "stalled": "gap", "failed": "gap"}.get(
         stage["status"], "issue"
     )
     elapsed = stage.get("elapsed_s")
     elapsed_label = f"{elapsed:.0f}s ago" if elapsed is not None else "—"
+    detail_html = ""
+    error = stage.get("error")
+    output_tail = stage.get("output_tail")
+    if error:
+        detail_html += f'<pre class="health-error">{escape(str(error))}</pre>'
+    if output_tail:
+        detail_html += f"<pre>{escape(str(output_tail))}</pre>"
     return (
         '<div class="health-row">'
         f'<span class="id">{escape(stage["stage"])}</span>'
         f'<span class="chip {chip_class}">{escape(stage["status"])}</span>'
         f'<span>{escape(stage.get("step") or "")}</span>'
         f"<span>{escape(elapsed_label)}</span>"
+        f"{detail_html}"
         "</div>"
     )
 
@@ -840,15 +907,25 @@ def render_tab_page(
     *,
     report_stamp: str | None = None,
     open_candidate: tuple[str, int] | None = None,
+    after_decision: bool = False,
 ) -> str:
     """The full page (nav + body) for `tab` — falls back to the Issues tab for an unrecognized
-    name (a stale bookmark/typo'd URL degrades to the default view, not a 404 or a crash)."""
+    name (a stale bookmark/typo'd URL degrades to the default view, not a 404 or a crash).
+
+    `after_decision=True` (a code-review finding — see `render_candidates_tab`'s/
+    `render_attempts_tab`'s own docstrings): set only when the caller (`dashboard.server`'s two
+    POST handlers) is redirecting straight back from recording a T5.10/T5.6 decision, so the
+    landing page doesn't silently re-pay the LLM cost that decision's own tab guards behind an
+    explicit-navigation default.
+    """
     if tab == "reports":
         body = render_reports_tab(store, report_stamp=report_stamp)
     elif tab == "candidates":
-        body = render_candidates_tab(store)
+        body = render_candidates_tab(store, compute=not after_decision)
     elif tab == "attempts":
-        body = render_attempts_tab(store, open_candidate=open_candidate)
+        body = render_attempts_tab(
+            store, open_candidate=open_candidate, just_decided=after_decision
+        )
     elif tab == "ops":
         body = render_ops_tab(store)
     else:

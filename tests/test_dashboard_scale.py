@@ -119,7 +119,7 @@ def test_node_prs_endpoint_returns_page_k_and_a_correct_total(tmp_path: Path) ->
     """DEVPLAN's own worked example: a paginated leaf endpoint returns page k + a correct
     total."""
     store = _store_with_n_items(tmp_path, n=120)
-    handler_cls = _make_handler(store)
+    handler_cls = _make_handler(store, None)
 
     page0 = _FakeHandler("/api/node-prs?path=cat&offset=0&limit=50")
     handler_cls.do_GET(page0)  # type: ignore[arg-type]
@@ -149,7 +149,7 @@ def test_node_prs_endpoint_caps_an_oversized_limit_request(tmp_path: Path) -> No
     """A client (or bug) requesting an enormous `limit` must not recreate the exact
     "embed everything in one response" cost this todo removes from the main page."""
     store = _store_with_n_items(tmp_path, n=300)
-    handler_cls = _make_handler(store)
+    handler_cls = _make_handler(store, None)
     fake = _FakeHandler("/api/node-prs?path=cat&offset=0&limit=1000000")
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -160,7 +160,7 @@ def test_node_prs_endpoint_caps_an_oversized_limit_request(tmp_path: Path) -> No
 
 def test_node_prs_endpoint_defaults_a_missing_or_malformed_offset_limit(tmp_path: Path) -> None:
     store = _store_with_n_items(tmp_path, n=10)
-    handler_cls = _make_handler(store)
+    handler_cls = _make_handler(store, None)
     fake = _FakeHandler("/api/node-prs?path=cat&offset=not-a-number&limit=nope")
 
     handler_cls.do_GET(fake)  # must not raise / 500
@@ -173,7 +173,7 @@ def test_node_prs_endpoint_defaults_a_missing_or_malformed_offset_limit(tmp_path
 
 def test_node_prs_endpoint_serves_the_other_bucket_with_no_path_param(tmp_path: Path) -> None:
     store = _store_with_n_items(tmp_path, n=7, path=None)
-    handler_cls = _make_handler(store)
+    handler_cls = _make_handler(store, None)
     fake = _FakeHandler("/api/node-prs?path=&offset=0&limit=50")
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]

@@ -39,8 +39,8 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--port", type=int, default=8765, help="Bind port (default: 8765).")
     args = ap.parse_args(argv)
 
-    store, _data_dir = resolve_store(args.data_dir)
-    return serve(store, host=args.host, port=args.port)
+    store, data_dir = resolve_store(args.data_dir)
+    return serve(store, host=args.host, port=args.port, data_dir=data_dir)
 
 
 if __name__ == "__main__":

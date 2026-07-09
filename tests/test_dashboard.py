@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from dashboard import render
 from dashboard.render import _safe_href, _state_chip, render_forecasts, render_page, render_trends
 from dashboard.server import _make_handler, serve
 from src import llm
@@ -318,11 +319,20 @@ class _FakeResponse:
         return self._Wfile(self)
 
 
-def test_do_get_returns_500_on_render_failure(tmp_path: Path) -> None:
-    """A corrupt store record must yield a real HTTP 500, not a silently dropped connection."""
+def test_do_get_returns_500_on_render_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A render/store failure must yield a real HTTP 500, not a silently dropped connection.
+
+    T5.12 repointed `GET /` at the Issues tab (`render.render_issues_tab` -> `api.tree`), which
+    no longer touches the prediction log at all (that's the whole point of the fix: a tree-only
+    read must not depend on, or crash over, an unrelated corrupt prediction record) -- so the
+    original `prediction_count`-corruption trigger this test used no longer reaches `/` at all.
+    Monkeypatching `api.tree` to raise exercises the same "any failure still gets a response"
+    invariant directly, regardless of which store operation happens to fail."""
     store = JsonlStore(tmp_path)
-    store.set_state("prediction_count", "not-a-number")  # forecaster._parse_count raises
-    handler_cls = _make_handler(store)
+    monkeypatch.setattr(render.api, "tree", lambda *a, **k: (_ for _ in ()).throw(RuntimeError))
+    handler_cls = _make_handler(store, None)
     fake = _FakeResponse()
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -357,7 +367,7 @@ def test_dashboard_live_smoke(tmp_path: Path) -> None:
 
     store = _seeded_store(tmp_path)
 
-    handler = _make_handler(store)
+    handler = _make_handler(store, None)
     httpd = HTTPServer(("127.0.0.1", 0), handler)
     port = httpd.server_address[1]
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)

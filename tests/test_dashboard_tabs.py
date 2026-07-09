@@ -181,6 +181,35 @@ def test_candidates_tab_empty_when_none_discovered(
     assert "No candidates discovered." in page
 
 
+def test_candidates_tab_after_decision_skips_the_expensive_recompute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: landing on the Candidates tab right after a decision (server.py's own
+    ?after_decision=1 redirect) must not re-pay api.candidates(compute=True)'s LLM-scoring
+    pass -- a code-review finding that the original version reintroduced an O(N) recompute
+    after every single "Work this"/"Skip" click."""
+    store = _seeded_store(tmp_path)
+    monkeypatch.setattr(
+        render.api, "candidates", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+
+    page = render.render_tab_page(store, "candidates", after_decision=True)
+
+    assert "Decision recorded." in page
+    assert "Refresh the queue" in page
+
+
+def test_candidates_tab_ordinary_navigation_still_computes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _seeded_store(tmp_path)
+    monkeypatch.setattr(render.api, "candidates", lambda store, **kw: [_fake_candidate()])
+
+    page = render.render_tab_page(store, "candidates", after_decision=False)
+
+    assert "Fix fp8 dispatch on gfx90a" in page
+
+
 # --------------------------------------------------------------------- render_tab_page: attempts
 
 
@@ -255,6 +284,24 @@ def test_attempts_tab_unknown_open_candidate_shows_placeholder(tmp_path: Path) -
     assert "Unknown attempt." in page
 
 
+def test_attempts_tab_after_decision_skips_the_review_bundle_recompute(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Regression: landing on an attempt's detail view right after a T5.6 decision (server.py's
+    own ?after_decision=1 redirect) must not re-pay review_bundle's real LLM call -- a
+    code-review finding that the original version re-fetched the bundle purely to redisplay
+    content the human had just acted on."""
+    store = _store_with_verify(tmp_path, verified=True)
+    _make_gate_ready(store)
+    monkeypatch.setattr(gate, "_score", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
+
+    page = render.render_tab_page(store, "attempts", open_candidate=("o/r", 1), after_decision=True)
+
+    assert "Issue overview" in page
+    assert "Decision recorded." in page
+    assert 'name="approve"' not in page
+
+
 # --------------------------------------------------------------------- render_tab_page: ops
 
 
@@ -267,6 +314,29 @@ def test_ops_tab_renders_health_and_guardrail_sections(tmp_path: Path) -> None:
     assert "Guardrails — data quality" in page
     assert "Guardrails — RAG eval" in page
     assert "never run" in page or "ok" in page or "chip" in page  # some status rendered
+
+
+def test_ops_tab_shows_output_tail_and_error_for_a_failed_stage(tmp_path: Path) -> None:
+    """Regression: a stalled/failed stage must show its intermediate output and error, not
+    just a bare status word -- CLAUDE.md's own T5.8 guardrail ("the dashboard always shows
+    what is running now... and its partial output. A crash must never leave a stage silently
+    'running'."), a code-review finding that the original _health_row_html dropped both."""
+    store = _seeded_store(tmp_path)
+    store.record_run(
+        {
+            "stage": "collect",
+            "status": "failed",
+            "step": "fetch_issues",
+            "output_tail": "Traceback (most recent call last):\nRateLimitError",
+            "error": "RateLimitError: secondary rate limit hit",
+            "recorded_at": "2026-01-01T00:00:00Z",
+        }
+    )
+
+    page = render.render_tab_page(store, "ops")
+
+    assert "RateLimitError: secondary rate limit hit" in page
+    assert "Traceback (most recent call last):" in page
 
 
 # --------------------------------------------------------------------- server: GET routing
@@ -320,7 +390,7 @@ class _FakeHandler:
 
 def test_do_get_root_serves_issues_tab(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     fake = _FakeHandler("/")
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -331,7 +401,7 @@ def test_do_get_root_serves_issues_tab(tmp_path: Path) -> None:
 
 def test_do_get_tab_path_serves_named_tab(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     fake = _FakeHandler("/tab/ops")
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -342,7 +412,7 @@ def test_do_get_tab_path_serves_named_tab(tmp_path: Path) -> None:
 
 def test_do_get_unknown_tab_path_falls_back_to_issues(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     fake = _FakeHandler("/tab/not-a-real-tab")
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -353,7 +423,7 @@ def test_do_get_unknown_tab_path_falls_back_to_issues(tmp_path: Path) -> None:
 
 def test_do_get_attempts_tab_reads_repo_and_number_query_params(tmp_path: Path) -> None:
     store = _store_with_verify(tmp_path, verified=True)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     fake = _FakeHandler("/tab/attempts?repo=o%2Fr&number=1")
 
     handler_cls.do_GET(fake)  # type: ignore[arg-type]
@@ -367,14 +437,14 @@ def test_do_get_attempts_tab_reads_repo_and_number_query_params(tmp_path: Path) 
 
 def test_do_post_candidate_decision_selected_records_and_redirects(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     body = b"repo=o%2Fr&number=1&decision=selected"
     fake = _FakeHandler("/tab/candidates/decide", body=body)
 
     handler_cls.do_POST(fake)  # type: ignore[arg-type]
 
     assert fake.status == 303
-    assert fake.response_headers["Location"] == "/tab/candidates"
+    assert fake.response_headers["Location"] == "/tab/candidates?after_decision=1"
     from src.selection import latest_decision
 
     assert latest_decision(store, "o/r", 1) == "selected"
@@ -382,7 +452,7 @@ def test_do_post_candidate_decision_selected_records_and_redirects(tmp_path: Pat
 
 def test_do_post_candidate_decision_skip_records_and_redirects(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     body = b"repo=o%2Fr&number=1&decision=skip"
     fake = _FakeHandler("/tab/candidates/decide", body=body)
 
@@ -396,7 +466,7 @@ def test_do_post_candidate_decision_skip_records_and_redirects(tmp_path: Path) -
 
 def test_do_post_candidate_decision_missing_fields_is_bad_request(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     fake = _FakeHandler("/tab/candidates/decide", body=b"repo=o%2Fr")
 
     handler_cls.do_POST(fake)  # type: ignore[arg-type]
@@ -404,31 +474,75 @@ def test_do_post_candidate_decision_missing_fields_is_bad_request(tmp_path: Path
     assert fake.status == 400
 
 
-def test_do_post_attempt_decision_approve_records_and_redirects(
+def test_do_post_candidate_decision_unknown_item_is_not_found(tmp_path: Path) -> None:
+    """Regression: select_candidate/skip_candidate return None for an item that isn't a real
+    KB record (src.selection.record_decision's own documented contract) -- the handler must
+    surface that as an error, not a silent 303 as if the write had succeeded."""
+    store = JsonlStore(tmp_path)  # no items upserted at all
+    handler_cls = server._make_handler(store, None)
+    body = b"repo=o%2Fr&number=1&decision=selected"
+    fake = _FakeHandler("/tab/candidates/decide", body=body)
+
+    handler_cls.do_POST(fake)  # type: ignore[arg-type]
+
+    assert fake.status == 404
+
+
+def test_do_post_candidate_decision_store_failure_is_internal_server_error(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    store = _seeded_store(tmp_path)
+    handler_cls = server._make_handler(store, None)
+    monkeypatch.setattr(
+        server.select,
+        "select_candidate",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    body = b"repo=o%2Fr&number=1&decision=selected"
+    fake = _FakeHandler("/tab/candidates/decide", body=body)
+
+    handler_cls.do_POST(fake)  # type: ignore[arg-type]
+
+    assert fake.status == 500
+
+
+def test_do_post_attempt_decision_approve_records_and_redirects(tmp_path: Path) -> None:
     store = _store_with_verify(tmp_path, verified=True)
     _make_gate_ready(store)
-    monkeypatch.setattr(gate, "_PR_DRAFTS_DIR", tmp_path / "pr_drafts")
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, tmp_path)
     body = b"repo=o%2Fr&number=1&approve=true"
     fake = _FakeHandler("/tab/attempts/decide", body=body)
 
     handler_cls.do_POST(fake)  # type: ignore[arg-type]
 
     assert fake.status == 303
-    assert fake.response_headers["Location"] == "/tab/attempts?repo=o/r&number=1"
+    assert fake.response_headers["Location"] == "/tab/attempts?repo=o/r&number=1&after_decision=1"
     runs = store.list_runs(repo="o/r", number=1, stage="gate")
     assert runs[-1]["approved"] is True
 
 
-def test_do_post_attempt_decision_hold_records_without_writing_a_draft(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_do_post_attempt_decision_approve_writes_draft_under_the_dashboards_own_data_dir(
+    tmp_path: Path,
 ) -> None:
+    """Regression: the approve action must resolve pr_drafts_dir against the dashboard's own
+    data_dir (threaded from dashboard.__main__ through serve()/_make_handler), not gate.py's
+    unrelated module-level default -- a code-review finding."""
     store = _store_with_verify(tmp_path, verified=True)
     _make_gate_ready(store)
-    monkeypatch.setattr(gate, "_PR_DRAFTS_DIR", tmp_path / "pr_drafts")
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, tmp_path)
+    body = b"repo=o%2Fr&number=1&approve=true"
+    fake = _FakeHandler("/tab/attempts/decide", body=body)
+
+    handler_cls.do_POST(fake)  # type: ignore[arg-type]
+
+    assert fake.status == 303
+    assert (tmp_path / "pr_drafts" / "o-r-1.md").exists()
+
+
+def test_do_post_attempt_decision_hold_records_without_writing_a_draft(tmp_path: Path) -> None:
+    store = _store_with_verify(tmp_path, verified=True)
+    _make_gate_ready(store)
+    handler_cls = server._make_handler(store, tmp_path)
     body = b"repo=o%2Fr&number=1&approve=false"
     fake = _FakeHandler("/tab/attempts/decide", body=body)
 
@@ -437,11 +551,44 @@ def test_do_post_attempt_decision_hold_records_without_writing_a_draft(
     assert fake.status == 303
     runs = store.list_runs(repo="o/r", number=1, stage="gate")
     assert runs[-1]["approved"] is False
+    assert not (tmp_path / "pr_drafts" / "o-r-1.md").exists()
+
+
+def test_do_post_attempt_decision_not_gate_ready_is_conflict(tmp_path: Path) -> None:
+    """Regression: review_decision returns None when the candidate isn't gate-ready (e.g. a
+    race with a fresh verify run) -- the handler must surface that, not a silent 303."""
+    store = _store_with_verify(tmp_path, verified=True)  # verified, but no self_review yet
+    handler_cls = server._make_handler(store, tmp_path)
+    body = b"repo=o%2Fr&number=1&approve=true"
+    fake = _FakeHandler("/tab/attempts/decide", body=body)
+
+    handler_cls.do_POST(fake)  # type: ignore[arg-type]
+
+    assert fake.status == 409
+
+
+def test_do_post_attempt_decision_store_failure_is_internal_server_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    store = _store_with_verify(tmp_path, verified=True)
+    _make_gate_ready(store)
+    handler_cls = server._make_handler(store, tmp_path)
+    monkeypatch.setattr(
+        server.review,
+        "review_decision",
+        lambda *a, **k: (_ for _ in ()).throw(OSError("disk full")),
+    )
+    body = b"repo=o%2Fr&number=1&approve=true"
+    fake = _FakeHandler("/tab/attempts/decide", body=body)
+
+    handler_cls.do_POST(fake)  # type: ignore[arg-type]
+
+    assert fake.status == 500
 
 
 def test_do_post_unknown_path_is_404(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
-    handler_cls = server._make_handler(store)
+    handler_cls = server._make_handler(store, None)
     fake = _FakeHandler("/tab/candidates", body=b"")
 
     handler_cls.do_POST(fake)  # type: ignore[arg-type]

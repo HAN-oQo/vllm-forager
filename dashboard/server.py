@@ -24,16 +24,31 @@ T5.12 replaces the single bundled page with a tabbed console: ``GET /`` and ``GE
 (`name` one of :data:`~dashboard.render.TAB_LABELS`'s own slugs — an unrecognized name degrades
 to the default "issues" tab, not a 404) each render one full page via
 :func:`~dashboard.render.render_tab_page`, reading ``?report=`` (Reports/Trends: which archived
-report to open) and ``?repo=&number=`` (Attempts: which worked candidate to open) the same
-degrade-on-malformed way ``/api/node-prs`` already reads its own query params. Two ``POST``
-routes are this dashboard's only writes (mirrors :mod:`dashboard.select`/:mod:`dashboard.
-review`'s own "only two write paths" framing): ``POST /tab/candidates/decide`` (T5.10's "Work
-this"/"Skip") and ``POST /tab/attempts/decide`` (T5.6's approve/hold) — both plain HTML-form
-submissions (``application/x-www-form-urlencoded``, no JS, no JSON body), each answered with a
-303 redirect back to the relevant ``GET`` tab so a page refresh never resubmits the form.
+report to open), ``?repo=&number=`` (Attempts: which worked candidate to open), and
+``?after_decision=1`` (set only by this module's own POST-redirects below — suppresses the
+expensive recompute :func:`~dashboard.render.render_candidates_tab`/
+:func:`~dashboard.render.render_attempts_tab` would otherwise silently re-pay right after a
+decision) the same degrade-on-malformed way ``/api/node-prs`` already reads its own query
+params.
+
+**This module is no longer purely read-only.** Two ``POST`` routes are this dashboard's only
+writes (mirrors :mod:`dashboard.select`/:mod:`dashboard.review`'s own "only two write paths"
+framing): ``POST /tab/candidates/decide`` (T5.10's "Work this"/"Skip") and ``POST
+/tab/attempts/decide`` (T5.6's approve/hold) — both plain HTML-form submissions
+(``application/x-www-form-urlencoded``, no JS, no JSON body). Each responds with a **303**
+redirect on success (so a page refresh never resubmits the form), **400** if a required field
+is missing/malformed, **404**/**409** if the write itself no-opped (the item doesn't exist, or
+the candidate isn't gate-ready — see :func:`_serve_candidate_decision`/
+:func:`_serve_attempt_decision`), and **500** on an unexpected failure — the same "every request
+gets a response" guarantee the ``GET`` routes already give, not silently dropped. This is still
+acceptable for the same single-user, local, no-auth, trusted-operator tool this module has
+always been — see :mod:`dashboard.select`/:mod:`dashboard.review`'s own module docstrings for
+why these two specific actions (a select/skip decision; an approve/hold that never sets
+`submit=True`) are safe to expose without a credential — but, unlike before T5.12, anyone who
+can reach this port can now change KB state, not just read it.
 
 Known limitations of this thin M1 slice (not fixed here — acceptable for a single-user, local,
-read-only tool; would need addressing before any wider/production use — see
+trusted-operator tool; would need addressing before any wider/production use — see
 :mod:`dashboard.snapshot`'s own docstring for the full detail behind these two):
 - Every request re-scans the **entire** store at least twice (`build_snapshot`'s own two
   independent full scans), and every ``/api/node-prs`` request (including every "show N more"
@@ -54,8 +69,10 @@ from __future__ import annotations
 import json
 import traceback
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, quote, urlsplit
 
+from src import gate
 from src.store.base import Store
 from src.taxonomy import LEVEL_SEPARATOR
 
@@ -114,14 +131,21 @@ def _open_candidate_param(query: dict[str, list[str]]) -> tuple[str, int] | None
 
 def _serve_tab(handler: BaseHTTPRequestHandler, store: Store, tab: str) -> None:
     """``GET /`` (aliases the default tab) and ``GET /tab/<name>`` — T5.12's tabbed console:
-    one named tab's full page, reading `?report=` (Reports/Trends) and `?repo=&number=`
-    (Attempts) the same way :func:`_serve_node_prs` already reads its own query params."""
+    one named tab's full page, reading `?report=` (Reports/Trends), `?repo=&number=`
+    (Attempts), and `?after_decision=1` (set only by this module's own POST redirects — see
+    module docstring) the same way :func:`_serve_node_prs` already reads its own query params.
+    """
     query = parse_qs(urlsplit(handler.path).query)
     report_stamp = _first(query.get("report"))
     open_candidate = _open_candidate_param(query)
+    after_decision = _first(query.get("after_decision")) == "1"
     try:
         page = render_tab_page(
-            store, tab, report_stamp=report_stamp, open_candidate=open_candidate
+            store,
+            tab,
+            report_stamp=report_stamp,
+            open_candidate=open_candidate,
+            after_decision=after_decision,
         ).encode("utf-8")
     except Exception:  # noqa: BLE001 — any render/store failure must still get a response
         traceback.print_exc()
@@ -167,49 +191,94 @@ def _redirect(handler: BaseHTTPRequestHandler, location: str) -> None:
     handler.end_headers()
 
 
+def _error_response(handler: BaseHTTPRequestHandler, status: int, message: str) -> None:
+    _respond(handler, status, f"{status} {message}\n".encode(), "text/plain; charset=utf-8")
+
+
 def _bad_request(handler: BaseHTTPRequestHandler, message: str) -> None:
-    _respond(handler, 400, f"400 Bad Request: {message}\n".encode(), "text/plain; charset=utf-8")
+    _error_response(handler, 400, f"Bad Request: {message}")
 
 
 def _serve_candidate_decision(handler: BaseHTTPRequestHandler, store: Store) -> None:
     """``POST /tab/candidates/decide`` — T5.10's "Work this"/"Skip" write action, one of only
     two write paths the whole dashboard has (see `dashboard.select`/`dashboard.review`'s own
-    module docstrings)."""
-    form = _read_form(handler)
-    repo = _form_str(form, "repo")
-    number = _form_int(form, "number")
-    decision = _form_str(form, "decision")
-    if repo is None or number is None or decision not in ("selected", "skip"):
-        _bad_request(handler, "repo, number, and a valid decision are required")
+    module docstrings).
+
+    Wrapped in ``try/except`` and checks the write's own return value (both code-review
+    findings) — every ``GET`` route in this file already guarantees "any failure still gets a
+    response," and `select.select_candidate`/`skip_candidate` return `None` (a documented,
+    reachable outcome — see `src.selection.record_decision`'s own docstring) when `(repo,
+    number)` isn't a real KB item (a stale page, a pruned item); the original version silently
+    redirected as success either way.
+    """
+    try:
+        form = _read_form(handler)
+        repo = _form_str(form, "repo")
+        number = _form_int(form, "number")
+        decision = _form_str(form, "decision")
+        if repo is None or number is None or decision not in ("selected", "skip"):
+            _bad_request(handler, "repo, number, and a valid decision are required")
+            return
+        if decision == "selected":
+            result = select.select_candidate(store, repo, number)
+        else:
+            result = select.skip_candidate(store, repo, number)
+    except Exception:  # noqa: BLE001 — any failure here must still get a response
+        traceback.print_exc()
+        _error_response(handler, 500, "Internal Server Error: failed to record the decision.")
         return
-    if decision == "selected":
-        select.select_candidate(store, repo, number)
-    else:
-        select.skip_candidate(store, repo, number)
-    _redirect(handler, "/tab/candidates")
+    if result is None:
+        _error_response(handler, 404, f"Not Found: no such candidate {repo}#{number}.")
+        return
+    _redirect(handler, "/tab/candidates?after_decision=1")
 
 
-def _serve_attempt_decision(handler: BaseHTTPRequestHandler, store: Store) -> None:
+def _serve_attempt_decision(
+    handler: BaseHTTPRequestHandler, store: Store, data_dir: Path | None
+) -> None:
     """``POST /tab/attempts/decide`` — T5.6's approve/hold write action, reached from the
     Attempts tab's own detail view (`dashboard.render._approve_hold_form_html`). `submit` is
     never exposed here — `review.review_decision`'s own hardcoded `submit=False` (see that
-    module's docstring for the exact incident this guards against) is untouched by this route."""
-    form = _read_form(handler)
-    repo = _form_str(form, "repo")
-    number = _form_int(form, "number")
-    approve_raw = _form_str(form, "approve")
-    if repo is None or number is None or approve_raw not in ("true", "false"):
-        _bad_request(handler, "repo, number, and a valid approve flag are required")
+    module's docstring for the exact incident this guards against) is untouched by this route.
+
+    Passes `pr_drafts_dir` (a code-review finding) — `review_decision`'s own docstring names
+    this exact bug class: an earlier version left it unset, so an approval always wrote its
+    draft under `gate.py`'s module-level default (`config.DATA_DIR`) regardless of which
+    `--data-dir` the dashboard was actually serving from. `data_dir` is `dashboard.__main__`'s
+    own resolved directory (`None` when serving the `STORE`-selected default backend, matching
+    `gate.main`'s own "no override" case).
+
+    Also wrapped in ``try/except`` and checks `review_decision`'s own `None` return (the
+    candidate is no longer gate-ready — e.g. a race with a fresh verify run) — same reasoning
+    as `_serve_candidate_decision`'s own docstring.
+    """
+    try:
+        form = _read_form(handler)
+        repo = _form_str(form, "repo")
+        number = _form_int(form, "number")
+        approve_raw = _form_str(form, "approve")
+        if repo is None or number is None or approve_raw not in ("true", "false"):
+            _bad_request(handler, "repo, number, and a valid approve flag are required")
+            return
+        pr_drafts_dir = data_dir / gate._PR_DRAFTS_SUBDIR if data_dir is not None else None
+        result = review.review_decision(
+            store, repo, number, approve=(approve_raw == "true"), pr_drafts_dir=pr_drafts_dir
+        )
+    except Exception:  # noqa: BLE001 — any failure here must still get a response
+        traceback.print_exc()
+        _error_response(handler, 500, "Internal Server Error: failed to record the decision.")
         return
-    review.review_decision(store, repo, number, approve=(approve_raw == "true"))
-    _redirect(handler, f"/tab/attempts?repo={quote(repo)}&number={number}")
+    if result is None:
+        _error_response(handler, 409, f"Conflict: {repo}#{number} is no longer gate-ready.")
+        return
+    _redirect(handler, f"/tab/attempts?repo={quote(repo)}&number={number}&after_decision=1")
 
 
 def _serve_node_prs(handler: BaseHTTPRequestHandler, store: Store) -> None:
     """``GET /api/node-prs`` — see this module's own docstring.
 
     The whole response (the read, the JSON encode, and the write) is one try/except, matching
-    :func:`_serve_page`'s own "any failure still gets a response" invariant — a first version
+    :func:`_serve_tab`'s own "any failure still gets a response" invariant — a first version
     of this only guarded the `items_at_path` call, so a `json.dumps` failure on an unexpected
     item shape (a code-review finding) would have dropped the connection instead.
     """
@@ -235,7 +304,7 @@ def _serve_node_prs(handler: BaseHTTPRequestHandler, store: Store) -> None:
     _respond(handler, 200, body, "application/json; charset=utf-8")
 
 
-def _make_handler(store: Store) -> type[BaseHTTPRequestHandler]:
+def _make_handler(store: Store, data_dir: Path | None) -> type[BaseHTTPRequestHandler]:
     class Handler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802 (BaseHTTPRequestHandler's naming convention)
             path = urlsplit(self.path).path
@@ -252,7 +321,7 @@ def _make_handler(store: Store) -> type[BaseHTTPRequestHandler]:
             if path == "/tab/candidates/decide":
                 _serve_candidate_decision(self, store)
             elif path == "/tab/attempts/decide":
-                _serve_attempt_decision(self, store)
+                _serve_attempt_decision(self, store, data_dir)
             else:
                 _respond(self, 404, b"404 Not Found\n", "text/plain; charset=utf-8")
 
@@ -262,14 +331,22 @@ def _make_handler(store: Store) -> type[BaseHTTPRequestHandler]:
     return Handler
 
 
-def serve(store: Store, *, host: str = "127.0.0.1", port: int = 8765) -> int:
+def serve(
+    store: Store, *, host: str = "127.0.0.1", port: int = 8765, data_dir: Path | None = None
+) -> int:
     """Start the dashboard's HTTP server and block, serving requests until interrupted.
+
+    `data_dir` — a code-review finding — is the same resolved directory
+    :mod:`dashboard.__main__` gets back from :func:`~src.store.resolve_store` (`None` for the
+    `STORE`-selected default backend); threaded through so the T5.6 approve write action can
+    resolve its own `pr_drafts_dir` against *this* dashboard's actual data dir, not `gate.py`'s
+    unrelated module-level default (see :func:`_serve_attempt_decision`'s own docstring).
 
     Returns a process exit code: 0 on a normal (interrupted) shutdown, 1 if `port` couldn't be
     bound (e.g. already in use) — the caller (:mod:`dashboard.__main__`) prints nothing further
     and just propagates this as its own exit code.
     """
-    handler = _make_handler(store)
+    handler = _make_handler(store, data_dir)
     try:
         httpd = HTTPServer((host, port), handler)
     except OSError as exc:
