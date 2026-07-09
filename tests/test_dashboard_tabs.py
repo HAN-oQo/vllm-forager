@@ -64,6 +64,19 @@ def test_issues_tab_renders_tree_and_nav(tmp_path: Path) -> None:
     assert '<a href="/tab/reports" class="">Reports/Trends</a>' in page
 
 
+def test_every_tab_page_carries_the_build_stamp_footer(tmp_path: Path) -> None:
+    """T5.15's own DEVPLAN test line: a smoke check that the served page carries the current
+    build/commit stamp -- so staleness (a merge that landed without a dashboard restart) is
+    visible on the page itself, not just discoverable by shelling into the host."""
+    from src.version import GIT_SHA
+
+    store = _seeded_store(tmp_path)
+
+    page = render.render_tab_page(store, "issues")
+
+    assert f'<footer class="build-stamp">build {GIT_SHA}</footer>' in page
+
+
 def test_unknown_tab_name_falls_back_to_issues(tmp_path: Path) -> None:
     store = _seeded_store(tmp_path)
 

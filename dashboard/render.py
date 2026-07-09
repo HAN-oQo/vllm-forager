@@ -43,6 +43,7 @@ from src.selection import decisions_by_key
 from src.store.base import Store
 from src.taxonomy import LEVEL_SEPARATOR
 from src.upstream_prs import UpstreamComment, UpstreamPR, list_upstream_prs
+from src.version import GIT_SHA
 
 from . import api, archive, attempts, cost, guardrails
 from .health import health_panel
@@ -534,6 +535,8 @@ _TAB_STYLE = """
 .pr-row{border:1px solid var(--border);border-radius:6px;padding:.5rem;margin-bottom:.6rem}
 .pr-meta{color:var(--ink-2);font-size:.82rem;margin:.3rem 0}
 .pr-comment{display:flex;align-items:baseline;gap:.5rem;font-size:.85rem;padding:.2rem 0}
+.build-stamp{color:var(--ink-3);font-size:.72rem;font-family:ui-monospace,monospace;
+  margin-top:2rem;padding-top:.5rem;border-top:1px solid var(--border)}
 """
 
 
@@ -547,13 +550,22 @@ def _nav_html(active: str) -> str:
     return f'<nav class="tabs">{links}</nav>'
 
 
+def _footer_html() -> str:
+    """T5.15's own version marker: the git commit this *process* was started from
+    (:data:`~src.version.GIT_SHA`, computed once at import time — never live per-request), so
+    "is this page stale?" (did a merge land without the dashboard being restarted?) is
+    answerable by comparing this footer against ``git log`` on the serving host, not by
+    shelling in and diffing SHAs by hand."""
+    return f'<footer class="build-stamp">build {escape(GIT_SHA)}</footer>'
+
+
 def _page_shell(active_tab: str, body_html: str) -> str:
-    """The full HTML document for one tab — nav + `body_html`, sharing the same style/tree
-    script as the legacy single page (:data:`_STYLE`/:data:`_TREE_SCRIPT`) plus this shell's own
-    :data:`_TAB_STYLE`. :data:`_TREE_SCRIPT` is embedded on every tab (not just Issues/Reports)
-    -- its selectors (``#tree``, ``.btn[data-all]``, ``#q``) simply match nothing on a tab that
-    has none of those elements, the same "harmless no-op elsewhere" property a page-wide
-    ``<script>`` already has today.
+    """The full HTML document for one tab — nav + `body_html` + a build-stamp footer (T5.15),
+    sharing the same style/tree script as the legacy single page (:data:`_STYLE`/
+    :data:`_TREE_SCRIPT`) plus this shell's own :data:`_TAB_STYLE`. :data:`_TREE_SCRIPT` is
+    embedded on every tab (not just Issues/Reports) -- its selectors (``#tree``,
+    ``.btn[data-all]``, ``#q``) simply match nothing on a tab that has none of those elements,
+    the same "harmless no-op elsewhere" property a page-wide ``<script>`` already has today.
     """
     return (
         "<!doctype html><html><head><meta charset='utf-8'>"
@@ -562,6 +574,7 @@ def _page_shell(active_tab: str, body_html: str) -> str:
         "<h1>vllm-forager dashboard</h1>"
         + _nav_html(active_tab)
         + body_html
+        + _footer_html()
         + f"<script>{_TREE_SCRIPT}</script>"
         "</body></html>"
     )
