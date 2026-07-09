@@ -152,13 +152,18 @@ def write_record(data_dir: Path, record: dict, *, checked_at: str) -> Path:
     return path
 
 
-def _try_resolve_data_dir(store: Store, data_dir: Path | None) -> Path | None:
+def try_resolve_data_dir(store: Store, data_dir: Path | None) -> Path | None:
     """`data_dir` if given, else the store's own ``data_dir`` (JsonlStore) — else `None`.
 
     The one place both :func:`_resolve_data_dir` (a write, which must raise rather than
     silently misroute to `config.DATA_DIR`) and :func:`list_records` (a read, which degrades
     to ``[]`` instead) derive this — a code-review finding on an earlier version of this
-    module, which had two independent copies of this exact line.
+    module, which had two independent copies of this exact line. Public (not
+    `_try_resolve_data_dir`) since :mod:`dashboard.archive` (T5.9) also needs exactly this
+    resolution rule to reach :mod:`src.report`'s own on-disk archive, rather than a third
+    independent copy — this module's own name is a slight misnomer for a now cross-module
+    utility, but moving it to a dedicated location is a bigger relocation than this fix
+    warrants on its own.
     """
     return data_dir if data_dir is not None else getattr(store, "data_dir", None)
 
@@ -168,7 +173,7 @@ def list_records(store: Store, *, data_dir: Path | None = None) -> list[dict]:
     each already carrying its own ``flagged`` boolean — computed once, at write time, by
     :func:`reconcile`/:func:`record_stall`, not re-derived here), oldest first.
 
-    `data_dir` resolves via :func:`_try_resolve_data_dir` (same rule as a write), but degrades
+    `data_dir` resolves via :func:`try_resolve_data_dir` (same rule as a write), but degrades
     to ``[]`` instead of raising when it can't be resolved (no explicit `data_dir` and `store`
     exposes none) or the sink doesn't exist yet (a fresh KB that has never run an audit check) —
     a read endpoint (T5.7's dashboard guardrail panel) shouldn't 500 over a config gap or a
@@ -193,7 +198,7 @@ def list_records(store: Store, *, data_dir: Path | None = None) -> list[dict]:
     line, and an unguarded `json.loads` on it would take down the whole guardrail panel over
     exactly the kind of transient corruption it exists to survive).
     """
-    resolved = _try_resolve_data_dir(store, data_dir)
+    resolved = try_resolve_data_dir(store, data_dir)
     if resolved is None:
         return []
     path = _data_quality_path(resolved)
@@ -216,7 +221,7 @@ def _resolve_data_dir(store: Store, data_dir: Path | None, *, caller: str) -> Pa
     A store without either (a future non-JSONL backend) must not silently misroute records to
     `config.DATA_DIR` — until M0.6 gives ``data_quality`` a home on the Store interface itself.
     """
-    resolved = _try_resolve_data_dir(store, data_dir)
+    resolved = try_resolve_data_dir(store, data_dir)
     if resolved is None:
         raise TypeError(
             f"{caller} needs a JsonlStore or an explicit data_dir; "

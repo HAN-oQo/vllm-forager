@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
@@ -49,7 +50,13 @@ from .agents import reporter, reporter_v1
 from .store import Store, resolve_store
 from .trends import week_stamp
 
-__all__ = ["week_stamp", "generate", "generate_tree", "main"]
+_TREE_JSON_SUFFIX = ".tree.json"
+# week_stamp's own "%G-W%V" format: a 4-digit ISO year, then "-W", then a zero-padded 2-digit
+# ISO week (01-53) -- anchoring this validates a caller-supplied stamp before it's ever
+# concatenated into a path (see read_tree_report's own docstring for why this matters).
+_STAMP_RE = re.compile(r"^\d{4}-W\d{2}$")
+
+__all__ = ["week_stamp", "generate", "generate_tree", "list_reports", "read_tree_report", "main"]
 
 
 def generate(
@@ -108,9 +115,69 @@ def generate_tree(
     reports_dir.mkdir(parents=True, exist_ok=True)
     md_path = reports_dir / f"{stamp}.tree.md"
     md_path.write_text(md, encoding="utf-8")
-    json_path = reports_dir / f"{stamp}.tree.json"
+    json_path = reports_dir / f"{stamp}{_TREE_JSON_SUFFIX}"
     json_path.write_text(json.dumps([node.to_dict() for node in nodes], indent=2), encoding="utf-8")
     return md_path, json_path
+
+
+def list_reports(data_dir: Path) -> list[dict]:
+    """Every archived tree report under ``<data_dir>/reports/*.tree.json`` (written by
+    :func:`generate_tree`), newest (highest week-stamp) first, as ``{"stamp": week_stamp,
+    "path": str}`` -- the path only, not the (potentially large) tree content itself; use
+    :func:`read_tree_report` to read one.
+
+    Only real files are listed (``Path.is_file()``), not a directory that happens to end in
+    ``.tree.json`` (e.g. left over from an interrupted write) -- a code-review finding: an
+    earlier version's glob had no such guard, and selecting that entry would have raised
+    ``IsADirectoryError`` out of :func:`read_tree_report` instead of simply not appearing.
+
+    Sorting is a plain descending sort on each file's own name -- :func:`~src.trends.week_stamp`'s
+    own ``"%G-W%V"`` format zero-pads the week number (``"W05"``, not ``"W5"``), so this sorts
+    correctly by year-then-week without parsing each stamp back into a date.
+
+    Returns ``[]`` (rather than raising) if ``<data_dir>/reports/`` doesn't exist yet -- a
+    fresh KB that's never run ``python -m src.report --tree`` is a normal state for a read
+    endpoint to degrade past.
+    """
+    reports_dir = Path(data_dir) / "reports"
+    if not reports_dir.is_dir():
+        return []
+    paths = sorted(
+        (p for p in reports_dir.glob(f"*{_TREE_JSON_SUFFIX}") if p.is_file()),
+        key=lambda p: p.name,
+        reverse=True,
+    )
+    return [{"stamp": p.name.removesuffix(_TREE_JSON_SUFFIX), "path": str(p)} for p in paths]
+
+
+def read_tree_report(data_dir: Path, stamp: str) -> list | None:
+    """The tree content of one archived report (:meth:`~src.agents.reporter_v1.TreeNode.
+    to_dict`'s own list-of-nodes shape, per :func:`generate_tree`'s own ``.tree.json``
+    format), or `None` if `stamp` doesn't name a real, valid archived report.
+
+    `stamp` is validated against :func:`~src.trends.week_stamp`'s own exact format
+    (``YYYY-Wnn``) *before* being concatenated into a filesystem path -- a code-review
+    finding, empirically reproduced: an earlier version passed `stamp` through unvalidated,
+    so a caller-supplied stamp like ``"../../etc/passwd"`` (relative traversal) or an
+    absolute path (which makes `Path.__truediv__` discard `reports_dir` entirely) could read
+    an arbitrary file elsewhere on disk ending in ``.tree.json`` -- a real path-traversal bug
+    once this function is reachable from a UI-supplied parameter (T5.12). Anchoring the regex
+    to the one shape every real stamp actually has closes both vectors completely, since a
+    validated stamp can never contain ``/`` or start with one.
+
+    Any read/parse failure (missing file, a directory at that path, a permissions error, a
+    non-UTF-8/corrupt file, malformed JSON) degrades to `None` rather than raising -- also a
+    code-review finding, confirmed by multiple angles: an earlier version's ``except
+    json.JSONDecodeError`` alone didn't catch ``OSError``/``UnicodeDecodeError``, so a
+    dashboard read endpoint could still crash on this exact class of on-disk corruption.
+    """
+    if not _STAMP_RE.match(stamp):
+        return None
+    path = Path(data_dir) / "reports" / f"{stamp}{_TREE_JSON_SUFFIX}"
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+        return None
 
 
 def main(argv: list[str] | None = None) -> int:
