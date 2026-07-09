@@ -267,6 +267,41 @@
   re-landing)** — no idea-generation needed, directly evidenced by #47187; full inventive idea-generation waits on
   the benchmark harness + hallucination controls.
 
+### Human-seeded candidates rank first (the operator's directed ideas beat auto-discovery)
+- **Scope note:** this is about the **vLLM-PR contribution agent** (the Engineer working the candidate queue), *not*
+  the project dev-loop.
+- **What:** the operator can **inject their own contribution ideas** (e.g. "make LoRA + `--model-impl transformers`
+  work at parity on MI250") into the candidate queue, and those **rank above every scout-discovered candidate**.
+  The contribution agent works **human-seeded ideas first**, then fills spare capacity with the auto-discovered
+  queue.
+- **Why / value:** the operator is the domain expert — a directed idea is usually higher-value than anything
+  auto-discovery surfaces. No matter how good the discovery sources (observed / synthesized / reproduced /
+  generative) get, the human's strategic intent should be the **top of the priority stack** — the steering wheel
+  over the autopilot.
+- **How (concrete):**
+  - **A committed repo backlog file** — `docs/CONTRIB_BACKLOG.md` (seeded now): the operator appends `{title,
+    rationale, target repo, evidence/links, status}` entries; version-controlled, reviewable, and editable right
+    now with **no tooling**; the scout parses it into candidates. (A dashboard write path — T5.10 — is a later
+    nicety, not a prerequisite.)
+  - The orchestrator/scout **merges** human-seeded + auto-discovered into one queue, human-seeded **pinned above**
+    all scout-scored candidates (`source="human"`, max priority; the human orders within their own set). The
+    scout's risk/effort/impact scoring + boosts apply only to the auto set.
+  - The Engineer works the merged queue **top-down** → human ideas first.
+- **Relation to T5.10:** T5.10 is the human *selecting* "work this" from the auto-discovered queue; this is the
+  additive case — the human *authoring* a candidate that need not be in the auto queue at all. Same
+  decision/candidate store the Engineer reads: T5.10's write path extended from "pick an existing one" to "add a
+  new one, first."
+- **Still gated:** a human-seeded idea still passes feasibility (MI250-verifiable), novelty (don't duplicate an
+  in-flight attempt), and the **mandatory human PR gate** — an infeasible directed idea must *surface* that, not
+  silently fail; its rationale/evidence travels into the attempt report + PR justification.
+- **Scope / effort:** S–M — a human-candidate store + merge-with-priority in the queue + a dashboard/CLI write path
+  (mostly reuses T5.10).
+- **Depends on / risk:** the scout/candidate queue (M2, built) + T5.10's write path; low risk (a prioritization +
+  injection layer) — just ensure the human set doesn't *starve* auto-discovery (fall back to the auto queue once
+  the human set is drained).
+- **Status:** shaping — concrete and small; recommend graduating as an **extension of T5.10** (or a
+  `source="human-seeded"` scout source), not a standalone milestone.
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.
