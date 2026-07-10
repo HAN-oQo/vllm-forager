@@ -338,6 +338,45 @@
 - **Status:** shaping — concrete and small; recommend graduating as an **extension of T5.10** (or a
   `source="human-seeded"` scout source), not a standalone milestone.
 
+### Checkpointed human–agent collaboration (쿵짝쿵짝), not just end gates
+- **What:** the contribution agent shouldn't only hit a **binary gate at the end** (human selects → … agent works …
+  → human approves/rejects). It should **collaborate at checkpoints** *during* an experiment / PR — pause at the
+  meaningful decision points, show its reasoning + intermediate results + options, let the human **steer**, then
+  continue. A two-way loop, not a one-shot approve.
+- **Checkpoints (where it pauses to sync):**
+  1. **Approach** — *before* heavy MI250 work: "here's my hypothesis + repro plan" → steer, so we don't burn GPU
+     hours on a wrong approach.
+  2. **Mid-experiment** — a surprising error / intermediate result: "here's what happened, here's my next step" →
+     redirect.
+  3. **Fix-direction** — "found the bug; 2–3 fix directions with tradeoffs" → human picks.
+  4. **PR-draft** — co-edit the title / body / explanation before it's finalized (maintainer-grade, human-sounding;
+     the earlier PR-quality concern).
+  5. **Review-response** — maintainer comments come back → agent drafts replies → human co-edits before posting.
+- **How (concrete):** at each checkpoint the agent **parks** (a distinct liveness state, "awaiting human" — *not*
+  "stalled") and emits a structured message (where it is, what it's about to do, options, output tail) to the
+  **dashboard** (a per-attempt steer thread) + an **ntfy push** to pull attention; the human replies via the
+  dashboard / reply channel and the agent **resumes** with that steer. Reuses T5.6/T5.10 write-back + the
+  notification system + T4.5 liveness.
+- **The key dial — configurable checkpoint depth:** early on (low trust) pause at *all* checkpoints; as trust
+  grows, auto-proceed through the early ones and pause only at **PR-draft + upstream-submit**. This is what
+  **reconciles the two tensions in this project**: the human-merge *bottleneck* worry (too many gates) vs. the
+  "will I be able to follow along?" worry (too few) — and it lets the "fully autonomous" north star
+  (Reproduce-the-news) keep these checkpoints *inside* it, dialed down, rather than being all-or-nothing.
+- **Why / value:** MI250 time + upstream reputation are expensive — steering *before/during* beats approving
+  *after*; a co-edited PR reads human-authored (higher accept rate); and collaboration is how the operator stays in
+  control and actually *learns* what the agent is doing.
+- **Relation:** generalizes the binary gates (T5.6 approve, T5.10 select, the fork-first upstream-PR gate, the
+  `main` merge gate) and the dev-loop's STOP-and-ask seam into one **conversational checkpoint loop**; pairs with
+  the maintainer-grade PR work and Remote Control (steer from phone).
+- **Scope / effort:** M — a checkpoint/park primitive in the contribution flow + a dashboard steer thread +
+  notification wiring + the depth config. Mostly reuses T5.6/T5.10 + liveness + ntfy.
+- **Depends on / risk:** the contribution plane (M3) + dashboard write-back (T5.6/T5.10) + liveness (T4.5); risk =
+  too many checkpoints = friction → depth must be configurable + checkpoints batched; a parked agent must render
+  clearly as **awaiting-human**, never as a stall.
+- **Status:** shaping — the **interaction model** for the contribution plane; graduate alongside M3/M5 (the
+  checkpoints attach to the Engineer's stages + the dashboard steer thread). Distinct from human-seeded candidates
+  (that's *input* prioritization; this is *process* collaboration).
+
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →
 > generalize → scale into teams.
