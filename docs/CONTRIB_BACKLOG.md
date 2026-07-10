@@ -39,11 +39,15 @@
 - steps:
   1. stand up / reuse a vLLM ROCm env on a MI250 node (a standing `vllm-forager` container exists on `mi250-052`;
      else the prebuilt `rocm/vllm` docker image, or build `PYTORCH_ROCM_ARCH=gfx90a`, ROCm 6.3+). **[approach
-     checkpoint — sync before spending GPU time]**
-  2. smoke-test `vllm serve Qwen/Qwen3-4B --model-impl transformers` — does it start and serve at all?
+     checkpoint — sync before spending GPU time]** — done, reused the standing container.
+  2. smoke-test `vllm serve Qwen/Qwen3-4B --model-impl transformers` — does it start and serve at all? — done,
+     starts cleanly.
   3. compare against `--model-impl vllm`: correctness + tokens/s (single, prefill, and **concurrent/batched**).
+     — done for Qwen3-4B; **verify the installed commit actually contains the feature under test before
+     trusting any number here** (see notes — this bit the agent once already).
   4. if it errors or is slower, check the attention backend on gfx90a and whether the fused kernels fell back to
-     unfused. **[mid-experiment checkpoint — report findings before proposing a fix]**
+     unfused. **[mid-experiment checkpoint — report findings before proposing a fix]** — not needed for
+     Qwen3-4B (no gap found); still applies if FP8-MoE or a larger model surfaces one.
   5. propose fix direction(s) → sync → implement → verify on MI250 → fork + PR draft (human submits upstream).
      — nothing to fix yet for the dense-model case; revisit once FP8-MoE/larger-model/LoRA legs are run.
 - notes: **2026-07-09 smoke-test → CORRECTED 2026-07-10** — full writeup + repro script + raw logs:
