@@ -316,9 +316,12 @@
   over the autopilot.
 - **How (concrete):**
   - **A committed repo backlog file** — `docs/CONTRIB_BACKLOG.md` (seeded now): the operator appends `{title,
-    rationale, target repo, evidence/links, status}` entries; version-controlled, reviewable, and editable right
-    now with **no tooling**; the scout parses it into candidates. (A dashboard write path — T5.10 — is a later
-    nicety, not a prerequisite.)
+    rationale, target repo, evidence/links, status, **steps**}` entries — `steps` being an **ordered playbook of
+    directives** ("check this, then try that, and if it fails look at X") the agent follows as its plan skeleton;
+    version-controlled, reviewable, and editable right now with **no tooling**; the scout parses it into
+    candidates. (A dashboard write path — T5.10 — is a later nicety, not a prerequisite.) The `steps` playbook is
+    consumed together with the checkpointed-collaboration loop below (the human's directives up front, synced at
+    checkpoints as the agent works).
   - The orchestrator/scout **merges** human-seeded + auto-discovered into one queue, human-seeded **pinned above**
     all scout-scored candidates (`source="human"`, max priority; the human orders within their own set). The
     scout's risk/effort/impact scoring + boosts apply only to the auto set.
@@ -376,6 +379,29 @@
 - **Status:** shaping — the **interaction model** for the contribution plane; graduate alongside M3/M5 (the
   checkpoints attach to the Engineer's stages + the dashboard steer thread). Distinct from human-seeded candidates
   (that's *input* prioritization; this is *process* collaboration).
+
+### One-command bring-up of the workflow (`docker compose up`) + what stays out-of-band
+- **What:** a single `docker compose up` (or `systemctl start`) brings up the whole **CPU-side** pipeline — the M4
+  orchestrator (schedules collect → analyze → forecast → report → candidates on its cadence), the dashboard, the
+  KB (Firestore/Postgres), and optional local-vLLM / LiteLLM gateway — and it runs automatically from there.
+- **Reality check (the distinction that matters):** *today none of this is automatic.* The pipeline runs as
+  **individual CLIs** (`python -m src.collector` / `analyze` / `forecast` / `report` / `candidates`) + the
+  dev-loop/collect-loop **tmux** sessions; **M4 is the orchestrator that makes it scheduled** and it isn't built
+  yet. Also — the web/news **research that runs in a Claude chat session is the *meta* agent (interactive), not the
+  product's own research plane**; the product's automated web/news ingestion (Reproduce-the-news / user-bug
+  dogfooding) is a *future* intelligence-plane job, separate from an interactive session.
+- **What can never be inside `compose up` (by design):** the **MI250 work is remote hardware over ssh** (build /
+  repro / verify) — not a compose service; and the **human gates** (candidate select, checkpoint collaboration,
+  upstream-PR submit, `main` merge) mean it's never fully hands-off. So `compose up` brings up the **autonomous CPU
+  spine**; MI250 + the human stay out-of-band.
+- **Why / value:** one reproducible command beats a pile of tmux sessions + manual CLIs — the concrete form of M4's
+  "always-on" deployment, and cleaner to hand off / restart (also fixes the stale-dashboard problem, T5.15).
+- **Scope / effort:** M — compose/systemd units for orchestrator + dashboard + KB (+ gateway), secrets injected as
+  env (not baked), ssh keys mounted for MI250 dispatch.
+- **Depends on / risk:** **M4 orchestrator must exist first** (it's the thing being brought up); the KB backend
+  choice (Firestore vs Postgres) shapes the compose file; don't bake secrets/tokens into images.
+- **Status:** shaping — the deployment target; graduate as the **M4 deployment todo** (the concrete "T4.x package +
+  one-command bring-up" flagged earlier). Relates to T5.15 (dashboard as a managed service).
 
 > **Post-pipeline vision (owner's, sequenced).** These kick in *after* the full M0–M5 pipeline is complete and the
 > agent workflow is running. They're gated in order: keep the loop healthy → earn a merge track record →

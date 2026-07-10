@@ -9,6 +9,9 @@
 - Append an entry under **## Backlog**. **Order is priority** — highest at the top; reorder freely.
 - Keep each entry **concrete**: a specific PR-worthy target on a specific repo, with a rationale and evidence links
   (not a system-capability idea — those go in `docs/IDEAS.md`).
+- Optionally add **`steps:`** — an ordered playbook the agent should follow ("check this, then try that, and if it
+  fails, look at X"). The agent treats it as the plan skeleton and **syncs with you at checkpoints** as it goes
+  (`docs/IDEAS.md` → "Checkpointed human–agent collaboration").
 - Update `status:` as it moves. Still gated: **feasibility on MI250 + novelty + the mandatory human PR gate** all
   still apply — an infeasible directed idea must *surface* that, never silently fail.
 
@@ -19,7 +22,8 @@
 - status: idea | scoping | in-progress | draft-ready | done | dropped
 - why: <one-line rationale>
 - evidence: <links>
-- notes: <optional — repro steps, blockers, dependencies>
+- steps: <optional — ordered directives the agent should follow, synced at checkpoints>
+- notes: <optional — blockers, dependencies>
 ```
 
 ## Backlog
@@ -32,6 +36,15 @@
   unverified**. Our MI250 is the only way to check — an error or a slowdown vs `--model-impl vllm` is the
   contribution.
 - evidence: https://huggingface.co/blog/native-speed-vllm-transformers-backend · https://github.com/vllm-project/vllm/pull/47187
+- steps:
+  1. stand up / reuse a vLLM ROCm env on a MI250 node (a standing `vllm-forager` container exists on `mi250-052`;
+     else the prebuilt `rocm/vllm` docker image, or build `PYTORCH_ROCM_ARCH=gfx90a`, ROCm 6.3+). **[approach
+     checkpoint — sync before spending GPU time]**
+  2. smoke-test `vllm serve Qwen/Qwen3-4B --model-impl transformers` — does it start and serve at all?
+  3. compare against `--model-impl vllm`: correctness + tokens/s (single, prefill, and **concurrent/batched**).
+  4. if it errors or is slower, check the attention backend on gfx90a and whether the fused kernels fell back to
+     unfused. **[mid-experiment checkpoint — report findings before proposing a fix]**
+  5. propose fix direction(s) → sync → implement → verify on MI250 → fork + PR draft (human submits upstream).
 - notes: **2026-07-09 smoke-test done** — full writeup + repro script:
   `docs/research/transformers-backend-mi250-repro.md`. Env existed already (`mi250-052`'s standing `vllm-forager`
   container, vLLM `0.23.1rc1.dev788`, ROCm/HIP `7.2`). Qwen3-4B, single GCD. Findings: no crash, numerically
@@ -52,5 +65,8 @@
   LoRA × transformers-backend × ROCm intersection is unchecked on gfx90a — a natural, unclaimed opening on the
   hardware we hold.
 - evidence: https://github.com/vllm-project/vllm/pull/47832 · https://github.com/vllm-project/vllm/pull/47187
-- notes: same MI250 vLLM-env dependency as the entry above; run a small model + a LoRA adapter under
-  `--model-impl transformers` and compare against the native path.
+- steps:
+  1. reuse the MI250 vLLM env from the entry above.
+  2. load a small model + a LoRA adapter under `--model-impl transformers`; exercise it (including streaming).
+  3. compare against the native path; capture any error or parity gap. **[checkpoint before fixing]**
+- notes: same MI250 vLLM-env dependency as the entry above.
