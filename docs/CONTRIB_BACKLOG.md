@@ -60,7 +60,7 @@
 
 ### Verify + fix LoRA × `--model-impl transformers` on MI250 (ROCm)
 - target: vllm-project/vllm
-- status: idea
+- status: scoping
 - why: both the feature (#47187) and its LoRA-compat fix (#47832) were **CUDA-only validated**; the
   LoRA × transformers-backend × ROCm intersection is unchecked on gfx90a — a natural, unclaimed opening on the
   hardware we hold.
@@ -70,3 +70,25 @@
   2. load a small model + a LoRA adapter under `--model-impl transformers`; exercise it (including streaming).
   3. compare against the native path; capture any error or parity gap. **[checkpoint before fixing]**
 - notes: same MI250 vLLM-env dependency as the entry above.
+
+### Fix the AOT compile-cache pickle failure in the Transformers backend
+- target: vllm-project/vllm
+- status: idea
+- why: `--model-impl transformers` fails to save the torch.compile AOT cache on **every** startup —
+  `save_aot_compiled_function` (`vllm/compilation/decorators.py:707-715`) can't pickle the compiled `forward`
+  because the backend dynamically composes the decoder class (`decoder_cls = type(model.get_decoder())`,
+  `vllm/model_executor/models/transformers/base.py:232`), so the compiled `forward`'s object identity differs from
+  `transformers`' own `Qwen3Model.forward` and trips pickle's same-object check. Non-fatal, but costs **~26s of
+  repeated `torch.compile` on every restart**. Likely **NOT ROCm-specific** → broad-impact, small, self-contained
+  fix with high merge-probability (a good first upstream PR). Found as a side effect of the parity smoke-test above.
+- evidence: docs/research/transformers-backend-mi250-repro.md (§4) · https://github.com/vllm-project/vllm/pull/47187
+- steps:
+  1. reproduce the warning (already observed on MI250) and — ideally — confirm on a CUDA host whether it's
+     platform-general (the repro doc left this unconfirmed; a maintainer can also confirm). **[approach checkpoint]**
+  2. pin the object-identity mismatch: the dynamically-composed decoder class's `forward` vs
+     `transformers.models.*.modeling_*.<Model>.forward`.
+  3. decide the fix direction with maintainer input (it's their compile infra): key the AOT cache off a stable
+     identity, or skip caching gracefully for dynamically-composed classes. **[fix-direction checkpoint]**
+  4. verify the cache saves and the ~26s recompile disappears, no regression → fork + PR draft (human submits).
+- notes: independent of the 13% concurrency gap (entry 1) — smaller and likely quicker to merge; surface as its
+  own issue/PR.
