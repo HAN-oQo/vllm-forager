@@ -59,7 +59,7 @@ python3 bench.py 8002 transformers_impl
 | 결정론적 출력 (`"The capital of France is"`, 32 tok) | `" Paris. The capital of Germany is Berlin..."` | **byte-for-byte 동일** | 없음 — 수치적으로 동등 |
 | 단일 요청, 256 tok | 2.140s (119.6 tok/s) | 2.215s (115.6 tok/s) | **-3.3%** (오차범위 근접) |
 | 동시 16개 요청, 각 200 tok (합산 처리량) | 2.735s wall, **1170.2 tok/s** | 3.146s wall, **1017.0 tok/s** | **-13.1%** (측정 가능한 실제 격차) |
-| 장문 prefill (1561 prompt tok, 32 decode) | 0.412s | 0.421s | -2.2% (오차범위 내) |
+| 장문 prefill (1561 prompt tok, 32 decode) | 0.412s | 0.421s | -2.3% (오차범위 내) |
 | CUDA/HIP Graphs 캡처 | — | PIECEWISE 51/51, FULL 35/35 모두 성공 | 가설 (b) **반박** — HIP Graphs 정상 동작 |
 | 서버 크래시/에러 | 없음 | 없음 | 가설 (a)/(d) 이 조합에서는 **미관측** |
 
