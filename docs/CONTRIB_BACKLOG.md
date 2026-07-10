@@ -157,16 +157,27 @@
   4. **Verification (MI250, DeepSeek-V3-Lite):** serves successfully under `--model-impl transformers` (no
      crash). Correctness matches `--model-impl vllm` exactly (both return empty output for the deterministic
      prompt — a property of this specific degenerate "lite" test checkpoint, confirmed identical on both paths,
-     not a backend difference). Throughput vs native (absorbed-latent MLA): single-request -11.8%, 16-way
-     concurrent -8.1%, long-context prefill **-613% (7.1x slower)** — the large prefill regression is expected:
-     MLA's compression exists specifically to cut attention FLOPs/KV-cache memory for long sequences, and this
-     naive/decompressed fallback can't benefit from that at all. **This is a correctness fix (crash → working),
-     not a performance one.** **[done]**
+     not a backend difference). **Throughput — corrected after an initial measurement error** (first pass
+     compared a cold-start prefill call, including one-time torch.compile/cudagraph-capture cost for that
+     prompt length, against what happened to be a warm call on the other backend — reported as "-613%/7.1x
+     slower"; re-measured with `bench.py` fixed to call `long_prefill` twice and report both): single-request
+     **-11.8%**, 16-way concurrent **-8.0%** (both reproduce consistently across two independent runs) — but
+     long-context prefill is **+2.4% (cold, i.e. noise) / -12.9% (warm/steady-state, i.e. transformers is
+     slightly *faster*)**. MLA's compression exists to cut attention FLOPs/KV-cache memory for long sequences,
+     but that advantage did not show up at this prompt length/model size in this measurement — untested at
+     larger scale. **This is a correctness fix (crash → working); the performance picture is a modest,
+     consistent regression for single/concurrent decode and roughly a wash for prefill, not the large
+     regression first reported.** **[done, corrected]**
   5. **Remaining before a real PR:** confirm the same fix works for other MLA architectures (DeepSeek-V2, Kimi-K2,
-     etc. — same model-type whitelist `is_deepseek_mla` already checks); write a unit test (ideally one that
-     doesn't need a full model load — construct the shape mismatch directly); fork + PR draft (human submits
-     upstream) — frame as a general Transformers-backend/MLA fix, not ROCm-specific, and be upfront in the PR
-     that it trades a crash for correct-but-slow rather than claiming a performance win.
+     etc. — same model-type whitelist `is_deepseek_mla` already checks); test at larger model size / longer
+     context (this run used a small "lite" checkpoint and one prefill length — MLA's compression benefit may
+     show up more at scale); write a unit test (ideally one that doesn't need a full model load — construct the
+     shape mismatch directly); fork + PR draft (human submits upstream) — frame as a general
+     Transformers-backend/MLA fix, not ROCm-specific.
+  - **Benchmarking lesson (apply going forward):** always distinguish cold (first call, may include
+    compile/cudagraph-capture cost for a new shape) from warm (repeated call, steady-state) when timing a test
+    that varies by prompt/sequence length — a single call risks silently comparing cold-vs-warm across two
+    different runs.
 - notes: full investigation, two failed attempts, and the working fix are all documented in
   `docs/research/mla-transformers-backend-fix-mi250.md` — written this way deliberately (including the dead
   ends) so a future session or reviewer doesn't have to re-discover why `head_size_v` alone doesn't work.
