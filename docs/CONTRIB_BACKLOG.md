@@ -212,6 +212,13 @@
        long-prefill warm **-11.9% (patched faster)**, long-prefill cold +20.4% (noise).
      - **Speed — full 236B (TP=8, matched 768 ctx / 0.95 gpu-mem-util on both sides for fairness):**
        single-request -11.1%, 8-way concurrent -7.9% (patched slower on both, at this scale).
+     - **⚠️ Correction (2026-07-10, later same day): profiling found most of this single-request slowdown is
+       NOT caused by this fix.** See the separate "Fix MoE router softmax/topk torch.compile fusion gap" entry
+       below and `docs/research/mla-transformers-backend-perf-profiling-mi250.md` — the actual attention kernel
+       (`kernel_paged_attention_2d`) costs are ~identical between native and patched (-1.2%, noise); at least 58%
+       of the measured gap traces to an unrelated MoE-router fusion issue that would affect any MoE model under
+       `--model-impl transformers`, MLA or not. **This MLA fix itself is closer to "correct and essentially free"
+       than "correct but ~12% slower" — the KV-cache memory tradeoff above is still the real cost.**
      - **⚠️ New finding, only visible at 236B scale: KV-cache memory.** Native started fine at its defaults
        (`--max-model-len 4096`, `gpu_memory_utilization=0.9`). Patched **could not start at those settings** —
        had to shrink to `--max-model-len 768` + `--gpu-memory-utilization 0.95` just to fit. Root cause: the
@@ -248,6 +255,47 @@
   CUDA-graph/branching root cause — is documented in `docs/research/mla-transformers-backend-fix-mi250.md`,
   written deliberately to include the dead ends so a future session or reviewer doesn't have to re-discover any
   of this.
+
+### Fix MoE router softmax/topk torch.compile fusion gap in the Transformers backend
+- target: vllm-project/vllm
+- status: scoping — root-caused via profiling, no fix attempted yet
+- why: profiling the MLA fix's -11~15% single-request slowdown (above entry) to find its source revealed the
+  slowdown is **not from the MLA fix at all**. `kernel_paged_attention_2d` (the actual attention compute) costs
+  are nearly identical between native and patched (226.28ms vs 223.62ms, -1.2%, noise) — ruling out the pad/slice
+  fix. The real, dominant cause: the MoE router's softmax+top-k gating computation compiles into one large,
+  unfused Triton kernel under `--model-impl transformers` (466ms) vs two small, fused kernels under native
+  (50+43=93ms) — a **373ms** difference, **58% of the entire ~641ms per-request CUDA-time gap** measured. This
+  is unrelated to MLA specifically; any MoE model run through `--model-impl transformers` likely hits it
+  (untested on a non-MLA MoE model so far — good next step).
+- evidence: `docs/research/mla-transformers-backend-perf-profiling-mi250.md` (full profiling methodology,
+  kernel-level diff, code-level root cause), raw profiler tables
+  `docs/research/logs/2026-07-10-mla-fix-mi250/perf-profiling/`.
+- steps:
+  1. Profiled native (own naive fallback, zero patch) vs patched (Transformers backend) side by side on the
+     same GPU/port (sequential, not concurrent — avoids MI250 GCD-to-GCD variance) using vLLM's built-in
+     `--profiler-config '{"profiler": "torch", ...}'` + `/start_profile`/`/stop_profile` endpoints. **[done]**
+  2. Kernel-level diff of the two `key_averages()` tables found the router-softmax kernel
+     (`triton_per_fused__softmax_exp_prepare_softmax_online...`, 466ms, patched-only) vs its native equivalent,
+     split into two smaller fused kernels (`triton_red_fused__softmax_exp_max_prepare_softmax_on...` 50ms +
+     `triton_poi_fused__softmax__to_copy_arange_bitwise_no...` 43ms). Confirmed `torch.topk` itself
+     (`warpMergeSortTopK`) is not the problem — patched is actually *cheaper* there (93.5ms vs 143.6ms). **[done]**
+  3. Traced the code-level cause: the router (`DeepseekV2TopkRouter.forward()` in the `transformers` library
+     itself — `scores = router_logits.softmax(dim=-1, dtype=torch.float32)`) runs as plain HF Python code,
+     traced/compiled by dynamo like any other op. By contrast, the experts' FFN forward in this same file
+     (`vllm/model_executor/models/transformers/moe.py`, `TransformersMoERunner.forward`) is **already** wrapped
+     in a custom op (`torch.ops.vllm.transformers_moe_forward`) specifically so it isn't disturbed by
+     cudagraph/dynamo — the router never got the same treatment. **[done]**
+  4. **Not yet attempted:** wrap the router's softmax+top-k in its own custom op (mirroring the existing
+     `transformers_moe_forward` pattern) so vLLM can substitute a tuned kernel instead of relying on inductor to
+     fuse HF's generic code well; narrow down the exact fusion blocker (fp32 upcast? `sorted=False`? the
+     `topk_method` branch?) via `TORCH_LOGS=inductor`/comparing generated Triton source directly; verify this
+     reproduces on a non-MLA MoE model (Mixtral, Qwen-MoE) to confirm it's a general MoE issue, not MLA-specific;
+     consider whether the fusion heuristic gap belongs in `pytorch/pytorch` (inductor) rather than vLLM.
+- notes: **this is a separate, larger finding from the MLA correctness fix above — do not bundle into that PR.**
+  ~42% of the total gap remains unaccounted for by name-matched kernels (inductor's anonymous
+  `triton_poi_fused_N`/`triton_red_fused_N` fusion-group numbering shifts between two different compiled graphs,
+  so a naive by-name diff can't safely attribute it) — likely a ripple effect of the same root cause on
+  neighboring ops, not confirmed.
 
 ### Fix (or upstream) the AOT-compile-cache pickle failure in the Transformers backend
 - target: vllm-project/vllm (possibly pytorch/pytorch, depending on where the real fix belongs)
