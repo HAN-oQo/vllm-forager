@@ -28,7 +28,13 @@ repos:
         entry: mypy --cache-dir=/dev/null
         language: system
         types: [python]
-        exclude: ^tests/
+        # docs/research/logs/ holds one-off archived bench scripts from separate MI250
+        # experiments, several coincidentally named bench.py -- mypy is given an explicit
+        # file list here (not a directory walk), so its own `exclude` config is ignored;
+        # excluding at the hook level is what actually works. Without this, two same-named
+        # files in different dated log dirs trip mypy's "Duplicate module" error -- flakily,
+        # since mypy's collision check depends on file-scan order (passed here, not observed).
+        exclude: ^(tests/|docs/research/logs/)
       - id: repos-md-sync
         name: sync docs/PLAN.md tracked-repos block (T3.18)
         # Same auto-fix-then-fail convention as black/ruff above: rewrites the block in place
