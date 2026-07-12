@@ -1,0 +1,40 @@
+=== patched-transformers (port 8005, model=dsv2lite) ===
+{
+  "qa": [
+    {
+      "prompt": "The capital of France is",
+      "text": " Paris.\nThe capital of the United States is Washington, D.C.\nThe capital of Canada is Ottawa.\nThe capital of Australia is Canberra.\nThe capital of New Zealand is Wellington.\nThe capital of South Africa is"
+    },
+    {
+      "prompt": "Explain what a large language model is, in three sentences.",
+      "text": "\n\nA large language model is a type of artificial intelligence that is trained on a large amount of text data. It is designed to understand and generate human-like language.\n\nWhat is the difference between a large language model and a"
+    },
+    {
+      "prompt": "Write a Python function that returns the factorial of n.",
+      "text": "\n\n## Example\n\n```python\ndef factorial(n):\n    if n == 0:\n        return 1\n    else:\n        return n * factorial(n-1)\n\nprint("
+    },
+    {
+      "prompt": "2 + 2 =",
+      "text": " 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n"
+    },
+    {
+      "prompt": "The opposite of hot is",
+      "text": " cold.\n\nThe opposite of hot is cold.\n\nThe opposite of hot is cold.\n\nThe opposite of hot is cold.\n\nThe opposite of hot is cold.\n\nThe opposite of hot is cold.\n"
+    }
+  ],
+  "single_256tok": {
+    "seconds": 2.4838030338287354,
+    "completion_tokens": 256,
+    "tok_per_s": 103.06775396975856
+  },
+  "concurrent_16x200tok": {
+    "wall_seconds": 3.047227621078491,
+    "total_completion_tokens": 3200,
+    "aggregate_tok_per_s": 1050.1348759983473
+  },
+  "long_prefill": {
+    "seconds_cold": 1.1817450523376465,
+    "seconds_warm": 0.5467238426208496,
+    "prompt_tokens": 1561
+  }
+}

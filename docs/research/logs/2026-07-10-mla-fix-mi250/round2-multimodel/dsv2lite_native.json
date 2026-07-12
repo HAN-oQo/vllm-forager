@@ -1,0 +1,40 @@
+=== native-vllm-mla (port 8006, model=dsv2lite) ===
+{
+  "qa": [
+    {
+      "prompt": "The capital of France is",
+      "text": " Paris.\nThe currency of France is the Euro.\nThe languages spoken in France are French and Occitan.\nThe capital of France is Paris.\nThe currency of France is the Euro.\nThe languages spoken in France are French"
+    },
+    {
+      "prompt": "Explain what a large language model is, in three sentences.",
+      "text": "\n\nA large language model is a type of artificial intelligence that can generate human-like text. It is trained on a large amount of data, and can be used for a variety of tasks, such as answering questions, generating text,"
+    },
+    {
+      "prompt": "Write a Python function that returns the factorial of n.",
+      "text": "\n\nExample:\n\nfactorial(5) = 5 * 4 * 3 * 2 * 1 = 120\n\n\"\"\"\n\n\ndef factorial(n):\n    if n =="
+    },
+    {
+      "prompt": "2 + 2 =",
+      "text": " 0\n\nx2 + 2x + 1 = 0\n\n(x + 1)2 = 0\n\nx + 1 = 0\n\nx = -1\n\nx = -"
+    },
+    {
+      "prompt": "The opposite of hot is",
+      "text": " cold.\n\nThe opposite of cold is hot.\n\nThe opposite of hot is cold.\n\nThe opposite of cold is hot.\n\nThe opposite of hot is cold.\n\nThe opposite of cold is hot.\n"
+    }
+  ],
+  "single_256tok": {
+    "seconds": 2.117230176925659,
+    "completion_tokens": 256,
+    "tok_per_s": 120.91269186977432
+  },
+  "concurrent_16x200tok": {
+    "wall_seconds": 3.517536163330078,
+    "total_completion_tokens": 3200,
+    "aggregate_tok_per_s": 909.7276762523845
+  },
+  "long_prefill": {
+    "seconds_cold": 0.9821081161499023,
+    "seconds_warm": 0.6211867332458496,
+    "prompt_tokens": 1561
+  }
+}
