@@ -121,14 +121,20 @@
 
 ### Fix DeepSeek-V3 (MLA) shape crash in the Transformers-backend
 - target: vllm-project/vllm
-- status: draft-ready
+- status: draft-ready — correctness + speed re-verified on two real (non-degenerate) checkpoints, default
+  (compiled) execution; not yet pushed to the fork or opened as a PR (human will run + submit — see step 8)
 - why: `--model-impl transformers` crashed on any MLA-architecture model (confirmed: DeepSeek-V3-Lite) during
   torch.compile fake-tensor tracing, before any hardware kernel runs — reproduces independent of ROCm (pure
-  Python shape logic). **Now fixed and verified working on MI250** — see notes.
+  Python shape logic). **Now fixed and verified working on MI250** — see notes. Three bugs total, found and
+  fixed in sequence: the original shape crash (steps 1-3), a silent head-scrambling bug found only when testing
+  a real trained model instead of a degenerate test checkpoint (step 5), and a CUDA-graph-specific correctness
+  bug found only under default (non-eager) execution (step 6).
 - evidence: `docs/research/mla-transformers-backend-fix-mi250.md` (full writeup: root cause, two failed
-  attempts, the working fix, correctness+speed verification), raw logs
-  `docs/research/logs/2026-07-10-mla-fix-mi250/` (numbered: `01`/`02` = failed attempts, `03` = working fix).
-  Fork branch (WIP, not yet a PR): `HAN-oQo/vllm@wip/mla-transformers-backend-head-size-v`.
+  attempts, the working fix, the num_kv_heads bug, the CUDA-graph root cause, multi-model re-verification), raw
+  logs `docs/research/logs/2026-07-10-mla-fix-mi250/` (numbered `01`/`02` = failed attempts, `03` = working fix;
+  `round2-multimodel/` = final re-verification on DeepSeek-V2-Lite + DeepSeek-V2 full).
+  Fork branch (WIP, not yet a PR, not yet pushed with the latest fixes):
+  `HAN-oQo/vllm@wip/mla-transformers-backend-head-size-v`.
 - steps:
   1. traced the actual mechanism (source-level): every model funnels through ONE function,
      `ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward`
@@ -168,19 +174,80 @@
      larger scale. **This is a correctness fix (crash → working); the performance picture is a modest,
      consistent regression for single/concurrent decode and roughly a wash for prefill, not the large
      regression first reported.** **[done, corrected]**
-  5. **Remaining before a real PR:** confirm the same fix works for other MLA architectures (DeepSeek-V2, Kimi-K2,
-     etc. — same model-type whitelist `is_deepseek_mla` already checks); test at larger model size / longer
-     context (this run used a small "lite" checkpoint and one prefill length — MLA's compression benefit may
-     show up more at scale); write a unit test (ideally one that doesn't need a full model load — construct the
-     shape mismatch directly); fork + PR draft (human submits upstream) — frame as a general
-     Transformers-backend/MLA fix, not ROCm-specific.
+  5. **Second real bug, found testing DeepSeek-V2-Lite (a real trained model, not the degenerate 4-layer
+     V3-Lite): `num_kv_heads` was wrong.** `create_attention_instances` left `num_kv_heads =
+     get_num_kv_heads()`, which for any MLA model returns **1** (native's absorbed path is MQA-shaped once
+     latent-compressed). But this backend's `key`/`value` are HF's own already-decompressed tensors — `num_heads`
+     distinct heads, not 1. Passing 1 didn't crash; it silently scrambled head boundaries (garbled, not empty,
+     output). Fix: also set `num_kv_heads = num_heads` inside the same `is_deepseek_mla` block (native's naive
+     fallback already does this — `DeepseekV2Attention` constructs its `Attention` with
+     `num_kv_heads=self.num_local_heads`, i.e. equal to `num_heads`). **[done]**
+  6. **Third bug, the important one: correct in eager, still garbled under default (compiled) execution —
+     even with fixes #3+#5 both applied.** `--enforce-eager` gave the correct answer (`" Paris."`); the exact
+     same code under vLLM's default torch.compile+CUDA-graph path gave garbage
+     (`"h，\n\n\n\n\n\n\n\n\n\n-\n..."`). Bisected with `--compilation-config '{"cudagraph_mode": "NONE"}'`
+     (compile on, CUDA graph off): **correct** — this isolated the bug to CUDA-graph capture/replay specifically,
+     not dynamo/torch.compile tracing. Then ruled out "pad/slice is inherently unsafe under CUDA graphs" as the
+     cause: started vLLM's **own, unpatched** native naive fallback directly (`--model-impl vllm` +
+     `VLLM_MLA_DISABLE=1`, zero code changes of ours) under default CUDA graphs — it worked correctly. Same
+     pad/slice operations, same hardware, only difference: native's pad amount
+     (`self.qk_head_dim - self.v_head_dim`) is a fixed `__init__`-time Python int, applied **unconditionally**
+     every call, while our generic hook wrapped it in `if v_head_dim < head_size:` (needed so the hook is a
+     no-op for non-MLA models sharing the same function). Removed the branch — `F.pad` with zero padding and a
+     full-range slice are both no-ops when `v_head_dim == head_size`, so this changes nothing for non-MLA models
+     — and reran under full default compile+CUDA-graph: correct, reproducible across 3 repeats and under 4
+     concurrent requests (different batch-size CUDA-graph buckets). **Root cause: a Python-level data-dependent
+     branch around a tensor-allocating op (`F.pad`), even one that always resolves the same way for a given
+     layer, produces incorrect output on CUDA-graph replay; an unconditional allocation of the same op does not.**
+     **[done — root-caused and fixed]**
+  7. **Re-verified with the final code on two real (non-degenerate) checkpoints, correctness + speed, default
+     (compiled) execution.** DeepSeek-V2-Lite (16B, TP=1) and DeepSeek-V2 full (236B MoE, TP=8), native
+     (`--model-impl vllm`) vs patched (`--model-impl transformers`) side by side. Full writeup:
+     `docs/research/mla-transformers-backend-fix-mi250.md` §9; raw results + bench scripts:
+     `docs/research/logs/2026-07-10-mla-fix-mi250/round2-multimodel/`.
+     - **Correctness:** 5 varied prompts (factual, explanation, code-gen, arithmetic, antonym) on both
+       checkpoints — both backends produce coherent, sensible answers on both sizes (not just "no crash" or
+       "empty string match" — actual answer quality, matching or exceeding native on some prompts). **[done]**
+     - **Speed — lite (TP=1, 4096 ctx):** single-request -14.7%, 16-way concurrent **+15.4% (patched faster)**,
+       long-prefill warm **-11.9% (patched faster)**, long-prefill cold +20.4% (noise).
+     - **Speed — full 236B (TP=8, matched 768 ctx / 0.95 gpu-mem-util on both sides for fairness):**
+       single-request -11.1%, 8-way concurrent -7.9% (patched slower on both, at this scale).
+     - **⚠️ New finding, only visible at 236B scale: KV-cache memory.** Native started fine at its defaults
+       (`--max-model-len 4096`, `gpu_memory_utilization=0.9`). Patched **could not start at those settings** —
+       had to shrink to `--max-model-len 768` + `--gpu-memory-utilization 0.95` just to fit. Root cause: the
+       naive fallback stores K and V uniformly at `head_size=192` (`2 × num_heads(16) × 192 = 6144`/token),
+       vs native's single compressed latent (`kv_lora_rank+qk_rope_head_dim=576`/token) — **patched uses ~10.7×
+       more KV-cache memory per token.** Invisible on the small "lite" checkpoint; on a model where weights
+       alone dominate GPU memory, it directly caps the maximum servable context length (4096 vs 768 in this
+       test). **This must be stated explicitly in the PR** — the fix is "crash → correct", not "on par with
+       native," especially for long-context or memory-constrained deployments.
+     - **Attempted, deferred:** Kimi-K2 (`moonshotai/Kimi-K2.5`/`.6`) confirmed via `config.json`
+       (`kv_lora_rank`/`qk_nope_head_dim`/`qk_rope_head_dim`/`v_head_dim`) to be the same MLA architecture
+       family — but the checkpoint is 555GB, exceeding this node's ~549GB total 8×MI250 VRAM even before
+       KV-cache/activations. Needs a bigger node or a quantized checkpoint; not attempted this session.
+  8. **Remaining before a real PR:** unit test (ideally no full model load — construct the shape mismatch
+     directly, and ideally one that exercises full CUDA-graph capture so a regression on the
+     branch-vs-unconditional distinction would be caught); push the final code to the fork branch (currently
+     only local); PR draft (human submits upstream) — frame as a general Transformers-backend/MLA fix, not
+     ROCm-specific, **explicitly disclosing the KV-cache memory tradeoff from step 7**; consider whether it's
+     worth flagging the general pattern ("branching around a CUDA-graph region is unsafe even when the branch is
+     call-invariant") as a separate, standalone report — this repo's naive fallback happened to dodge it by luck
+     (never branches), but any other model code that *does* branch around an allocation inside a
+     `@support_torch_compile` region could hit the same bug silently.
   - **Benchmarking lesson (apply going forward):** always distinguish cold (first call, may include
     compile/cudagraph-capture cost for a new shape) from warm (repeated call, steady-state) when timing a test
     that varies by prompt/sequence length — a single call risks silently comparing cold-vs-warm across two
     different runs.
-- notes: full investigation, two failed attempts, and the working fix are all documented in
-  `docs/research/mla-transformers-backend-fix-mi250.md` — written this way deliberately (including the dead
-  ends) so a future session or reviewer doesn't have to re-discover why `head_size_v` alone doesn't work.
+  - **Correctness-testing lesson (apply going forward):** "no crash" and "matches the other backend" are not
+    "correct" — DeepSeek-V3-Lite's empty-output match on both backends looked like a passing correctness check
+    but was actually a degenerate 4-of-61-layer test checkpoint producing empty output regardless of backend.
+    Only testing DeepSeek-V2-Lite (a real, full-layer checkpoint) surfaced the num_kv_heads and CUDA-graph bugs.
+    Also: always test the default (compiled) execution path, not just `--enforce-eager` — eager-mode correctness
+    does not imply compiled-mode correctness.
+- notes: full investigation — two failed attempts, the pad/slice fix, the num_kv_heads bug, and the
+  CUDA-graph/branching root cause — is documented in `docs/research/mla-transformers-backend-fix-mi250.md`,
+  written deliberately to include the dead ends so a future session or reviewer doesn't have to re-discover any
+  of this.
 
 ### Fix (or upstream) the AOT-compile-cache pickle failure in the Transformers backend
 - target: vllm-project/vllm (possibly pytorch/pytorch, depending on where the real fix belongs)
