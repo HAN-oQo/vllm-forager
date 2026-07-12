@@ -119,28 +119,68 @@
   local checkpoint available); 70B-class dense FP8; LoRA combination (see entry below); actually attempting a
   fix for the MLA shape bug or the AOT-cache identity mismatch (see the two new entries below).
 
-### Fix DeepSeek-V3 (MLA) shape crash in the Transformers-backend Fuser
+### Fix DeepSeek-V3 (MLA) shape crash in the Transformers-backend
 - target: vllm-project/vllm
-- status: scoping
-- why: `--model-impl transformers` crashes on any MLA-architecture model (confirmed: DeepSeek-V3-Lite) during
-  torch.compile fake-tensor tracing, before any hardware kernel runs — likely reproduces on CUDA too, but it's a
-  real, currently-uncrashable path for an entire architecture family on our own MI250. A concrete, well-scoped
-  bug with a root cause already identified (see notes) — the strongest current candidate for an actual PR.
-- evidence: `docs/research/multi-model-transformers-backend-mi250-repro.md` §4 (§ "3" in that file) + raw log
-  `docs/research/logs/2026-07-10-multi-model-mi250/06-deepseek-v3-lite_transformers_impl_FAILED_shape_bug.log`
+- status: draft-ready
+- why: `--model-impl transformers` crashed on any MLA-architecture model (confirmed: DeepSeek-V3-Lite) during
+  torch.compile fake-tensor tracing, before any hardware kernel runs — reproduces independent of ROCm (pure
+  Python shape logic). **Now fixed and verified working on MI250** — see notes.
+- evidence: `docs/research/mla-transformers-backend-fix-mi250.md` (full writeup: root cause, two failed
+  attempts, the working fix, correctness+speed verification), raw logs
+  `docs/research/logs/2026-07-10-mla-fix-mi250/` (numbered: `01`/`02` = failed attempts, `03` = working fix).
+  Fork branch (WIP, not yet a PR): `HAN-oQo/vllm@wip/mla-transformers-backend-head-size-v`.
 - steps:
-  1. read `vllm/model_executor/models/transformers/moe.py`/`fuser.py`/`base.py`'s MLA-specific reshape logic and
-     find exactly where a `576`-per-head (compressed latent: `kv_lora_rank`+`qk_rope_head_dim`) view gets applied
-     to a tensor already shaped for `192`-per-head (decompressed: `qk_nope_head_dim`+`qk_rope_head_dim`).
-     **[checkpoint — confirm the exact faulty line before touching anything]**
-  2. write a minimal, MI250-independent repro (a unit test constructing the two tensor shapes directly, no full
-     model load) to isolate the bug from the rest of the serving stack.
-  3. propose + implement a fix on a fork branch; re-verify DeepSeek-V3-Lite serves correctly end-to-end on
-     MI250 under `--model-impl transformers` (correctness + no crash). **[checkpoint before fork-push]**
-  4. fork + PR draft (human submits upstream) — this one isn't ROCm-specific, so frame the PR as a general
-     Transformers-backend/MLA fix, not a ROCm-only patch.
-- notes: not yet attempted — this entry captures the root-cause analysis from the 2026-07-10 multi-model repro;
-  next session should start at step 1/2.
+  1. traced the actual mechanism (source-level): every model funnels through ONE function,
+     `ALL_ATTENTION_FUNCTIONS["vllm"] = vllm_attention_forward`
+     (`vllm/model_executor/models/transformers/__init__.py`), which calls a plain `Attention.forward(query, key,
+     value)` — never vLLM's native, compressed-latent `MLAAttention`. Confirmed by grepping the entire
+     `transformers/` package: `MLAAttention` is never imported or constructed anywhere in it (double-checked on
+     request — no mixin overrides `create_attention_instances` either). The crash: `create_attention_instances`
+     sizes that plain `Attention` with `get_head_size()`, which for MLA models returns the *compressed* latent
+     dim (576) — meant for the native absorbed path this backend never uses — while the actual `key`/`value` are
+     already decompressed by HF's own `kv_b_proj` at 192 (key) / 128 (value) per head. **[done]**
+  2. **First attempt (failed): `head_size_v`.** `Attention` already supports asymmetric Q/K vs V sizing via a
+     `head_size_v` constructor param — passing `head_size=192`/`head_size_v=128` fixed the *original* crash, but
+     surfaced a second one in KV-cache tensor allocation: `AttentionBackend.get_kv_cache_shape(num_blocks,
+     block_size, num_kv_heads, head_size)` — the interface *every* backend (ROCm, FlashAttention, FlashInfer,
+     CPU, ...) implements — takes one `head_size` with no `head_size_v` equivalent at all; native MLA sidesteps
+     this entirely because `MLACommonBackend.get_kv_cache_shape` caches only the compressed latent (no K/V slots
+     to be asymmetric between). Confirmed via two separate crashes (with and without `VLLM_MLA_DISABLE=1`) — see
+     logs `01`/`02`. **[done, ruled out]**
+  3. **Working fix: mirror vLLM's own native "naive" (`use_mla=False`) fallback exactly.**
+     `DeepseekV2Attention` (`vllm/model_executor/models/deepseek_v2.py:558-609`) already solves this identical
+     problem — no `head_size_v`, just pads V (128) up to Q/K's width (192) with zeros before calling `Attention`,
+     then slices the output back down to 128 afterward. Ported that exact pattern into the generic
+     `vllm_attention_forward` hook (pads whenever `value.shape[-1] < head_size`, a no-op for every non-MLA
+     model) and set `create_attention_instances`'s `head_size` to the decompressed dim directly (no
+     `head_size_v`). Two files changed, ~30 lines. **[done — verified on MI250]**
+  4. **Verification (MI250, DeepSeek-V3-Lite):** serves successfully under `--model-impl transformers` (no
+     crash). Correctness matches `--model-impl vllm` exactly (both return empty output for the deterministic
+     prompt — a property of this specific degenerate "lite" test checkpoint, confirmed identical on both paths,
+     not a backend difference). **Throughput — corrected after an initial measurement error** (first pass
+     compared a cold-start prefill call, including one-time torch.compile/cudagraph-capture cost for that
+     prompt length, against what happened to be a warm call on the other backend — reported as "-613%/7.1x
+     slower"; re-measured with `bench.py` fixed to call `long_prefill` twice and report both): single-request
+     **-11.8%**, 16-way concurrent **-8.0%** (both reproduce consistently across two independent runs) — but
+     long-context prefill is **+2.4% (cold, i.e. noise) / -12.9% (warm/steady-state, i.e. transformers is
+     slightly *faster*)**. MLA's compression exists to cut attention FLOPs/KV-cache memory for long sequences,
+     but that advantage did not show up at this prompt length/model size in this measurement — untested at
+     larger scale. **This is a correctness fix (crash → working); the performance picture is a modest,
+     consistent regression for single/concurrent decode and roughly a wash for prefill, not the large
+     regression first reported.** **[done, corrected]**
+  5. **Remaining before a real PR:** confirm the same fix works for other MLA architectures (DeepSeek-V2, Kimi-K2,
+     etc. — same model-type whitelist `is_deepseek_mla` already checks); test at larger model size / longer
+     context (this run used a small "lite" checkpoint and one prefill length — MLA's compression benefit may
+     show up more at scale); write a unit test (ideally one that doesn't need a full model load — construct the
+     shape mismatch directly); fork + PR draft (human submits upstream) — frame as a general
+     Transformers-backend/MLA fix, not ROCm-specific.
+  - **Benchmarking lesson (apply going forward):** always distinguish cold (first call, may include
+    compile/cudagraph-capture cost for a new shape) from warm (repeated call, steady-state) when timing a test
+    that varies by prompt/sequence length — a single call risks silently comparing cold-vs-warm across two
+    different runs.
+- notes: full investigation, two failed attempts, and the working fix are all documented in
+  `docs/research/mla-transformers-backend-fix-mi250.md` — written this way deliberately (including the dead
+  ends) so a future session or reviewer doesn't have to re-discover why `head_size_v` alone doesn't work.
 
 ### Fix (or upstream) the AOT-compile-cache pickle failure in the Transformers backend
 - target: vllm-project/vllm (possibly pytorch/pytorch, depending on where the real fix belongs)
