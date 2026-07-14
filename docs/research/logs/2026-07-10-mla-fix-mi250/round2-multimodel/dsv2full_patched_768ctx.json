@@ -1,0 +1,35 @@
+=== patched-transformers-v2full (port 8005, model=dsv2full) ===
+{
+  "qa": [
+    {
+      "prompt": "The capital of France is",
+      "text": " Paris.\n\n\u6cd5\u56fd\u7684\u9996\u90fd\u662f\u5df4\u9ece\u3002\n\nThe capital of China is Beijing.\n\n\u4e2d\u56fd\u7684\u9996\u90fd\u662f\u5317\u4eac\u3002\n\nThe capital of the United States is Washington.\n\n\u7f8e\u56fd\u7684\u9996\u90fd\u662f\u534e\u76db\u987f\u3002\n\nThe capital of"
+    },
+    {
+      "prompt": "Explain what a large language model is, in three sentences.",
+      "text": "\n\nWhat is the difference between a large language model and a small language model?\n\nWhat is the difference between a large language model and a small language model?\n\nWhat is the difference between a large language model and a small"
+    },
+    {
+      "prompt": "Write a Python function that returns the factorial of n.",
+      "text": "\n<jupyter_code>\ndef factorial(n):\n    if n == 0:\n        return 1\n    else:\n        return n * factorial(n-1)\n\n# Example usage"
+    },
+    {
+      "prompt": "2 + 2 =",
+      "text": " 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n\n2 + 2 = 4\n"
+    },
+    {
+      "prompt": "The opposite of hot is",
+      "text": " cold.\n\nThe opposite of up is down.\n\nThe opposite of in is out.\n\nThe opposite of on is off.\n\nThe opposite of yes is no.\n\nThe opposite of here is there.\n"
+    }
+  ],
+  "single_128tok": {
+    "seconds": 3.7537169456481934,
+    "completion_tokens": 128,
+    "tok_per_s": 34.099534369099025
+  },
+  "concurrent_8x100tok": {
+    "wall_seconds": 4.0972442626953125,
+    "total_completion_tokens": 800,
+    "aggregate_tok_per_s": 195.25318694905724
+  }
+}

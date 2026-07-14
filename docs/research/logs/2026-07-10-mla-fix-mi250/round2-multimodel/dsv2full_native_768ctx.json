@@ -1,0 +1,35 @@
+=== native-vllm-mla-v2full-fair (port 8006, model=dsv2full) ===
+{
+  "qa": [
+    {
+      "prompt": "The capital of France is",
+      "text": " Paris.\n\nThe capital of Germany is Berlin.\n\nThe capital of Italy is Rome.\n\nThe capital of Spain is Madrid.\n\nThe capital of Portugal is Lisbon.\n\nThe capital of Greece is Athens.\n"
+    },
+    {
+      "prompt": "Explain what a large language model is, in three sentences.",
+      "text": "\n\nA large language model is a type of artificial intelligence that uses deep learning to generate human-like text. It is trained on a massive amount of data and can be used for a variety of natural language processing tasks, such as language"
+    },
+    {
+      "prompt": "Write a Python function that returns the factorial of n.",
+      "text": "\n\ndef factorial(n):\n    if n == 0:\n        return 1\n    else:\n        return n * factorial(n-1)\n\n# 2. Write a Python function that"
+    },
+    {
+      "prompt": "2 + 2 =",
+      "text": " 4\n\n2 + 2 + 2 = 6\n\n2 + 2 + 2 + 2 = 8\n\n2 + 2 + 2 + 2 + 2 = 10"
+    },
+    {
+      "prompt": "The opposite of hot is",
+      "text": " cold.\n\nThe opposite of up is down.\n\nThe opposite of in is out.\n\nThe opposite of on is off.\n\nThe opposite of over is under.\n\nThe opposite of under is over.\n"
+    }
+  ],
+  "single_128tok": {
+    "seconds": 3.336550235748291,
+    "completion_tokens": 128,
+    "tok_per_s": 38.36297701397963
+  },
+  "concurrent_8x100tok": {
+    "wall_seconds": 3.7744150161743164,
+    "total_completion_tokens": 800,
+    "aggregate_tok_per_s": 211.95337464793857
+  }
+}
